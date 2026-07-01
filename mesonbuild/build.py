@@ -1750,11 +1750,17 @@ class BuildTarget(Target):
         # Detection is by extension only (never by reading contents): a source
         # with a C++ module-interface suffix marks the target as a module
         # provider. This is a hint for "scan/compile-as-module", not the source
-        # of module *names* (those come from the build-time scan).
+        # of module *names* (those come from the build-time scan). Generated
+        # module interfaces count too -- their declared output names are
+        # known at configure time even though their module names are not.
         for s in self.get_sources():
             suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()
             if suffix in {'cppm', 'ixx'}:
                 return True
+        for gen in self.get_generated_sources():
+            for out in gen.get_outputs():
+                if out.rsplit('.', 1)[-1].lower() in {'cppm', 'ixx'}:
+                    return True
         return False
 
     def provides_cpp_modules(self) -> bool:

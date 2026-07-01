@@ -1345,7 +1345,9 @@ class NinjaBackend(backends.Backend):
         return objfile + '.ddi'
 
     def generate_cpp_module_scan(self, target: build.BuildTarget, compiler: Compiler,
-                                 rel_src: str, rel_obj: str, commands: 'CompilerArgs') -> None:
+                                 rel_src: str, rel_obj: str, commands: 'CompilerArgs',
+                                 header_deps: T.Optional[T.List[FileOrString]] = None,
+                                 order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None) -> None:
         if not self.target_uses_p1689_cpp_modules_edge(target, compiler):
             return
         ddi = self.get_ddi_file_for(rel_obj)
@@ -1355,6 +1357,13 @@ class NinjaBackend(backends.Backend):
         elem.add_item('ARGS', commands)
         elem.add_item('OBJ', rel_obj)
         elem.add_item('DEPFILE', depfile)
+        # The scan preprocesses the source, so anything the compile needs to
+        # exist first must exist for the scan too: generated headers (e.g. a
+        # configure_file / custom_target output the source #includes) and other
+        # order-only inputs -- otherwise the scanner errors on a missing
+        # generated header.
+        self.add_header_deps(target, elem, header_deps or [])
+        elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
         self.add_build(elem)
 
     def generate_p1689_module_collate_target(self, target: build.BuildTarget,
@@ -3577,7 +3586,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_build(element)
         # Emit the P1689 scan edge for GCC module targets, reusing the
         # exact compile args so scan and compile see the same dialect.
-        self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands)
+        self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
+                                      header_deps=header_deps, order_deps=order_deps)
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))

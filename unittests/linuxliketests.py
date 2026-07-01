@@ -821,7 +821,7 @@ class LinuxlikeTests(BasePlatformTests):
         # BMIs land in a single shared cache at the build root, named by
         # the documented GCC scheme incl. partition ':' -> '-'.
         gcm = os.path.join(self.builddir, 'gcm.cache')
-        for bmi in ('modlib.gcm', 'pkg.gcm', 'pkg-part.gcm', 'kwmod.gcm'):
+        for bmi in ('modlib.gcm', 'pkg.gcm', 'pkg-part.gcm', 'kwmod.gcm', 'genmod.gcm'):
             self.assertTrue(os.path.isfile(os.path.join(gcm, bmi)), f'missing BMI {bmi}')
         # No compile or scan command may name a module or a BMI path.
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
@@ -940,6 +940,23 @@ class LinuxlikeTests(BasePlatformTests):
         # depscan.json (never emitted by the P1689 pipeline) to depaccumulate,
         # so ninja failed on an input no rule produces. The Fortran main calls
         # into the modules-using C++ library, so a green run also proves interop.
+        self.init(testdir)
+        self.build()
+        self.run_tests()
+
+    def test_gcc_cpp_modules_generated_header(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '143 gcc cpp modules generated header')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # A module TU that #includes a build-time generated header must be able
+        # to *scan* -- the scan edge, not just the compile, has to wait for the
+        # generator, otherwise the scanner errors on the missing header.
         self.init(testdir)
         self.build()
         self.run_tests()
