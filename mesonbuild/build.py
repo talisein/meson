@@ -144,6 +144,7 @@ if T.TYPE_CHECKING:
         build_subdir: T.Optional[str]
         c_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
         cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
+        cpp_modules: bool
         d_debug: T.List[T.Union[str, int]]
         d_import_dirs: T.List[IncludeDirs]
         d_module_versions: T.List[T.Union[str, int]]
@@ -1092,6 +1093,7 @@ class BuildTarget(Target, BuildTargetProto):
             self.suffix = name_suffix
             self.name_suffix_set = True
         self.implicit_include_directories = kwargs.get('implicit_include_directories', True)
+        self.cpp_modules = kwargs.get('cpp_modules', False)
         self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')
         self.rust_dependency_map = kwargs.get('rust_dependency_map', {})
 
@@ -1851,6 +1853,60 @@ class BuildTarget(Target, BuildTargetProto):
 
     def uses_fortran(self) -> bool:
         return 'fortran' in self.compilers
+
+    def _has_cpp_module_source(self) -> bool:
+        # Detection is by extension only (never by reading contents): a source
+        # with a C++ module-interface suffix marks the target as a module
+        # provider. This is a hint for "scan/compile-as-module", not the source
+        # of module *names* (those come from the build-time scan).
+        for s in self.get_sources():
+            suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()
+            if suffix in {'cppm', 'ixx'}:
+                return True
+        return False
+
+    def provides_cpp_modules(self) -> bool:
+        """Whether this target may export C++ modules of its own.
+
+        True when the target is explicitly module-enabled (``cpp_modules``) or
+        carries a module-interface source. Used to propagate module-enablement
+        to consumers that merely link this target.
+        """
+        return 'cpp' in self.compilers and (self.cpp_modules or self._has_cpp_module_source())
+
+    def uses_cpp_modules(self) -> bool:
+        """Whether Meson must run the C++ module scan/collate machinery here.
+
+        A target is module-enabled when it provides modules itself, or when it
+        links (transitively) a target that does -- so a bare consumer such as a
+        ``main.cpp`` that does ``import foo;`` gets scanned and ordered without
+        any annotation, mirroring how linking a library is sufficient.
+        """
+        if 'cpp' not in self.compilers:
+            return False
+        if self.provides_cpp_modules():
+            return True
+        return any(t.provides_cpp_modules() for t in self._linked_build_targets())
+
+    def _linked_build_targets(self) -> T.Iterator[BuildTarget]:
+        """Every BuildTarget linked (transitively, link_whole included) into this one.
+
+        A link-graph-only walk usable at interpreter time; the backend's
+        get_all_linked_targets also follows object sources, which Build does
+        not know about.
+        """
+        seen: T.Set[BuildTarget] = set()
+        stack: T.Deque[BuildTargetProto] = deque()
+        stack.extendleft(self.link_targets)
+        stack.extendleft(self.link_whole_targets)
+        while stack:
+            t = stack.pop()
+            if t in seen or not isinstance(t, BuildTarget):
+                continue
+            seen.add(t)
+            stack.extendleft(t.link_targets)
+            stack.extendleft(t.link_whole_targets)
+            yield t
 
     def uses_cython(self) -> bool:
         return 'cython' in self.compilers

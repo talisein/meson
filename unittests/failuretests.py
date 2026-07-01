@@ -154,6 +154,17 @@ class FailureTests(BasePlatformTests):
         for contents, match in a:
             self.assertMesonRaises(contents, match)
 
+    def test_cpp_modules_need_ninja_backend(self):
+        # A target that uses C++ modules must error clearly on a non-Ninja
+        # backend (the scan/dyndep pipeline is Ninja-only) rather than silently
+        # misbuilding.
+        with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
+            f.write('int main(void) { return 0; }\n')
+        self.assertMesonRaises(
+            "executable('prog', 'main.cpp', cpp_modules: true)",
+            'only supported with the Ninja backend',
+            extra_args=['--backend=vs2022'])
+
     def test_apple_frameworks_dependency(self):
         if not is_osx():
             raise unittest.SkipTest('only run on macOS')
