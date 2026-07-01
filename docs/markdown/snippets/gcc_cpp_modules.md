@@ -6,9 +6,13 @@ ordered through Ninja `dyndep`; compiled module interfaces live in a single shar
 `gcm.cache` at the build root, found by name like headers. No `-fmodule-file=`
 mappings or module names appear on any compile command line.
 
+Module interfaces produced at build time by a `generator()` or `custom_target`
+are supported: the scan runs after the source is generated, and the module name
+is discovered by that scan (only the output *filename* needs to be declared).
+
 A target is treated as module-enabled when it contains a module-interface source
-(`.cppm` / `.ixx`), when it links a target that provides modules, or when the new
-`cpp_modules` build-target keyword is set:
+(`.cppm` / `.ixx`, including a generated one), when it links a target that
+provides modules, or when the new `cpp_modules` build-target keyword is set:
 
 ```meson
 modlib = static_library('modlib', 'modlib.cppm')

@@ -19,3 +19,14 @@ test('pkgprog', pkgprog)
 kwlib = static_library('kwlib', 'kwmod.cppm')
 kwprog = executable('kwprog', 'kwmain.cpp', link_with: kwlib, cpp_modules: true)
 test('kwprog', kwprog)
+
+# Generated module interface: the .cppm is produced at build time; its
+# declared output name enables the module machinery, and its module name is
+# discovered by the build-time scan. Consumed across a target boundary.
+py = find_program('python3')
+genmod = custom_target('genmod',
+  output: 'genmod.cppm',
+  command: [py, files('gen_module.py'), '@OUTPUT@'])
+genlib = static_library('genlib', genmod)
+genprog = executable('genprog', 'genmain.cpp', link_with: genlib)
+test('genprog', genprog)
