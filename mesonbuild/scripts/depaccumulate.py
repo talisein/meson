@@ -7,6 +7,7 @@ See: https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2022/p1689r5.html
 """
 
 from __future__ import annotations
+import argparse
 import json
 import re
 import textwrap
@@ -113,7 +114,82 @@ def gen(outfile: str, desc: Description, extra_rules: T.List[Rule]) -> int:
     return 0
 
 
+def module_to_filename(name: str) -> str:
+    """Map a C++ module logical-name to its GCC BMI path.
+
+    GCC's documented, static scheme: gcm.cache/<name>.gcm at the build root,
+    with a partition separator ':' becoming '-'. Mirrors
+    GnuCPPCompiler.module_name_to_filename; kept here so the collator names BMIs
+    from logical-names alone -- GCC's P1689 output does not carry a
+    compiled-module-path.
+    """
+    return 'gcm.cache/' + name.replace(':', '-') + '.gcm'
+
+
+def run_p1689(argv: T.List[str]) -> int:
+    """Collate GCC P1689 scans into a dyndep + a provided-module map.
+
+    Consumes this target's per-source .ddi files and the provided-module maps of
+    its dependency targets, emitting a Ninja dyndep that orders each object
+    against the BMIs it requires/provides, plus this target's own map.
+    """
+    parser = argparse.ArgumentParser(prog='depaccumulate --p1689')
+    parser.add_argument('--dyndep', required=True, help='Output Ninja dyndep file.')
+    parser.add_argument('--provmap', required=True,
+                        help="Output provided-module map for this target.")
+    parser.add_argument('--dep-provmap', action='append', default=[],
+                        help='Provided-module map of a dependency target. Repeatable.')
+    parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
+    args = parser.parse_args(argv)
+
+    rules: T.List[Rule] = []
+    for ddi in args.ddis:
+        with open(ddi, encoding='utf-8') as f:
+            data: Description = json.load(f)
+        rules.extend(data.get('rules', []))
+
+    # name -> BMI path for everything resolvable here (local + linked deps).
+    resolvable: T.Dict[str, str] = {}
+    # name -> BMI path for what this target provides (the map we publish).
+    provided: T.Dict[str, str] = {}
+    for rule in rules:
+        for prov in rule.get('provides', []):
+            name = prov['logical-name']
+            modfile = module_to_filename(name)
+            provided[name] = modfile
+            resolvable[name] = modfile
+    for pmfile in args.dep_provmap:
+        with open(pmfile, encoding='utf-8') as f:
+            imported: T.Dict[str, str] = json.load(f)
+        resolvable.update(imported)
+
+    with open(args.dyndep, 'w', encoding='utf-8') as dd:
+        dd.write('ninja_dyndep_version = 1\n\n')
+        for rule in rules:
+            obj = rule['primary-output']
+            outs = [module_to_filename(p['logical-name']) for p in rule.get('provides', [])]
+            reqs: T.List[str] = []
+            for req in rule.get('requires', []):
+                modfile = resolvable.get(req['logical-name'])
+                # An unresolved require is left un-ordered here: it is either a
+                # compiler-/stdlib-provided module (e.g. std) or a diagnostic
+                # case handled elsewhere. Hard-error diagnostics are FR10 (TODO).
+                if modfile is not None:
+                    reqs.append(modfile)
+            out = formatter(outs)
+            ins = formatter(reqs)
+            dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
+
+    with open(args.provmap, 'w', encoding='utf-8') as pm:
+        json.dump(provided, pm)
+
+    return 0
+
+
 def run(args: T.List[str]) -> int:
+    if args and args[0] == '--p1689':
+        return run_p1689(args[1:])
+
     assert len(args) >= 2, 'got wrong number of arguments!'
     outfile, jsonfile, *jsondeps = args
     with open(jsonfile, 'r', encoding='utf-8') as f:

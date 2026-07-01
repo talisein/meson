@@ -1529,6 +1529,12 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_cpp_modules_args(self) -> T.List[str]:
         return []
 
+    def supports_cpp_modules_p1689(self) -> bool:
+        # Whether this compiler+version drives Meson's P1689 C++ module
+        # pipeline (scan/collate, and header units). Compilers that only ship an
+        # older/regex-scannable modules mode, or none, return False.
+        return False
+
     @abc.abstractmethod
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         pass
@@ -1541,6 +1547,23 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
 
     def module_name_to_filename(self, module_name: str) -> str:
         raise EnvironmentException(f'{self.id} does not implement module_name_to_filename')
+
+    def get_module_compile_args(self) -> T.List[str]:
+        """Flags to compile a C++ translation unit in a module-enabled target.
+
+        Returns [] for compilers/targets that do not use the module pipeline.
+        """
+        return []
+
+    def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
+        """Args to make the compiler emit a P1689r5 dependency scan of a C++ TU.
+
+        ``outfile`` is the P1689 (.ddi) file to write, ``target`` is the object
+        the eventual compile will produce (so the dyndep can key on it), and
+        ``depfile`` is a Makefile-style header dependency file. Returns [] for
+        compilers that do not support P1689 module scanning.
+        """
+        return []
 
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
         """Arguments to pass the compiler and/or linker for checks.

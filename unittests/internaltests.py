@@ -93,6 +93,122 @@ class InternalTests(unittest.TestCase):
             OS name: "linux", version: "5.12.17", arch: "amd64", family: "unix"'''),
             '3.8.1')
 
+    def test_gcc_module_bmi_naming_lockstep(self):
+        # The GCC gcm.cache BMI path is derived independently by the compiler
+        # (GnuCPPCompiler.module_name_to_filename) and the collator
+        # (depaccumulate.module_to_filename); they must agree, and must use
+        # forward slashes on every platform (they feed ninja paths / dyndep).
+        from mesonbuild.compilers.cpp import GnuCPPCompiler
+        from mesonbuild.scripts.depaccumulate import module_to_filename
+        expected = {
+            'foo': 'gcm.cache/foo.gcm',
+            'pkg:part': 'gcm.cache/pkg-part.gcm',
+            'my.module': 'gcm.cache/my.module.gcm',
+        }
+        for name, want in expected.items():
+            # module_name_to_filename is pure (does not touch self).
+            compiler_side = GnuCPPCompiler.module_name_to_filename(None, name)
+            self.assertEqual(compiler_side, want)
+            self.assertEqual(compiler_side, module_to_filename(name))
+            self.assertNotIn('\\', compiler_side)
+
+    def test_depaccumulate_p1689_empty_ddis(self):
+        # A C++-module-enabled target can have zero compiled C++ TUs (e.g. only
+        # a C source plus a header, with cpp_modules: true), so the collate edge
+        # is emitted with no .ddi inputs. run_p1689 must accept that and publish
+        # an (empty) provided-module map rather than failing argument parsing.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        with tempfile.TemporaryDirectory() as d:
+            dyndep = os.path.join(d, 'out.dd')
+            provmap = os.path.join(d, 'provided-modules.json')
+            rc = run_p1689(['--dyndep', dyndep, '--provmap', provmap])
+            self.assertEqual(rc, 0)
+            with open(provmap, encoding='utf-8') as f:
+                self.assertEqual(json.load(f), {})
+            with open(dyndep, encoding='utf-8') as f:
+                self.assertIn('ninja_dyndep_version = 1', f.read())
+
+    def test_supports_cpp_modules_p1689(self):
+        # The P1689 pipeline (P1689 scan/collate, header units) needs GCC >= 14;
+        # an older but modules-capable GCC, or Clang, is gated out (module
+        # targets there fall back to the regex scan and header units are
+        # unsupported).
+        from mesonbuild.compilers.cpp import GnuCPPCompiler, ClangCPPCompiler
+
+        def gate(cls, version):
+            comp = cls.__new__(cls)
+            comp.version = version
+            return comp.supports_cpp_modules_p1689()
+
+        self.assertFalse(gate(GnuCPPCompiler, '13.2.0'))
+        self.assertTrue(gate(GnuCPPCompiler, '14.0.0'))
+        self.assertFalse(gate(ClangCPPCompiler, '18.0.0'))
+
+    def test_cpp_std_supports_modules(self):
+        # C++ modules need C++20+. The helper must accept c++20 and later in all
+        # spellings (c++/gnu++/vc++, draft aliases, latest) and reject older
+        # standards, 'none' (compiler default), and unrecognized values.
+        from mesonbuild.compilers.cpp import cpp_std_supports_modules
+        for std in ('c++20', 'c++23', 'c++26', 'c++2a', 'c++2b', 'c++2c',
+                    'gnu++20', 'gnu++23', 'gnu++26', 'gnu++2a', 'gnu++2b',
+                    'gnu++2c', 'vc++20', 'vc++23', 'c++latest', 'vc++latest'):
+            self.assertTrue(cpp_std_supports_modules(std), std)
+        for std in ('c++98', 'c++03', 'c++11', 'c++14', 'c++17', 'c++1z',
+                    'gnu++11', 'gnu++14', 'gnu++17', 'gnu++1z', 'vc++17',
+                    'none', 'garbage'):
+            self.assertFalse(cpp_std_supports_modules(std), std)
+
+    def test_cpp_modules_require_cpp20(self):
+        # A module-using target with cpp_std < c++20 must error during setup
+        # rather than failing at build time in the compiler. The check runs in
+        # the backend (generation time) because uses_cpp_modules() walks the
+        # link graph and must not be queried before it is frozen.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild.mesonlib import MesonException
+        be = NinjaBackend.__new__(NinjaBackend)
+
+        def check(std, uses_modules=True, has_cpp=True):
+            be.get_target_option = mock.MagicMock(return_value=std)
+            target = mock.MagicMock()
+            target.for_machine = MachineChoice.HOST
+            target.subproject = ''
+            target.uses_cpp_modules.return_value = uses_modules
+            target.compilers = {'cpp': mock.MagicMock()} if has_cpp else {}
+            be.check_cpp_modules_std(target)
+
+        check('c++20')                       # ok
+        check('c++17', uses_modules=False)   # not a module target: ignored
+        check('c++17', has_cpp=False)        # no C++ compiler: ignored
+        with self.assertRaises(MesonException):
+            check('c++17')
+        with self.assertRaises(MesonException):
+            check('none')
+
+    def test_target_uses_p1689_cpp_modules_memoized(self):
+        # The module-pipeline predicate is re-asked once per source on the
+        # ninja-gen hot path; it must be memoized per target so the version
+        # gate (and the rest of the stack) is evaluated only once.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild import build
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.ninja_has_dyndeps = True
+        cpp = mock.MagicMock()
+        cpp.get_id.return_value = 'gcc'
+        cpp.version = '14.0.0'
+        cpp.get_cpp_modules_args.return_value = []
+        cpp.supports_cpp_modules_p1689.return_value = True
+        target = mock.MagicMock(spec=build.BuildTarget)
+        target.compilers = {'cpp': cpp}
+        target.uses_cpp_modules.return_value = True
+        target.extra_args = {'cpp': []}
+
+        r1 = be.target_uses_p1689_cpp_modules(target)
+        r2 = be.target_uses_p1689_cpp_modules(target)
+        self.assertTrue(r1)
+        self.assertEqual(r1, r2)
+        # Second call is served from the cache: the version gate ran only once.
+        self.assertEqual(cpp.supports_cpp_modules_p1689.call_count, 1)
+
     def test_simple_abc(self):
         from abc import abstractmethod
 

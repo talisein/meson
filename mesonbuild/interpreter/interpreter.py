@@ -3670,7 +3670,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         """
         # copy common arguments directly
         for arg in ('build_by_default', 'build_rpath', 'build_subdir', 'c_pch',
-                    'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
+                    'cpp_modules', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
                     'dependencies', 'gnu_symbol_visibility', 'install',
                     'install_mode', 'install_rpath',
                     'implicit_include_directories', 'link_args', 'link_early_args',
@@ -4039,6 +4039,15 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         if objs and target.uses_rust():
             FeatureNew.single_use('objects in Rust targets', '1.8.0', self.subproject)
+
+        # C++ modules rely on Ninja dyndep; error clearly on other backends
+        # rather than silently misbuilding. This covers module consumers and
+        # header-unit users too (uses_cpp_modules), not just providers -- they
+        # all need the scan/collate pipeline that only the Ninja backend has.
+        if self.backend.name != 'ninja' and target.uses_cpp_modules():
+            raise InvalidArguments(
+                f'Target {name!r} uses C++ modules, which are only supported '
+                f'with the Ninja backend (current backend: {self.backend.name}).')
 
         self.add_target(name, target)
         self.project_args_frozen = True

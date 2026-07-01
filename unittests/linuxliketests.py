@@ -802,6 +802,148 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertIn('-Werror', plain_comp)
         self.assertNotIn('-Werror', c98_comp)
 
+    def test_gcc_cpp_modules(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self.init(testdir)
+        self.build()
+        # The library provides a module, imported by an executable that merely
+        # links it, plus partitions and an explicit-opt-in target; each test()
+        # exercises a producer/consumer pair across the link.
+        self.run_tests()
+        # BMIs land in a single shared cache at the build root, named by
+        # the documented GCC scheme incl. partition ':' -> '-'.
+        gcm = os.path.join(self.builddir, 'gcm.cache')
+        for bmi in ('modlib.gcm', 'pkg.gcm', 'pkg-part.gcm', 'kwmod.gcm'):
+            self.assertTrue(os.path.isfile(os.path.join(gcm, bmi)), f'missing BMI {bmi}')
+        # No compile or scan command may name a module or a BMI path.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS ='):
+                    self.assertNotIn('.gcm', line)
+                    self.assertNotIn('-fmodule-file', line)
+
+    def _check_module_rebuild(self) -> None:
+        # Editing a module interface must rebuild its BMI and recompile every
+        # importer, exactly as editing a normally #included header does --
+        # otherwise consumers link against a stale BMI.
+        testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
+        srcdir = self.copy_srcdir(testdir)
+        self.init(srcdir)
+        self.build()
+        self.run_tests()  # modfunc() == 42 -> prog exits 0
+        # Bump the exported function's value; a stale BMI keeps the old one.
+        iface = os.path.join(srcdir, 'modlib.cppm')
+        with open(iface, encoding='utf-8') as f:
+            content = f.read()
+        newcontent = content.replace('return ', 'return 1000 + ', 1)
+        self.assertNotEqual(content, newcontent, 'interface edit was a no-op')
+        with open(iface, 'w', encoding='utf-8') as f:
+            f.write(newcontent)
+        # The interface's BMI must rebuild and the importer (main.cpp -> prog)
+        # recompile and relink.
+        out = self.build()
+        self.assertIn('Linking target prog', out)
+        prog = os.path.join(self.builddir, 'prog')
+        self.assertNotEqual(0, subprocess.run([prog]).returncode,
+                            'importer did not pick up the module change (stale BMI)')
+
+    def test_gcc_cpp_module_rebuild_on_interface_change(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self._check_module_rebuild()
+
+    def test_gcc_cpp_modules_ts_legacy(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '147 gcc fmodules-ts legacy')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # A bare -fmodules-ts cpp_arg (with no real module enablement) must not be
+        # routed to the GCC P1689 pipeline -- that would hard-require
+        # GCC >= 14 and regress a target that used to build. provided-modules.json
+        # is emitted only by the P1689 collate, so its absence proves the legacy
+        # scan path is used instead.
+        self.init(testdir)
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            contents = f.read()
+        self.assertNotIn('provided-modules.json', contents)
+
+    def test_gcc_modules_cross_machine(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '148 gcc modules cross machine')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # Use the system gcc/g++ as the cross "host" compiler so is_cross_build()
+        # is true with a real working toolchain. A C++-module target on both
+        # machines would share one gcm.cache with incompatible BMIs, so configure
+        # must error.
+        crossfile = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8')
+        crossfile.write(textwrap.dedent(f'''\
+            [binaries]
+            c = '{shutil.which('gcc')}'
+            cpp = '{shutil.which('g++')}'
+            ar = '{shutil.which('ar')}'
+            strip = '{shutil.which('strip')}'
+
+            [host_machine]
+            system = 'linux'
+            cpu_family = 'x86_64'
+            cpu = 'x86_64'
+            endian = 'little'
+            '''))
+        crossfile.flush()
+        self.meson_cross_files = [crossfile.name]
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir)
+        self.assertIn('more than one machine', cm.exception.output)
+
+    def test_fortran_links_gcc_cpp_module(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '155 fortran links gcc cpp module')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc' or version_compare(cpp.version, '<14'):
+            raise SkipTest('C++ modules with GCC require GCC >= 14.')
+        try:
+            fortran = compiler_from_language(env, 'fortran', MachineChoice.HOST)
+        except EnvironmentException:
+            fortran = None
+        if fortran is None:
+            raise SkipTest('No Fortran compiler found.')
+        # A Fortran target that links a P1689 GCC C++-module library takes the
+        # legacy regex-scan dyndep path, which used to feed that library's
+        # depscan.json (never emitted by the P1689 pipeline) to depaccumulate,
+        # so ninja failed on an input no rule produces. The Fortran main calls
+        # into the modules-using C++ library, so a green run also proves interop.
+        self.init(testdir)
+        self.build()
+        self.run_tests()
+
     def test_run_installed(self):
         if is_cygwin() or is_osx():
             raise SkipTest('LD_LIBRARY_PATH and RPATH not applicable')

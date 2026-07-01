@@ -45,10 +45,31 @@ if T.TYPE_CHECKING:
 else:
     CompilerMixinBase = object
 
+# C++20 and newer as the base c++NN names (both the draft alias c++2a and the
+# final c++20). Modules need C++20, so this is also the module-capable set;
+# keeping it as the source ALL_STDS is built from means a future standard is one
+# edit, here. The gnu++/vc++ spellings are handled by prefix-stripping below,
+# not listed, so those variants (incl. vc++23) need no separate upkeep.
+CPP20_PLUS_STDS = ['c++2a', 'c++2b', 'c++2c', 'c++20', 'c++23', 'c++26']
 ALL_STDS = ['c++98', 'c++0x', 'c++03', 'c++1y', 'c++1z', 'c++11', 'c++14', 'c++17']
-ALL_STDS += ['c++2a', 'c++2b', 'c++2c', 'c++20', 'c++23', 'c++26']
+ALL_STDS += CPP20_PLUS_STDS
 ALL_STDS += [f'gnu{std[1:]}' for std in ALL_STDS]
 ALL_STDS += ['vc++11', 'vc++14', 'vc++17', 'vc++20', 'vc++latest', 'c++latest']
+
+# Just the standard token (the part after the c++/gnu++/vc++ prefix) of each
+# module-capable std, plus 'latest'. cpp_std_supports_modules compares this
+# against std.rsplit('++', 1)[-1], so c++20, gnu++20 and vc++20 all match one
+# entry -- every prefix spelling is covered without enumerating them.
+_MODULE_STD_TOKENS = frozenset([s.split('++', 1)[1] for s in CPP20_PLUS_STDS] + ['latest'])
+
+
+def cpp_std_supports_modules(std: str) -> bool:
+    """Whether a cpp_std option value selects C++20 or later, which modules need.
+
+    'none' (compiler default) and older standards are rejected, since no
+    shipping compiler defaults to C++20 or later.
+    """
+    return std.rsplit('++', 1)[-1] in _MODULE_STD_TOKENS
 
 
 def non_msvc_eh_options(eh: str, args: T.List[str]) -> None:
@@ -549,6 +570,37 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
 
     def get_cpp_modules_args(self) -> T.List[str]:
         return ['-fmodules', '-fmodules-ts']
+
+    def supports_cpp_modules_p1689(self) -> bool:
+        # GCC gained -fdeps-format=p1689r5 (the scanner the pipeline needs) in
+        # GCC 14.
+        return version_compare(self.version, '>=14')
+
+    def module_name_to_filename(self, module_name: str) -> str:
+        # GCC writes and reads BMIs in gcm.cache relative to the process CWD
+        # (the build root under Ninja), mapping a module name to
+        # gcm.cache/<name>.gcm and a partition 'pkg:part' to
+        # gcm.cache/pkg-part.gcm. This is GCC's documented, static scheme; the
+        # collator (scripts/depaccumulate.py) mirrors it to name BMIs without
+        # scanning output filenames.
+        return 'gcm.cache/' + module_name.replace(':', '-') + '.gcm'
+
+    def get_module_compile_args(self) -> T.List[str]:
+        # -fmodules enables named modules. -Mno-modules stops GCC from writing
+        # its make-style module dependency rules (phony '<name>.c++-module'
+        # targets and an order-only 'gcm.cache/<name>.gcm:| <obj>' line) into
+        # the -MD depfile: Ninja's gcc-deps parser cannot handle that shape, and
+        # module ordering is carried by the dyndep instead. BMI generation is
+        # unaffected.
+        return ['-fmodules', '-Mno-modules']
+
+    def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
+        # A P1689 scan runs before any BMI exists, so it must not compile: no
+        # -c/-o here, only the scan + header-dep flags. -fmodules matches the
+        # compile so the scan sees the same dialect; -Mno-modules
+        # keeps the -M header depfile plain (module info goes to the .ddi).
+        return ['-fmodules', '-Mno-modules', '-fdeps-format=p1689r5', f'-fdeps-file={outfile}',
+                f'-fdeps-target={target}', '-M', '-MF', depfile]
 
 
 class PGICPPCompiler(PGICompiler, CPPCompiler):

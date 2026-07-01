@@ -160,6 +160,20 @@ kwargs:
     default: true
     description: Controls whether Meson adds the current source and build directories to the include path
 
+  cpp_modules:
+    type: bool
+    since: 1.12.0
+    default: false
+    description: |
+      Explicitly mark this target as using C++20 named modules, enabling the
+      module scan/collate pipeline even when the target has no
+      module-interface source of its own (for example a consumer whose sources
+      all use a non-module extension). A target that has a `.cppm`/`.ixx`
+      source, or that links a target which provides modules, is treated as
+      module-enabled automatically without this keyword.
+
+      Currently supported with GCC (>= 14) on the Ninja backend only.
+
   include_directories:
     type: array[inc | str]
     description: |
