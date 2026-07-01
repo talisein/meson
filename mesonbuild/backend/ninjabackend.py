@@ -584,6 +584,9 @@ class NinjaBackend(backends.Backend):
         # - https://github.com/mesonbuild/meson/issues/9479#issuecomment-953485040
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
+        # Consumer/provider target-id pairs already warned about for divergent
+        # cpp_std, so each divergence is reported once.
+        self._warned_module_cpp_std: T.Set[T.Tuple[str, str]] = set()
 
     def create_phony_target(self, dummy_outfile: str, rulename: str, phony_infilenames: ListifiedStr) -> NinjaBuildElement:
         '''
@@ -1400,6 +1403,7 @@ class NinjaBackend(backends.Backend):
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
                 dep_provmaps.append(self.get_provided_modules_file_for(t))
+                self.warn_on_module_cpp_std_divergence(target, t)
         dep_provmaps.sort()
 
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
@@ -1415,6 +1419,23 @@ class NinjaBackend(backends.Backend):
         elem.add_item('DEPARGS', depargs)
         elem.add_item('name', target.name)
         self.add_build(elem)
+
+    def warn_on_module_cpp_std_divergence(self, consumer: build.BuildTarget,
+                                          provider: build.BuildTarget) -> None:
+        def cpp_std(t: build.BuildTarget) -> str:
+            return T.cast('str', self.get_target_option(t, OptionKey('cpp_std', machine=t.for_machine,
+                                                                     subproject=t.subproject)))
+        consumer_std, provider_std = cpp_std(consumer), cpp_std(provider)
+        if consumer_std == provider_std:
+            return
+        pair = (consumer.get_id(), provider.get_id())
+        if pair in self._warned_module_cpp_std:
+            return
+        self._warned_module_cpp_std.add(pair)
+        mlog.warning(
+            f'Target {consumer.name!r} (cpp_std={consumer_std}) imports C++ modules '
+            f'from {provider.name!r} (cpp_std={provider_std}); targets produced using '
+            'modules built with a divergent cpp_std version may fail at build or runtime.')
 
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:

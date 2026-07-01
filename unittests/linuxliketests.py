@@ -812,7 +812,9 @@ class LinuxlikeTests(BasePlatformTests):
             raise SkipTest('Test only applies to GCC named modules.')
         if version_compare(cpp.version, '<14'):
             raise SkipTest('GCC C++ modules require GCC >= 14.')
-        self.init(testdir)
+        out = self.init(testdir)
+        # Uniform cpp_std across all module-sharing targets: no divergence warning.
+        self.assertNotIn('divergent cpp_std', out)
         self.build()
         # The library provides a module, imported by an executable that merely
         # links it, plus partitions and an explicit-opt-in target; each test()
@@ -944,6 +946,40 @@ class LinuxlikeTests(BasePlatformTests):
         self.build()
         self.run_tests()
 
+    def test_gcc_module_cpp_std_divergence(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '145 gcc module cpp_std divergence')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # A module provider (c++20) consumed by a target overridden to c++23 must
+        # warn: BMIs are shared in one cache and are not std-versioned.
+        out = self.init(testdir)
+        self.assertIn('divergent cpp_std', out)
+        self.assertIn("'prog'", out)
+        self.assertIn("'modlib'", out)
+
+    def test_gcc_module_subproject_cpp_std_divergence(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '146 gcc module subproject cpp_std divergence')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # The divergence crosses a subproject boundary: parent c++23 consumes a
+        # subproject module library built at c++20.
+        out = self.init(testdir)
+        self.assertIn('divergent cpp_std', out)
+        self.assertIn("'prog'", out)
+        self.assertIn("'submodlib'", out)
+
     def test_gcc_cpp_modules_generated_header(self):
         if self.backend is not Backend.ninja:
             raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
@@ -1028,6 +1064,32 @@ class LinuxlikeTests(BasePlatformTests):
         self.init(testdir)
         self.build()
         self.run_tests()
+    def test_gcc_cpp_modules_diagnostics(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '141 gcc cpp modules diagnostics')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        # Each mode configures cleanly but must fail the build in the collator
+        # with its module diagnostic.
+        cases = {
+            'missing': 'provided by no target in this build',
+            'cycle': 'C++ module dependency cycle',
+            'duplicate': 'provided by two sources in this target',
+            'crosslink': 'provided by more than one target reaching this link',
+            'duptargets': 'exported by more than one target in this build',
+        }
+        for mode, needle in cases.items():
+            with self.subTest(mode=mode):
+                self.new_builddir()
+                self.init(testdir, extra_args=[f'-Dmode={mode}'])
+                with self.assertRaises(subprocess.CalledProcessError) as cm:
+                    self.build()
+                self.assertIn(needle, cm.exception.stdout)
 
     def test_gcc_import_std_subproject(self):
         if self.backend is not Backend.ninja:

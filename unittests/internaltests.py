@@ -209,6 +209,69 @@ class InternalTests(unittest.TestCase):
         # Second call is served from the cache: the version gate ran only once.
         self.assertEqual(cpp.supports_cpp_modules_p1689.call_count, 1)
 
+    def test_depaccumulate_p1689_missing_module_hint(self):
+        # A module required by no provider in the build is a build-time error;
+        # for a non-std module the message must point at how to declare the
+        # provider (cpp_modules: true), so a user exporting a module the
+        # non-canonical way is not left with a bare "provided by no target".
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import MesonException
+        with tempfile.TemporaryDirectory() as d:
+            ddi = os.path.join(d, 'main.cpp.o.ddi')
+            with open(ddi, 'w', encoding='utf-8') as f:
+                json.dump({'rules': [{'primary-output': 'main.cpp.o',
+                                      'requires': [{'logical-name': 'mod'}]}]}, f)
+            with self.assertRaises(MesonException) as cm:
+                run_p1689(['--dyndep', os.path.join(d, 'out.dd'),
+                            '--provmap', os.path.join(d, 'pm.json'), ddi])
+            msg = str(cm.exception)
+            self.assertIn('provided by no target', msg)
+            self.assertIn('cpp_modules: true', msg)
+
+    def test_depaccumulate_p1689_duplicate_provider_across_targets(self):
+        # Two unrelated targets exporting the same module never meet in one
+        # collate, but their BMIs share one cache path keyed by the module
+        # name; the second collate must error via the on-disk owner claim
+        # rather than leave ninja silently wedged on the colliding BMI.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import MesonException
+
+        def collate(tgt: str) -> int:
+            ddi = f'{tgt}.cpp.o.ddi'
+            with open(ddi, 'w', encoding='utf-8') as f:
+                json.dump({'rules': [{'primary-output': f'{tgt}.cpp.o',
+                                      'provides': [{'logical-name': 'dupmod'}]}]}, f)
+            return run_p1689(['--dyndep', f'{tgt}.dd',
+                              '--provmap', f'{tgt}-pm.json', ddi])
+
+        # The owner claim lives next to the BMI in the collator's fixed
+        # gcm.cache path, relative to the build root (the collate's cwd) --
+        # so run inside the tmpdir.
+        oldcwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                self.assertEqual(collate('liba'), 0)
+                # Re-collating the same target (an ordinary rebuild) is no
+                # duplicate.
+                self.assertEqual(collate('liba'), 0)
+                with self.assertRaises(MesonException) as cm:
+                    collate('libb')
+                msg = str(cm.exception)
+                self.assertIn('exported by more than one target', msg)
+                self.assertIn('dupmod', msg)
+                # A stale claim heals: once the owner's map no longer lists
+                # the module (it moved away and the old provider re-collated),
+                # another target may take the name over ...
+                with open('liba-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({}, f)
+                self.assertEqual(collate('libb'), 0)
+                # ... after which the original owner is the refused stranger.
+                with self.assertRaises(MesonException):
+                    collate('liba')
+            finally:
+                os.chdir(oldcwd)
+
     def test_simple_abc(self):
         from abc import abstractmethod
 

@@ -9,9 +9,12 @@ See: https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2022/p1689r5.html
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 import textwrap
 import typing as T
+
+from ..utils.core import MesonException
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Rule
@@ -126,6 +129,87 @@ def module_to_filename(name: str) -> str:
     return 'gcm.cache/' + name.replace(':', '-') + '.gcm'
 
 
+def _check_module_cycle(rules: T.List[Rule], provided: T.Dict[str, str]) -> None:
+    """Raise on a dependency cycle among this target's own modules.
+
+    Nodes are the module names provided in this target; an edge goes from a
+    provided module to each module (also provided here) that its translation
+    unit requires. A back-edge in a DFS is a cycle; report it before ninja's own
+    generic cycle detector would.
+    """
+    deps: T.Dict[str, T.List[str]] = {}
+    for rule in rules:
+        local_reqs = [r['logical-name'] for r in rule.get('requires', [])
+                      if r['logical-name'] in provided]
+        for prov in rule.get('provides', []):
+            deps.setdefault(prov['logical-name'], []).extend(local_reqs)
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: T.Dict[str, int] = {n: WHITE for n in deps}
+    path: T.List[str] = []
+
+    def visit(node: str) -> None:
+        color[node] = GRAY
+        path.append(node)
+        for nxt in deps.get(node, []):
+            if color.get(nxt, BLACK) == GRAY:
+                cycle = path[path.index(nxt):] + [nxt]
+                raise MesonException(
+                    'C++ module dependency cycle: ' + ' -> '.join(cycle))
+            if color.get(nxt, BLACK) == WHITE:
+                visit(nxt)
+        path.pop()
+        color[node] = BLACK
+
+    for name in deps:
+        if color[name] == WHITE:
+            visit(name)
+
+
+def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
+    """Enforce one providing target per module name per build tree.
+
+    Unrelated targets never meet in a collate (--dep-provmap carries only
+    linked dependencies), but every provider's BMI lands in the shared module
+    cache at a path keyed by the module name alone, so two exporters of one
+    name would silently fight over the same BMI file and wedge the build.
+    Record the owning target's provmap path next to the would-be BMI; a second
+    claimant errors. A claim is stale -- and taken over -- when its provmap is
+    gone (target removed; meson reconfigure runs `ninja -t cleandead`) or no
+    longer lists the module (the module moved and the old provider
+    re-collated).
+    """
+    owner_file = cache_bmi + '.owner'
+    os.makedirs(os.path.dirname(owner_file), exist_ok=True)
+    try:
+        fd = os.open(owner_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        with open(owner_file, encoding='utf-8') as f:
+            owner = f.read()
+        if owner == provmap:
+            return
+        live = False
+        if os.path.exists(owner):
+            try:
+                with open(owner, encoding='utf-8') as f:
+                    live = name in json.load(f)
+            except (OSError, ValueError):
+                pass
+        if live:
+            raise MesonException(
+                f'Module "{name}" is exported by more than one target in this '
+                f'build ({os.path.dirname(owner)} and {os.path.dirname(provmap)}); '
+                f'both would write their BMI to {cache_bmi}. A module name may '
+                'have only one providing target per build tree. (If the module '
+                'recently moved between targets this claim may be stale; re-run '
+                'ninja once.)')
+        with open(owner_file, 'w', encoding='utf-8') as f:
+            f.write(provmap)
+        return
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(provmap)
+
+
 def run_p1689(argv: T.List[str]) -> int:
     """Collate GCC P1689 scans into a dyndep + a provided-module map.
 
@@ -152,16 +236,41 @@ def run_p1689(argv: T.List[str]) -> int:
     resolvable: T.Dict[str, str] = {}
     # name -> BMI path for what this target provides (the map we publish).
     provided: T.Dict[str, str] = {}
+    # name -> human-readable provider (object file or dep-map path), used for
+    # duplicate diagnostics.
+    provider_of: T.Dict[str, str] = {}
     for rule in rules:
+        obj = rule['primary-output']
         for prov in rule.get('provides', []):
             name = prov['logical-name']
+            # A module name may be provided only once within a target.
+            if name in provided:
+                raise MesonException(
+                    f'Module "{name}" is provided by two sources in this target '
+                    f'({provider_of[name]} and {obj}). Module names must be unique.')
             modfile = module_to_filename(name)
             provided[name] = modfile
             resolvable[name] = modfile
+            provider_of[name] = obj
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
             imported: T.Dict[str, str] = json.load(f)
-        resolvable.update(imported)
+        for name, modfile in imported.items():
+            # Two targets providing the same module name into one link is
+            # IFNDR in GCC (the name is the linkage discriminator).
+            if name in resolvable:
+                raise MesonException(
+                    f'Module "{name}" is provided by more than one target reaching '
+                    f'this link ({provider_of[name]} and {pmfile}). Module names '
+                    f'must be globally unique within a linked executable.')
+            resolvable[name] = modfile
+            provider_of[name] = pmfile
+
+    # A module dependency cycle must be reported here rather than left to
+    # ninja. Cycles can only occur among modules provided within this target --
+    # the target link graph is a DAG -- so the local provides/requires subgraph
+    # is enough.
+    _check_module_cycle(rules, provided)
 
     with open(args.dyndep, 'w', encoding='utf-8') as dd:
         dd.write('ninja_dyndep_version = 1\n\n')
@@ -170,17 +279,31 @@ def run_p1689(argv: T.List[str]) -> int:
             outs = [module_to_filename(p['logical-name']) for p in rule.get('provides', [])]
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
-                modfile = resolvable.get(req['logical-name'])
-                # An unresolved require is left un-ordered here: it is a
-                # compiler-provided module or a diagnostic case handled elsewhere.
-                if modfile is not None:
-                    reqs.append(modfile)
+                name = req['logical-name']
+                modfile = resolvable.get(name)
+                # A required module provided by nothing in the build is an
+                # error naming the requiring TU and the missing module.
+                if modfile is None:
+                    if name in {'std', 'std.compat'}:
+                        hint = " (add dependency('std') to this target)"
+                    else:
+                        hint = (" (if a linked library exports it, build that "
+                                'library with cpp_modules: true)')
+                    raise MesonException(
+                        f'{obj} requires module "{name}", which is provided by no '
+                        f'target in this build.{hint}')
+                reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
             dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
 
     with open(args.provmap, 'w', encoding='utf-8') as pm:
         json.dump(provided, pm)
+
+    # Claim the provided names only after publishing the map, so a concurrent
+    # collate that loses the claim race always finds a live claimant.
+    for name in provided:
+        _claim_module_provider(name, module_to_filename(name), args.provmap)
 
     return 0
 
