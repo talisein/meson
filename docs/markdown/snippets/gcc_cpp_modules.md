@@ -45,6 +45,10 @@ executable('prog', 'main.cpp', dependencies: std,
            override_options: ['cpp_std=c++20'])
 ```
 
+Common mistakes are reported at build time with a clear message instead of a
+confusing link error: a module required by no target, a module name provided by
+two sources reaching one link, and module dependency cycles.
+
 This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
 Header units are not covered. All translation units in a build that shares
 modules must use the same module-affecting flags (e.g. `cpp_std`).
