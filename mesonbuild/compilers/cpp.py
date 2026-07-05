@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import functools
+import json
 import os.path
 import typing as T
 
 from .. import options
 from .. import mlog
-from ..mesonlib import MesonException, version_compare, lazy_property
+from ..mesonlib import MesonException, Popen_safe, version_compare, lazy_property
 
 from .compilers import (
     gnu_winlibs,
@@ -601,6 +602,41 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # keeps the -M header depfile plain (module info goes to the .ddi).
         return ['-fmodules', '-Mno-modules', '-fdeps-format=p1689r5', f'-fdeps-file={outfile}',
                 f'-fdeps-target={target}', '-M', '-MF', depfile]
+
+    @lazy_property
+    def _std_module_sources(self) -> T.Dict[str, str]:
+        # Locate the standard library's module-interface sources from the
+        # selected libstdc++'s manifest. The manifest maps std ->
+        # bits/std.cc and std.compat -> bits/std.compat.cc, each flagged
+        # is-std-library; source paths are relative to the manifest. Empty when
+        # the toolchain is too old to ship the std module (GCC < 15) or has no
+        # manifest.
+        if version_compare(self.version, '<15'):
+            return {}
+        try:
+            _, out, _ = Popen_safe(
+                self.get_exelist(ccache=False) + ['-print-file-name=libstdc++.modules.json'])
+        except OSError:
+            return {}
+        manifest = out.strip()
+        if not manifest or not os.path.isfile(manifest):
+            return {}
+        try:
+            with open(manifest, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        base = os.path.dirname(manifest)
+        result: T.Dict[str, str] = {}
+        for mod in data.get('modules', []):
+            if mod.get('is-std-library') and 'source-path' in mod:
+                result[mod['logical-name']] = os.path.normpath(
+                    os.path.join(base, mod['source-path']))
+        return result
+
+    def get_std_module_sources(self) -> T.Dict[str, str]:
+        """{logical-name: source path} for auto-provisioned stdlib modules."""
+        return self._std_module_sources
 
 
 class PGICPPCompiler(PGICompiler, CPPCompiler):

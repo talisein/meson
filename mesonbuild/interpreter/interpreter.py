@@ -1929,6 +1929,10 @@ class Interpreter(InterpreterBase, HoldableObject):
     def func_dependency(self, node: mparser.BaseNode, args: T.Tuple[T.List[str]], kwargs: kwtypes.FuncDependency) -> Dependency:
         # Replace '' by empty list of names
         names = [n for n in args[0] if n]
+        # The C++ standard library as importable modules (`import std;`) is not a
+        # discoverable external dependency: synthesize it from the compiler.
+        if names == ['std']:
+            return self._cpp_std_module_dependency(node, kwargs)
         if len(names) > 1:
             FeatureNew('dependency with more than one name', '0.60.0').use(self.subproject)
         default_options = kwargs.get('default_options')
@@ -1978,6 +1982,83 @@ class Interpreter(InterpreterBase, HoldableObject):
     @noPosargs
     def func_default(self, node: mparser.BaseNode, args: list[TYPE_var], kwargs: TYPE_kwargs) -> DefaultObject:
         return DefaultObject()
+
+    def _cpp_std_module_dependency(self, node: mparser.BaseNode,
+                                   kwargs: kwtypes.FuncDependency) -> Dependency:
+        """`dependency('std')`: the C++ standard library as importable modules.
+
+        `import std;` / `import std.compat;` need libstdc++'s module-interface
+        sources compiled into the shared module cache. Rather than special-case
+        std anywhere in the backend, synthesize an ordinary module-providing
+        static library from those sources (once per machine) and return it as an
+        InternalDependency: linking it puts the std objects on the consumer's
+        link line, and its provided-module map resolves the imports through the
+        normal module machinery. Consumers that only link such a target -- not
+        importing std themselves -- get the objects transitively.
+
+        'std' is reserved, but as for any reserved dependency name an explicit
+        meson.override_dependency('std', ...) takes precedence over synthesis.
+        """
+        disabled, required, feature = extract_required_kwarg(kwargs, self.subproject)
+        for_machine = kwargs['native']
+        if disabled:
+            mlog.log('Dependency', mlog.bold('std'),
+                     'for', mlog.bold(for_machine.get_lower_case_name()), 'machine',
+                     'skipped: feature', mlog.bold(feature), 'disabled')
+            return dependencies.NotFoundDependency('std', self.environment)
+
+        # An explicit override wins over synthesis, as for any reserved name.
+        identifier = dependencies.get_dep_identifier(
+            'std', T.cast('dependencies.base.DependencyObjectKWs', kwargs))
+        override = self.build.dependency_overrides[for_machine].get(identifier)
+        if override is not None:
+            return override.dep
+
+        cached = self.build.cpp_std_module_deps[for_machine].get('std')
+        if cached is not None and (cached.found() or not required):
+            return cached
+
+        cpp = self.compilers[for_machine].get('cpp')
+        sources = cpp.get_std_module_sources() if cpp is not None else {}
+        if not sources:
+            if required:
+                raise InterpreterException(
+                    'C++ standard library modules (import std) are unavailable: they '
+                    'need a C++ compiler that ships the standard library as modules '
+                    '(GCC >= 15 with libstdc++.modules.json).')
+            mlog.log('Dependency', mlog.bold('std'), 'found:', mlog.red('NO'))
+            dep = dependencies.NotFoundDependency('std', self.environment)
+            self.build.cpp_std_module_deps[for_machine]['std'] = dep
+            return dep
+
+        if self.backend.name != 'ninja':
+            raise InterpreterException(
+                "dependency('std') (C++ import std) is only supported with the "
+                f'Ninja backend (current backend: {self.backend.name}).')
+
+        # A single module-providing static library built from the standard
+        # library's own interface sources. std must precede std.compat, but that
+        # ordering falls out of the module scan (std.compat imports std), so the
+        # source order here does not matter. Options (cpp_std, ...) are inherited
+        # so the std BMIs match their consumers, per the uniform-flags invariant.
+        srcs = [mesonlib.File.from_absolute_file(p) for p in sources.values()]
+        libkwargs: T.Dict[str, T.Any] = {
+            'build_by_default': False,
+            'install': False,
+            'native': for_machine is MachineChoice.BUILD,
+        }
+        # The internal name mirrors CMake's __cmake_cxx_std_* convention: the
+        # archive (lib__meson_cxx_std.a) is obviously synthesized, and cannot
+        # collide with a user target named 'std'.
+        std_lib = self.func_static_lib(node, ['__meson_cxx_std', *srcs], libkwargs)
+        # Mark it a module provider directly, rather than via the cpp_modules
+        # keyword, so this internal target does not raise a spurious FeatureNew
+        # about a keyword the user never wrote.
+        std_lib.cpp_modules = True
+        dep = dependencies.InternalDependency(
+            self.project_version, libraries=[std_lib], name='std')
+        self.build.cpp_std_module_deps[for_machine]['std'] = dep
+        return dep
 
     @FeatureNew('disabler', '0.44.0')
     @noKwargs

@@ -1555,6 +1555,13 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def get_std_module_sources(self) -> T.Dict[str, str]:
+        """{logical-name: source path} for auto-provisioned stdlib modules.
+
+        Returns {} for compilers that cannot auto-provision `import std;`.
+        """
+        return {}
+
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         """Args to make the compiler emit a P1689r5 dependency scan of a C++ TU.
 

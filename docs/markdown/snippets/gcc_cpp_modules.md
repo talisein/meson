@@ -21,6 +21,30 @@ modlib = static_library('modlib', 'modlib.cppm')
 executable('prog', 'main.cpp', link_with: modlib)
 ```
 
-This first cut is GCC-only (GCC >= 14). Header units and `import std;` via this
-path are not yet covered. All translation units in a build that shares modules
-must use the same module-affecting flags (e.g. `cpp_std`).
+`import std;` and `import std.compat;` are available through `dependency('std')`.
+Meson locates the standard library's module sources from the selected libstdc++
+(GCC >= 15, which ships `libstdc++.modules.json`) and builds them into the shared
+cache as an ordinary module-providing library; linking that dependency both
+resolves the imports and puts the standard library's module objects on the link
+line. A target that only links another target which imports std -- without
+importing std itself -- gets those objects transitively and needs no declaration
+of its own. Like other reserved dependency names, an explicit
+`meson.override_dependency('std', ...)` takes precedence over this synthesis if a
+project needs to supply the standard-library modules itself.
+
+`import std;` works in any modules-capable dialect (`cpp_std=c++20` or later with
+GCC); it is not restricted to `c++23`. As always, `cpp_std` still governs which
+standard-library *facilities* are available (for example `std::println` needs
+`c++23`), exactly as it does for `#include`-based code.
+
+```meson
+std = dependency('std')
+# main.cpp contains `import std;`. Declaring the dependency also marks the target
+# module-enabled, so no cpp_modules keyword is needed.
+executable('prog', 'main.cpp', dependencies: std,
+           override_options: ['cpp_std=c++20'])
+```
+
+This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
+Header units are not covered. All translation units in a build that shares
+modules must use the same module-affecting flags (e.g. `cpp_std`).

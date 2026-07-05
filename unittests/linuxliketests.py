@@ -961,6 +961,114 @@ class LinuxlikeTests(BasePlatformTests):
         self.build()
         self.run_tests()
 
+    def test_gcc_import_std(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '140 gcc import std')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC import std.')
+        # Versions between 15.0 and 15.2 are too unreliable for the std module.
+        if version_compare(cpp.version, '<15.3'):
+            raise SkipTest('GCC import std requires GCC >= 15.3.')
+        self.init(testdir)
+        self.build()
+        # The standard library modules are built (as an ordinary module-providing
+        # static library) because targets declare dependency('std'); a user module
+        # that itself imports std links across a target boundary.
+        self.run_tests()
+        gcm = os.path.join(self.builddir, 'gcm.cache')
+        for bmi in ('std.gcm', 'std.compat.gcm', 'usemod.gcm'):
+            self.assertTrue(os.path.isfile(os.path.join(gcm, bmi)), f'missing BMI {bmi}')
+
+        # dependency('std') synthesizes one static library (lib__meson_cxx_std.a) carrying the
+        # std module objects. It is on the link line of every target that links it,
+        # directly (prog/compatprog) or transitively (usemain links only the user
+        # module usemod, which imports std), and the linker pulls the std objects
+        # on demand. The static library usemod archives only its own object; it
+        # never links lib__meson_cxx_std.a in.
+        self.assertTrue(os.path.isfile(os.path.join(self.builddir, 'lib__meson_cxx_std.a')),
+                        'std module static library not built')
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            ninja = f.read()
+        self.assertNotIn('std-objects.rsp', ninja)
+        self.assertNotIn('STDOBJS', ninja)
+        self.assertNotIn('--std-info', ninja)
+
+        def link_edge(t):
+            lines = ninja.splitlines()
+            for i, line in enumerate(lines):
+                if line.startswith(f'build {t}:'):
+                    block = [line]
+                    for nxt in lines[i + 1:]:
+                        if not nxt.startswith((' ', '\t')):
+                            break
+                        block.append(nxt)
+                    return '\n'.join(block)
+            return ''
+        for exe in ('prog', 'compatprog', 'usemain'):
+            self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
+        self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
+
+    def test_gcc_import_std_link_whole(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '144 gcc import std link whole')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC import std.')
+        if version_compare(cpp.version, '<15.3'):
+            raise SkipTest('GCC import std requires GCC >= 15.3.')
+        # Two static libraries that each import std, combined under link_whole:
+        # the std object must be linked once (at the executable), not archived
+        # into both libs -- otherwise --whole-archive yields a multiple
+        # definition of the std module initializer.
+        self.init(testdir)
+        self.build()
+        self.run_tests()
+
+    def test_gcc_import_std_subproject(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '153 gcc import std subproject')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC import std.')
+        if version_compare(cpp.version, '<15.3'):
+            raise SkipTest('GCC import std requires GCC >= 15.3.')
+        # Both the parent and a subproject call dependency('std'). The std module
+        # library must be synthesized once for the whole build. When each
+        # subproject synthesized its own static_library('__meson_cxx_std'), two std targets
+        # both provided module 'std' into the same executable -- collision at
+        # link time -- so assert only a single std provider exists.
+        self.init(testdir)
+        std_targets = [t for t in self.introspect('--targets')
+                       if t['name'] == '__meson_cxx_std' and t['type'] == 'static library']
+        self.assertEqual(len(std_targets), 1,
+                         'dependency("std") synthesized more than one std library '
+                         f'across subprojects: {[t["id"] for t in std_targets]}')
+        self.build()
+        self.run_tests()
+
+    def test_std_dependency_override(self):
+        # 'std' is a reserved dependency name, but an explicit
+        # meson.override_dependency('std', ...) must take precedence over the
+        # built-in import-std synthesis, like every other reserved name. The
+        # override short-circuits synthesis, so this applies to any C++ compiler
+        # and does not require an import-std-capable toolchain.
+        testdir = os.path.join(self.unit_test_dir, '154 std dependency override')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        try:
+            detect_cpp_compiler(env, MachineChoice.HOST)
+        except EnvironmentException:
+            raise SkipTest('No C++ compiler found.')
+        # The meson.build asserts std.version() == the override's version; without
+        # the fix dependency('std') bypasses the override and this init() fails.
+        self.init(testdir)
+
     def test_run_installed(self):
         if is_cygwin() or is_osx():
             raise SkipTest('LD_LIBRARY_PATH and RPATH not applicable')

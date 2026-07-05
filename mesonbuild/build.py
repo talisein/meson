@@ -361,6 +361,13 @@ class Build:
         # build == host compilation the both caches should point to the same place.
         self.stdlibs: PerMachine[T.Dict[str, dependencies.Dependency]] = PerMachineDefaultable.default(
             environment.is_cross_build(), {}, {})
+        # Memoized synthetic dependency('std') result (import std). Stored here,
+        # not on the Interpreter, because every subproject gets its own
+        # Interpreter but shares this Build; std must be synthesized once for the
+        # whole build. Keyed like stdlibs so Build.copy()/merge share it across
+        # subprojects.
+        self.cpp_std_module_deps: PerMachine[T.Dict[str, dependencies.Dependency]] = PerMachineDefaultable.default(
+            environment.is_cross_build(), {}, {})
         self.dependency_overrides: PerMachine[T.Dict[T.Tuple, DependencyOverride]] = PerMachineDefaultable.default(
             environment.is_cross_build(), {}, {})
 
