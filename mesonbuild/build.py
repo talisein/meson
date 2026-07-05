@@ -1770,15 +1770,20 @@ class BuildTarget(Target):
                     return True
         return False
 
+    @lru_cache(maxsize=None)
     def provides_cpp_modules(self) -> bool:
         """Whether this target may export C++ modules of its own.
 
         True when the target is explicitly module-enabled (``cpp_modules``) or
         carries a module-interface source. Used to propagate module-enablement
         to consumers that merely link this target.
+
+        Memoized: it depends only on the target's own module flag and sources,
+        which are fixed once the target is constructed.
         """
         return 'cpp' in self.compilers and (self.cpp_modules or self._has_cpp_module_source())
 
+    @lru_cache(maxsize=None)
     def uses_cpp_modules(self) -> bool:
         """Whether Meson must run the C++ module scan/collate machinery here.
 
@@ -1786,6 +1791,10 @@ class BuildTarget(Target):
         links (transitively) a target that does -- so a bare consumer such as a
         ``main.cpp`` that does ``import foo;`` gets scanned and ordered without
         any annotation, mirroring how linking a library is sufficient.
+
+        Memoized (like get_all_linked_targets): the module flags and the link
+        graph it walks are frozen by the time the backend queries this, and it
+        is re-asked once per source, so caching avoids an O(sources^2) rescan.
         """
         if 'cpp' not in self.compilers:
             return False
