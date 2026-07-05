@@ -184,6 +184,32 @@ kwargs:
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
+  cpp_header_units:
+    type: array[str]
+    since: 1.12.0
+    default: []
+    description: |
+      *(experimental)* C++ header units imported by this target's sources.
+      Each entry is the header **as spelled in the import**, resolved on the
+      target's include path: `'pkg/header.h'` is a user header unit
+      (`import "pkg/header.h";`) and `'<pkg/header.h>'` is a system header unit
+      (`import <pkg/header.h>;`). Meson pre-builds each unit's BMI once (shared
+      across the build) before scanning, because GCC's scanner fails on a
+      header-unit import whose BMI does not yet exist; consumers then resolve it
+      by directory lookup with no BMI path on the command line.
+
+      Every header unit a source imports must be listed (the declaration does
+      not propagate through dependencies, so a consumer that imports the same
+      header must declare it too). **Ordering:** the units are built before all
+      of the target's scans and compiles, but they are *not* ordered relative to
+      each other, so a header unit that itself `import`s another header unit is
+      not supported (list header units that only `#include` their prerequisites,
+      which are absorbed textually). A unit's BMI also freezes the preprocessor
+      state it was built with, so the whole build must use uniform
+      module-affecting flags. Implies module handling for the target.
+
+      Currently supported with GCC (>= 14) on the Ninja backend only.
+
   include_directories:
     type: array[inc | str]
     description: |

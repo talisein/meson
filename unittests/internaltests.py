@@ -273,6 +273,50 @@ class InternalTests(unittest.TestCase):
         self.assertTrue(should('19.32.31114'))   # newer
         self.assertFalse(should('19.32.31114', vs_ok=False))  # old dev prompt
 
+    def test_scripts_touch(self):
+        # The GCC header-unit stamp is created by `meson --internal touch`
+        # because cmd.exe has no touch; the helper must create a missing file
+        # and bump an existing one's mtime so ninja sees the edge as rebuilt.
+        from mesonbuild.scripts.touch import run
+        with tempfile.TemporaryDirectory() as d:
+            stamp = os.path.join(d, 'x.stamp')
+            self.assertEqual(run([stamp]), 0)
+            self.assertTrue(os.path.exists(stamp))
+            old = os.stat(stamp).st_mtime - 100
+            os.utime(stamp, (old, old))
+            self.assertEqual(run([stamp]), 0)
+            self.assertGreater(os.stat(stamp).st_mtime, old)
+
+    def test_gcc_header_unit_rule_portable_stamp(self):
+        # The GCC header-unit edge only produces a stamp (the BMI lands in an
+        # untracked gcm.cache path), created via `meson --internal touch`, not
+        # the `touch` binary which cmd.exe lacks.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.ninja = mock.MagicMock()
+        be.ninja.has_rule.return_value = False
+        be.environment = mock.MagicMock()
+        be.environment.get_build_command.return_value = ['meson']
+        be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
+        captured: list = []
+        be.add_rule = captured.append
+
+        cpp = mock.MagicMock()
+        cpp.get_id.return_value = 'gcc'
+        cpp.for_machine = MachineChoice.HOST
+        cpp.get_exelist.return_value = ['g++']
+        cpp.get_module_compile_args.return_value = []
+        cpp.get_dependency_gen_args.return_value = []
+        be.generate_cpp_header_unit_rule(cpp)
+
+        self.assertEqual(len(captured), 1)
+        # Normalize quoting: ninja quotes every token on Windows ("--internal"
+        # "touch") but leaves plain tokens bare on Unix, so match on the tokens
+        # rather than a platform-specific quoting of them.
+        command_str = captured[0].command_str.replace('"', '')
+        self.assertIn('--internal touch', command_str)
+        self.assertNotIn('&& touch', command_str)
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the
@@ -329,6 +373,16 @@ class InternalTests(unittest.TestCase):
             # ... after which the original owner is the refused stranger.
             with self.assertRaises(MesonException):
                 collate(d, bmidir, 'liba')
+
+    def test_depaccumulate_is_header_unit(self):
+        from mesonbuild.scripts.depaccumulate import _is_header_unit
+        # A header-unit require is a resolved header path (POSIX or Windows); a
+        # named module or ':partition' is an identifier with no path separator.
+        for name in ('./util.h', '/usr/include/c++/16/vector', '../src/hdr.hpp',
+                     '.\\util.h', 'C:\\proj\\util.h', 'C:/proj/util.h'):
+            self.assertTrue(_is_header_unit(name), name)
+        for name in ('mod', 'mod:part', 'std', 'std.compat', 'my.module', 'pkg.sub:part'):
+            self.assertFalse(_is_header_unit(name), name)
 
     def test_simple_abc(self):
         from abc import abstractmethod

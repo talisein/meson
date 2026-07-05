@@ -3775,7 +3775,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         """
         # copy common arguments directly
         for arg in ('build_by_default', 'build_rpath', 'build_subdir', 'c_pch',
-                    'cpp_modules', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
+                    'cpp_modules', 'cpp_header_units', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
                     'dependencies', 'gnu_symbol_visibility', 'install',
                     'install_mode', 'install_rpath',
                     'implicit_include_directories', 'link_args', 'link_early_args',

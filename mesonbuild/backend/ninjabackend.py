@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import PurePath, Path
 from textwrap import dedent
 import dataclasses
+import hashlib
 import itertools
 import json
 import os
@@ -587,6 +588,11 @@ class NinjaBackend(backends.Backend):
         # Consumer/provider target-id pairs already warned about for divergent
         # cpp_std, so each divergence is reported once.
         self._warned_module_cpp_std: T.Set[T.Tuple[str, str]] = set()
+        # Header units (prototype): global dedup of unit build edges, keyed by
+        # the header's absolute path -> its stamp file; plus the per-target list
+        # of stamps its scans/compiles must order after.
+        self._header_units: T.Dict[str, str] = {}
+        self._target_header_unit_stamps: T.Dict[str, T.List[str]] = {}
 
     def create_phony_target(self, dummy_outfile: str, rulename: str, phony_infilenames: ListifiedStr) -> NinjaBuildElement:
         '''
@@ -1393,10 +1399,12 @@ class NinjaBackend(backends.Backend):
         # The scan preprocesses the source, so anything the compile needs to
         # exist first must exist for the scan too: generated headers (e.g. a
         # configure_file / custom_target output the source #includes) and other
-        # order-only inputs -- otherwise the scanner errors on a missing
-        # generated header.
+        # order-only inputs, plus the declared header units -- otherwise the
+        # scanner errors on a missing generated header, or fails cold on a
+        # header-unit import and yields an empty .ddi.
         self.add_header_deps(target, elem, header_deps or [])
         elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
+        elem.add_orderdep(self.provision_header_units(target, compiler))
         self.add_build(elem)
 
     @staticmethod
@@ -3169,6 +3177,75 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             rule = NinjaRule(rulename, command, args, description)
         self.add_rule(rule)
 
+    def generate_cpp_header_unit_rule(self, compiler: Compiler) -> None:
+        # Compiles a header unit's BMI (prototype), named by the import spelling
+        # ($SPELLING) resolved on the include path from $ARGS. Unlike other
+        # compile rules, GCC writes the BMI to a mangled gcm.cache path we don't
+        # track, so the edge's output is only a stamp, created via `meson
+        # --internal touch` because cmd.exe has no touch; consumers find the BMI
+        # by directory lookup. -fmodule-only skips the object; $HULANG is
+        # c++-user-header or c++-system-header.
+        rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
+        if self.ninja.has_rule(rulename):
+            return
+        command = compiler.get_exelist()
+        modargs = NinjaCommandArg.list(compiler.get_module_compile_args(), Quoting.none)
+        depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
+        touch = self.environment.get_build_command() + ['--internal', 'touch', '$out']
+        args = ['$ARGS'] + modargs + depargs + ['-fmodule-only', '-x', '$HULANG', '-c', '$SPELLING',
+                                                '&&'] + touch
+        description = 'Building C++ header unit $SPELLING'
+        self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
+
+    def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
+        """Emit build edges for this target's declared header units and return
+        their stamp files (prototype).
+
+        Each entry is an *import spelling*: 'pkg/hdr.h' is a user header
+        (`-x c++-user-header`); '<pkg/hdr.h>' is a system header
+        (`-x c++-system-header`). It is resolved on the target's include path, so
+        the BMI matches what a consumer's `import "pkg/hdr.h";` / `import
+        <pkg/hdr.h>;` looks up. Edges are deduped globally by (spelling, mode);
+        the returned stamps are added as order-only deps to the target's scans
+        and compiles so the scanner is never cold and BMIs exist at compile.
+        """
+        if compiler.get_id() != 'gcc':
+            # Header units are a GCC-only opt-in; the module pipeline is shared
+            # with MSVC, which does not use this GCC-specific provisioning.
+            return []
+        tid = target.get_id()
+        if tid in self._target_header_unit_stamps:
+            return self._target_header_unit_stamps[tid]
+        stamps: T.List[str] = []
+        if target.cpp_header_units:
+            args = self._generate_single_compile_target_args(target, compiler)
+            args = compiler.compiler_args(args)
+            rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
+            for hu in target.cpp_header_units:
+                if isinstance(hu, File):
+                    spelling, hulang = hu.rel_to_builddir(self.build_to_src), 'c++-user-header'
+                elif hu.startswith('<') and hu.endswith('>'):
+                    spelling, hulang = hu[1:-1], 'c++-system-header'
+                else:
+                    spelling, hulang = hu, 'c++-user-header'
+                key = f'{hulang}:{spelling}'
+                stamp = self._header_units.get(key)
+                if stamp is None:
+                    digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
+                    safe = os.path.basename(spelling) or 'header'
+                    stamp = os.path.join('meson-private', 'header-units',
+                                         f'{safe}.{digest}.stamp')
+                    elem = NinjaBuildElement(self.all_outputs, stamp, rulename, [])
+                    elem.add_item('ARGS', args)
+                    elem.add_item('HULANG', hulang)
+                    elem.add_item('SPELLING', spelling)
+                    elem.add_item('DEPFILE', stamp + '.d')
+                    self.add_build(elem)
+                    self._header_units[key] = stamp
+                stamps.append(stamp)
+        self._target_header_unit_stamps[tid] = stamps
+        return stamps
+
     def generate_compile_rules(self) -> None:
         for for_machine in MachineChoice:
             clist = self.environment.coredata.compilers[for_machine]
@@ -3185,6 +3262,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # clang-scan-deps feature probe, which non-module clang
                     # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
+                if langname == 'cpp' and compiler.get_id() == 'gcc':
+                    self.generate_cpp_header_unit_rule(compiler)
                 for mode in compiler.get_modes():
                     self.generate_compile_rule_for(langname, mode)
 
@@ -3795,6 +3874,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces
         if clang_miu:
             element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
+        # Declared header units are implicit inputs: their BMIs must exist in
+        # gcm.cache before this compile, and a source that imports one must
+        # recompile when its BMI changes (prototype). GCC-only (see
+        # provision_header_units).
+        if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+            element.add_dep(self.provision_header_units(target, compiler))
         self.add_build(element)
         # Emit the P1689 scan edge for GCC/MSVC/Clang module targets,
         # reusing the exact compile args so scan and compile see the same

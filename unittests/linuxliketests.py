@@ -1189,6 +1189,81 @@ class LinuxlikeTests(BasePlatformTests):
         self.init(testdir)
         self.build()
         self.run_tests()
+
+    def test_gcc_header_units(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '142 gcc header units')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC header units.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self.init(testdir)
+        self.build()
+        # A declared header unit is pre-built (so the scan is never cold) and a
+        # named module in the same target rides the normal path -- the program
+        # links and runs.
+        self.run_tests()
+        # The header-unit BMI path never appears on a compile command line.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS ='):
+                    self.assertNotIn('.gcm', line)
+                    self.assertNotIn('-fmodule-file', line)
+
+    def _check_header_unit_rebuild(self, header: str) -> None:
+        # A change to a header consumed as a header unit must rebuild the
+        # header-unit BMI and every importer, exactly as editing a normally
+        # #included header does -- otherwise consumers link against a stale BMI.
+        testdir = os.path.join(self.unit_test_dir, '142 gcc header units')
+        srcdir = self.copy_srcdir(testdir)
+        self.init(srcdir)
+        self.build()
+        self.run_tests()  # sum == 110, program exits 0
+        # Bump the header's inline function by a large constant so the program's
+        # checksum no longer equals 110. A stale BMI keeps the old value.
+        header_path = os.path.join(srcdir, header)
+        with open(header_path, encoding='utf-8') as f:
+            content = f.read()
+        newcontent = content.replace('return ', 'return 1000 + ', 1)
+        self.assertNotEqual(content, newcontent, 'header edit was a no-op')
+        with open(header_path, 'w', encoding='utf-8') as f:
+            f.write(newcontent)
+        # The BMI edge must rerun and the importer (main.cpp -> prog) relink.
+        out = self.build()
+        self.assertIn('Building C++ header unit', out)
+        self.assertIn('Linking target prog', out)
+        # The rebuilt program must observe the new value: checksum != 110 -> nonzero.
+        prog = os.path.join(self.builddir, 'prog')
+        self.assertNotEqual(0, subprocess.run([prog]).returncode,
+                            'program did not pick up the header change (stale BMI)')
+
+    def test_gcc_header_unit_rebuild_on_user_header_change(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '142 gcc header units')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC header units.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self._check_header_unit_rebuild('util.h')
+
+    def test_gcc_header_unit_rebuild_on_system_header_change(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '142 gcc header units')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC header units.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self._check_header_unit_rebuild('angleutil.h')
+
     def test_gcc_cpp_modules_diagnostics(self):
         if self.backend is not Backend.ninja:
             raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')

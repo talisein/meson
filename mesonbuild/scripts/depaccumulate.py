@@ -132,6 +132,15 @@ def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
+def _is_header_unit(logical_name: str) -> bool:
+    # GCC omits P1689 lookup-method, so distinguish by shape: a header unit's
+    # logical-name is a resolved header path ('./util.h', '/usr/.../vector', or
+    # on Windows '.\\util.h' / 'C:\\...'), which always contains a path
+    # separator; a named module or ':partition' is an identifier that never
+    # does.
+    return '/' in logical_name or '\\' in logical_name
+
+
 def _check_module_cycle(rules: T.List[Rule], provided: T.Dict[str, str]) -> None:
     """Raise on a dependency cycle among this target's own modules.
 
@@ -306,6 +315,12 @@ def run_p1689(argv: T.List[str]) -> int:
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 name = req['logical-name']
+                if _is_header_unit(name):
+                    # A header unit (prototype): its logical-name is a path, not
+                    # a module identifier. It is pre-built and ordered by static
+                    # edges, so it is neither a dyndep dependency nor a missing
+                    # named module -- skip it.
+                    continue
                 modfile = resolvable.get(name)
                 # A required module provided by nothing in the build is an
                 # error naming the requiring TU and the missing module.
