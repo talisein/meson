@@ -171,9 +171,8 @@ def run_p1689(argv: T.List[str]) -> int:
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 modfile = resolvable.get(req['logical-name'])
-                # An unresolved require is left un-ordered here: it is either a
-                # compiler-/stdlib-provided module (e.g. std) or a diagnostic
-                # case handled elsewhere. Hard-error diagnostics are FR10 (TODO).
+                # An unresolved require is left un-ordered here: it is a
+                # compiler-provided module or a diagnostic case handled elsewhere.
                 if modfile is not None:
                     reqs.append(modfile)
             out = formatter(outs)
