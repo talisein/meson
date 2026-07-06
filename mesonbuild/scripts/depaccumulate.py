@@ -117,16 +117,18 @@ def gen(outfile: str, desc: Description, extra_rules: T.List[Rule]) -> int:
     return 0
 
 
-def module_to_filename(name: str) -> str:
-    """Map a C++ module logical-name to its GCC BMI path.
+def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
+    """Map a C++ module logical-name to its BMI path.
 
-    GCC's documented, static scheme: gcm.cache/<name>.gcm at the build root,
-    with a partition separator ':' becoming '-'. Mirrors
-    GnuCPPCompiler.module_name_to_filename; kept here so the collator names BMIs
-    from logical-names alone -- GCC's P1689 output does not carry a
-    compiled-module-path.
+    The compiler names a module's BMI <bmidir>/<name><suffix> with a partition
+    separator ':' becoming '-' (gcm.cache/pkg-part.gcm for GCC,
+    ifc.cache/pkg-part.ifc for MSVC). Mirrors the compiler's
+    module_name_to_filename; kept here so the collator names BMIs from
+    logical-names alone -- the P1689 output does not carry a
+    compiled-module-path. bmidir/suffix are passed by the backend from the
+    compiler so the two stay in lockstep.
     """
-    return 'gcm.cache/' + name.replace(':', '-') + '.gcm'
+    return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
 def _check_module_cycle(rules: T.List[Rule], provided: T.Dict[str, str]) -> None:
@@ -211,16 +213,22 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
 
 
 def run_p1689(argv: T.List[str]) -> int:
-    """Collate GCC P1689 scans into a dyndep + a provided-module map.
+    """Collate P1689 scans into a dyndep + a provided-module map.
 
     Consumes this target's per-source .ddi files and the provided-module maps of
     its dependency targets, emitting a Ninja dyndep that orders each object
-    against the BMIs it requires/provides, plus this target's own map.
+    against the BMIs it requires/provides, plus this target's own map. The BMI
+    directory and suffix (--bmi-dir/--bmi-suffix) come from the compiler so the
+    logical-name -> BMI mapping matches the compiler's own.
     """
     parser = argparse.ArgumentParser(prog='depaccumulate --p1689')
     parser.add_argument('--dyndep', required=True, help='Output Ninja dyndep file.')
     parser.add_argument('--provmap', required=True,
                         help="Output provided-module map for this target.")
+    parser.add_argument('--bmi-dir', required=True,
+                        help='Directory the compiler names BMIs in (e.g. gcm.cache).')
+    parser.add_argument('--bmi-suffix', required=True,
+                        help='BMI file suffix including the dot (e.g. .gcm).')
     parser.add_argument('--dep-provmap', action='append', default=[],
                         help='Provided-module map of a dependency target. Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
@@ -248,7 +256,7 @@ def run_p1689(argv: T.List[str]) -> int:
                 raise MesonException(
                     f'Module "{name}" is provided by two sources in this target '
                     f'({provider_of[name]} and {obj}). Module names must be unique.')
-            modfile = module_to_filename(name)
+            modfile = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
             provided[name] = modfile
             resolvable[name] = modfile
             provider_of[name] = obj
@@ -276,7 +284,8 @@ def run_p1689(argv: T.List[str]) -> int:
         dd.write('ninja_dyndep_version = 1\n\n')
         for rule in rules:
             obj = rule['primary-output']
-            outs = [module_to_filename(p['logical-name']) for p in rule.get('provides', [])]
+            outs = [module_to_filename(p['logical-name'], args.bmi_dir, args.bmi_suffix)
+                    for p in rule.get('provides', [])]
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 name = req['logical-name']
@@ -303,7 +312,8 @@ def run_p1689(argv: T.List[str]) -> int:
     # Claim the provided names only after publishing the map, so a concurrent
     # collate that loses the claim race always finds a live claimant.
     for name in provided:
-        _claim_module_provider(name, module_to_filename(name), args.provmap)
+        _claim_module_provider(
+            name, module_to_filename(name, args.bmi_dir, args.bmi_suffix), args.provmap)
 
     return 0
 
