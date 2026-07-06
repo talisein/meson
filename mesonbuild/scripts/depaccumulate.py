@@ -254,8 +254,16 @@ def run_p1689(argv: T.List[str]) -> int:
                              'map a provided module to its harvest stamp '
                              '(<primary-output> + this suffix) instead of the cache BMI '
                              'path, and declare no implicit outputs on object edges.')
+    parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
+                        help='A declared header unit as "<mode>:<spelling>". Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
     args = parser.parse_args(argv)
+
+    # (mode, spelling) of every header unit declared on this target, so a source
+    # that imports an undeclared one can be flagged. Only cl reports header-unit
+    # requires from a cold scan (with a lookup-method), so this check is
+    # effective for MSVC; GCC fails earlier, at the scan itself.
+    declared_units = {tuple(hu.split(':', 1)) for hu in args.header_units}
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -323,9 +331,18 @@ def run_p1689(argv: T.List[str]) -> int:
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 if _is_header_unit(req):
-                    # A header unit (prototype): pre-built and ordered by static
-                    # edges, so it is neither a dyndep dependency nor a missing
-                    # named module -- skip it.
+                    # A header unit: pre-built and ordered by static edges, so it
+                    # is neither a dyndep dependency nor a missing named module.
+                    # cl tags it with a lookup-method and reports it cold, so we
+                    # can check here that the source actually declared it.
+                    method = req.get('lookup-method')
+                    if method in ('include-quote', 'include-angle'):
+                        mode = 'user' if method == 'include-quote' else 'system'
+                        if (mode, req['logical-name']) not in declared_units:
+                            raise MesonException(
+                                f'{obj} imports header unit "{req["logical-name"]}", '
+                                "which is not declared in this target's "
+                                'cpp_header_units.')
                     continue
                 name = req['logical-name']
                 modfile = resolvable.get(name)
