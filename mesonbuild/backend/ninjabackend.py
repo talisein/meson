@@ -1225,13 +1225,16 @@ class NinjaBackend(backends.Backend):
         cid = cpp.get_id()
         # GCC / MSVC named modules: the target opts in (a module-interface
         # source, the cpp_modules kwarg, or linking a module provider) and is
-        # scanned with the compiler's P1689 output; see
-        # generate_dependency_scan_target. cl gained /scanDependencies in Visual
-        # Studio 2022 17.2 (cl 19.32).
+        # scanned for build ordering. GCC and cl >= 19.32 use the P1689
+        # scan; older but modules-capable cl falls back to the regex scan. The
+        # p1689-vs-regex choice is made in target_uses_p1689_cpp_modules.
+        # cl before build 19.28.28617 (VS 16.8/16.9) has broken modules, and
+        # current_vs_supports_modules() rejects a too-old developer prompt.
         if cid == 'gcc' and target.uses_cpp_modules():
             return True
         if cid == 'msvc' and target.uses_cpp_modules() \
-                and mesonlib.version_compare(cpp.version, '>=19.32'):
+                and mesonlib.current_vs_supports_modules() \
+                and mesonlib.version_compare(cpp.version, '>=19.28.28617'):
             return True
         # Legacy/opt-in scan for other compilers (e.g. Clang) or a bare
         # -fmodules/-fmodules-ts in the compile args: handled by the regex

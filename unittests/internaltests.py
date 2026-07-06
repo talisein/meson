@@ -238,6 +238,33 @@ class InternalTests(unittest.TestCase):
         # Second call is served from the cache: the version gate ran only once.
         self.assertEqual(cpp.supports_cpp_modules_p1689.call_count, 1)
 
+    def test_should_use_dyndeps_msvc_version_floor(self):
+        # VS 16.8/16.9 ship cl 19.28.x *below* build 28617 with broken modules,
+        # so the dyndep gate must reject those (and honor
+        # current_vs_supports_modules) rather than admitting any cl >= 19.28.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild import build
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.ninja_has_dyndeps = True
+
+        def should(version, vs_ok=True):
+            cpp = mock.MagicMock()
+            cpp.get_id.return_value = 'msvc'
+            cpp.version = version
+            cpp.get_cpp_modules_args.return_value = []
+            target = mock.MagicMock(spec=build.BuildTarget)
+            target.compilers = {'cpp': cpp}
+            target.uses_cpp_modules.return_value = True
+            target.extra_args = {'cpp': []}
+            with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
+                            'current_vs_supports_modules', return_value=vs_ok):
+                return be.should_use_dyndeps_for_target(target)
+
+        self.assertFalse(should('19.28.28000'))  # pre-28617 build: broken
+        self.assertTrue(should('19.28.28617'))   # first good build
+        self.assertTrue(should('19.32.31114'))   # newer
+        self.assertFalse(should('19.32.31114', vs_ok=False))  # old dev prompt
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the
