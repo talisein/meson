@@ -18,7 +18,7 @@ import typing as T
 from ..utils.core import MesonException
 
 if T.TYPE_CHECKING:
-    from .depscan import Description, Rule
+    from .depscan import Description, Require, Rule
 
 # The quoting logic has been copied from the ninjabackend to avoid having to
 # import half of Meson just to quote outputs, which is a performance problem
@@ -132,13 +132,21 @@ def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
-def _is_header_unit(logical_name: str) -> bool:
-    # GCC omits P1689 lookup-method, so distinguish by shape: a header unit's
-    # logical-name is a resolved header path ('./util.h', '/usr/.../vector', or
-    # on Windows '.\\util.h' / 'C:\\...'), which always contains a path
-    # separator; a named module or ':partition' is an identifier that never
-    # does.
-    return '/' in logical_name or '\\' in logical_name
+def _is_header_unit(req: Require) -> bool:
+    # A header-unit require is skipped by the collator: its BMI is pre-built by a
+    # static edge, so it is neither a dyndep dependency nor a missing named
+    # module. cl tags it with a lookup-method of include-quote/include-angle (a
+    # named module is by-name). GCC omits lookup-method, so fall back to shape:
+    # a header unit's logical-name is a resolved header path ('./util.h',
+    # '/usr/.../vector', or on Windows '.\\util.h' / 'C:\\...'), which always
+    # contains a path separator; a named module or ':partition' never does.
+    method = req.get('lookup-method')
+    if method in ('include-quote', 'include-angle'):
+        return True
+    if method == 'by-name':
+        return False
+    name = req['logical-name']
+    return '/' in name or '\\' in name
 
 
 def _check_module_cycle(rules: T.List[Rule], provided: T.Dict[str, str]) -> None:
@@ -314,13 +322,12 @@ def run_p1689(argv: T.List[str]) -> int:
                         for p in rule.get('provides', [])]
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
-                name = req['logical-name']
-                if _is_header_unit(name):
-                    # A header unit (prototype): its logical-name is a path, not
-                    # a module identifier. It is pre-built and ordered by static
+                if _is_header_unit(req):
+                    # A header unit (prototype): pre-built and ordered by static
                     # edges, so it is neither a dyndep dependency nor a missing
                     # named module -- skip it.
                     continue
+                name = req['logical-name']
                 modfile = resolvable.get(name)
                 # A required module provided by nothing in the build is an
                 # error naming the requiring TU and the missing module.
