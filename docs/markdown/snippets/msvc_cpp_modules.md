@@ -20,9 +20,13 @@ executable('prog', 'main.cpp', link_with: modlib)
 
 `import std;` and `import std.compat;` are available through `dependency('std')`,
 built from the standard library's module sources shipped with the MSVC toolset
-(`modules.json`). Requires Visual Studio 2022 (cl 19.3x or newer) and
-`cpp_std=c++20` or later; `import std;` additionally needs a toolset that ships
-the std module sources.
+(`modules.json`). The P1689 scan requires Visual Studio 2022 17.2 or newer
+(cl 19.32, where `/scanDependencies` shipped) and `cpp_std=c++20` or later.
+
+Older but modules-capable MSVC (VS 2019 16.8 up to VS 2022 17.1) falls back to
+the previous regex-based scanner, which handles only flat named modules --
+module partitions and `import std;` need the P1689 scan and therefore VS 2022
+17.2 or newer.
 
 Diagnostics (a module required by no target, a duplicate module name reaching one
 link, and module dependency cycles) are reported at build time for MSVC exactly
