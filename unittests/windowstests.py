@@ -555,6 +555,24 @@ class WindowsTests(BasePlatformTests):
                 if line.strip().startswith('ARGS =') and '.ifc' in line:
                     self.assertIn('/headerUnit', line)
 
+    def test_msvc_undeclared_header_unit(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '152 msvc undeclared header unit')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC header units.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        # A source imports a header unit the target never declared; the collator
+        # must fail with a clear error rather than letting the compile fail with
+        # a bare C7612.
+        self.init(testdir)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('not declared in this target', cm.exception.stdout)
+
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()
         # and thus it's missing /utf-8 argument. Was that intentional? This needs

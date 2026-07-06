@@ -1,4 +1,4 @@
-## Experimental: opt-in C++ header units with GCC and MSVC
+## Opt-in C++ header units with GCC and MSVC
 
 A build target can declare the C++ header units its sources import, alongside
 named modules, with GCC or MSVC on the Ninja backend. Each entry is the header
@@ -20,7 +20,7 @@ lookup for header units, so Meson passes each consumer an explicit
 `/headerUnit:<spelling>=<bmi>` mapping (the only place a header-unit BMI path
 appears — never a named-module one). MSVC needs `cpp_std=c++20` or later.
 
-This is an early, deliberately minimal prototype. Known limits:
+Current limitations:
 
 - **Ordering.** Header units are built before all of the target's scans and
   compiles, but *not relative to each other*, so a header unit that itself

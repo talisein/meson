@@ -165,6 +165,17 @@ class FailureTests(BasePlatformTests):
             'only supported with the Ninja backend',
             extra_args=['--backend=vs2022'])
 
+    def test_cpp_header_units_need_ninja_backend(self):
+        # A target that only declares header units (no module-interface source,
+        # not a module provider) still needs the Ninja-only pipeline, so it must
+        # error on a non-Ninja backend rather than silently misbuilding.
+        with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
+            f.write('int main(void) { return 0; }\n')
+        self.assertMesonRaises(
+            "executable('prog', 'main.cpp', cpp_header_units: ['util.h'])",
+            'only supported with the Ninja backend',
+            extra_args=['--backend=vs2022'])
+
     def test_apple_frameworks_dependency(self):
         if not is_osx():
             raise unittest.SkipTest('only run on macOS')

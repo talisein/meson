@@ -375,6 +375,33 @@ class InternalTests(unittest.TestCase):
             self.assertEqual(a, c)
             self.assertTrue(a.endswith(suffix))
 
+    def test_cpp_header_units_rejected_on_unsupported_compiler(self):
+        # Declaring cpp_header_units on a compiler without header-unit support
+        # must error at configure time rather than silently dropping the units.
+        # P1689 support alone is not enough: Clang is in the named-modules
+        # pipeline but builds no header units yet.
+        from mesonbuild.interpreter.interpreter import Interpreter
+        from mesonbuild.interpreterbase import InvalidArguments
+        interp = Interpreter.__new__(Interpreter)
+
+        def check(cid, supported, has_cpp=True):
+            cpp = mock.MagicMock()
+            cpp.supports_cpp_modules_p1689.return_value = supported
+            cpp.get_id.return_value = cid
+            cpp.version = '18.0.0'
+            target = mock.MagicMock()
+            target.cpp_header_units = ['util.h']
+            target.compilers = {'cpp': cpp} if has_cpp else {}
+            interp._check_cpp_header_units_supported('t', target)
+
+        check('gcc', True)  # supported compiler: no raise
+        with self.assertRaises(InvalidArguments):
+            check('gcc', False)  # modules-incapable gcc
+        with self.assertRaises(InvalidArguments):
+            check('clang', True)  # P1689-capable, but no header units
+        with self.assertRaises(InvalidArguments):
+            check('gcc', False, has_cpp=False)  # no C++ compiler at all
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the

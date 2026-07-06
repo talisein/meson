@@ -588,7 +588,7 @@ class NinjaBackend(backends.Backend):
         # Consumer/provider target-id pairs already warned about for divergent
         # cpp_std, so each divergence is reported once.
         self._warned_module_cpp_std: T.Set[T.Tuple[str, str]] = set()
-        # Header units (prototype): global dedup of unit build edges, keyed by
+        # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
         # MSVC); plus per-target caches of those outputs (ordered before the
@@ -1234,7 +1234,7 @@ class NinjaBackend(backends.Backend):
         'none': no C++ module scanning.
 
         A target opts in by declaration (a module-interface source, the
-        cpp_modules kwarg, or linking a module provider --
+        cpp_modules/cpp_header_units kwargs, or linking a module provider --
         uses_cpp_modules()); source contents are never read. cl before build
         19.28.28617 (VS 16.8/16.9) has broken modules, and
         current_vs_supports_modules() rejects a too-old developer prompt.
@@ -1512,6 +1512,14 @@ class NinjaBackend(backends.Backend):
             # provider's object path), not the cache paths. Must stay in
             # lockstep with get_clang_pcm_stamp_for.
             depargs += ['--stamp-suffix', '.pcm.stamp']
+        if cpp.get_id() == 'msvc':
+            # Declared header units, so the collator can flag a source importing
+            # one this target never declared. cl reports header-unit requires
+            # from a cold scan (with a lookup-method); GCC cannot, so it is
+            # omitted there.
+            for hu in target.cpp_header_units:
+                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+                depargs += ['--header-unit', f'{mode}:{spelling}']
         elem.add_item('DEPARGS', depargs)
         elem.add_item('name', target.name)
         self.add_build(elem)
@@ -3182,7 +3190,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_rule(rule)
 
     def generate_cpp_header_unit_rule(self, compiler: Compiler) -> None:
-        # Compiles a header unit's BMI (prototype), named by the import spelling
+        # Compiles a header unit's BMI, named by the import spelling
         # ($SPELLING) resolved on the include path from $ARGS.
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
         if self.ninja.has_rule(rulename):
@@ -3224,7 +3232,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
     def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
         """Emit build edges for this target's declared header units and return
-        their outputs (prototype).
+        their outputs.
 
         Each entry is an *import spelling*: 'pkg/hdr.h' is a user header,
         '<pkg/hdr.h>' is a system header. It is resolved on the target's include
@@ -3936,7 +3944,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Declared header units are implicit inputs: their BMIs must exist
         # before this compile (in gcm.cache for GCC, at the path we chose for
         # MSVC), and a source that imports one must recompile when its BMI
-        # changes (prototype). See provision_header_units.
+        # changes. See provision_header_units.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
             element.add_dep(self.provision_header_units(target, compiler))
         self.add_build(element)

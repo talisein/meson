@@ -185,11 +185,11 @@ kwargs:
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
   cpp_header_units:
-    type: array[str]
+    type: array[str | file]
     since: 1.12.0
     default: []
     description: |
-      *(experimental)* C++ header units imported by this target's sources.
+      C++ header units imported by this target's sources.
       Each entry is the header **as spelled in the import**, resolved on the
       target's include path: `'pkg/header.h'` is a user header unit
       (`import "pkg/header.h";`) and `'<pkg/header.h>'` is a system header unit
@@ -211,7 +211,8 @@ kwargs:
       module-affecting flags. Implies module handling for the target.
 
       Currently supported with GCC (>= 14) and MSVC (>= VS 2022 17.2, cl 19.32)
-      on the Ninja backend only.
+      on the Ninja backend only; declaring it on any other compiler is an error
+      rather than being silently ignored.
 
   include_directories:
     type: array[inc | str]
