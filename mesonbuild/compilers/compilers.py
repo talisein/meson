@@ -1599,6 +1599,16 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def get_header_unit_consumer_args(self, mode: str, spelling: str, bmi_path: str) -> T.List[str]:
+        """Flags a consumer needs to resolve a prebuilt header unit.
+
+        ``mode`` is 'user' or 'system', ``spelling`` is the import spelling, and
+        ``bmi_path`` is the unit's built BMI. Returns [] for compilers that
+        resolve units by directory lookup (so nothing per-unit lands on the
+        command line); MSVC returns an explicit spelling->BMI mapping.
+        """
+        return []
+
     def get_compiler_check_args(self, mode: CompileCheckMode) -> T.List[str]:
         """Arguments to pass the compiler and/or linker for checks.
 

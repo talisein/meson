@@ -1255,6 +1255,13 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         """{logical-name: source path} for auto-provisioned stdlib modules."""
         return self._std_module_sources
 
+    def get_header_unit_consumer_args(self, mode: str, spelling: str, bmi_path: str) -> T.List[str]:
+        # cl has no directory lookup for header units: a consumer must name each
+        # unit's BMI explicitly as <spelling>=<ifc>. Quote vs angle spelling
+        # selects /headerUnit:quote or :angle, matching the import syntax.
+        flag = '/headerUnit:quote' if mode == 'user' else '/headerUnit:angle'
+        return [flag, f'{spelling}={bmi_path}']
+
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):
 
     id = 'clang-cl'

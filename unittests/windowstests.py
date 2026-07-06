@@ -525,6 +525,36 @@ class WindowsTests(BasePlatformTests):
         for bmi in ('std.ifc', 'std.compat.ifc'):
             self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
 
+    def test_msvc_header_units(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '151 msvc header units')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC header units.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        # A user unit, a system unit and a named module in one target; a second
+        # target reimports the user unit. Building + running proves the units
+        # are pre-built, mapped onto the consumers, and ordered before the scan.
+        self.init(testdir)
+        self.build()
+        self.run_tests()
+        # Units are pre-built to a Meson-chosen .ifc, deduped globally by
+        # (mode, spelling): the user unit shared by both targets is one edge/BMI.
+        hudir = os.path.join(self.builddir, 'meson-private', 'header-units')
+        self.assertEqual(len(glob(os.path.join(hudir, 'util.h.*.ifc'))), 1)
+        self.assertEqual(len(glob(os.path.join(hudir, 'angleutil.h.*.ifc'))), 1)
+        # cl has no directory lookup for header units, so the consumer compile
+        # does name the unit .ifc -- but only as a /headerUnit mapping; a named
+        # module BMI never appears on a command line, nor does /reference.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                self.assertNotIn('/reference', line)
+                if line.strip().startswith('ARGS =') and '.ifc' in line:
+                    self.assertIn('/headerUnit', line)
+
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()
         # and thus it's missing /utf-8 argument. Was that intentional? This needs

@@ -44,5 +44,5 @@ module partitions and `import std;` need the P1689 scan and therefore VS 2022
 
 Diagnostics (a module required by no target, a duplicate module name reaching one
 link, and module dependency cycles) are reported at build time for MSVC exactly
-as for GCC. Header units are not covered; all translation units sharing modules
-must use the same module-affecting flags.
+as for GCC. All translation units sharing modules must use the same
+module-affecting flags.

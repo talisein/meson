@@ -317,6 +317,64 @@ class InternalTests(unittest.TestCase):
         self.assertIn('--internal touch', command_str)
         self.assertNotIn('&& touch', command_str)
 
+    def test_header_unit_grammar_parse(self):
+        # provision_header_units and generate_p1689_module_collate_target both
+        # parse a declared header unit into (mode, spelling); they share
+        # _parse_header_unit so the grammar is defined (and ordered) once,
+        # rather than hand-parsed twice with the tuple in opposite orders.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild.utils.universal import File
+        parse = NinjaBackend._parse_header_unit
+        # '<pkg/hdr.h>' is a system header; the angle brackets are stripped.
+        self.assertEqual(parse('<pkg/hdr.h>', 'bld2src'), ('system', 'pkg/hdr.h'))
+        # A plain string is a user header, spelled as written.
+        self.assertEqual(parse('pkg/hdr.h', 'bld2src'), ('user', 'pkg/hdr.h'))
+        # A File is a user header, spelled build-relative.
+        f = File(False, 'sub', 'hdr.h')
+        self.assertEqual(parse(f, 'bld2src'), ('user', f.rel_to_builddir('bld2src')))
+
+    def test_header_unit_dedup_shared_by_spelling(self):
+        # A header unit is deduped globally by (mode, spelling) for both
+        # compilers: the same spelling declared by another target reuses the one
+        # BMI, even if that target's compile args differ. Header-unit flags are
+        # assumed uniform build-wide (diverging them is undefined), so the first
+        # edge builds the unit for every consumer. GCC could not do otherwise --
+        # it writes one flag-independent gcm.cache path per header.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+
+        def outputs_for(cid, suffix):
+            be = NinjaBackend.__new__(NinjaBackend)
+            be.build_to_src = '..'
+            be.all_outputs = set()
+            be._header_units = {}
+            be._target_header_unit_outputs = {}
+            be._target_header_unit_consumer_args = {}
+            be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
+            be.add_build = mock.MagicMock()
+            cpp = mock.MagicMock()
+            cpp.get_id.return_value = cid
+            cpp.get_module_bmi_suffix.return_value = suffix
+            cpp.get_header_unit_consumer_args.return_value = []
+
+            def provision(tid, args):
+                target = mock.MagicMock()
+                target.get_id.return_value = tid
+                target.cpp_header_units = ['util.h']
+                be._generate_single_compile = mock.MagicMock(return_value=args)
+                return be.provision_header_units(target, cpp)[0]
+
+            return (provision('a', ['-DFOO']),
+                    provision('b', ['-DBAR']),
+                    provision('c', ['-DFOO']))
+
+        for cid, suffix in (('msvc', '.ifc'), ('gcc', '.stamp')):
+            a, b, c = outputs_for(cid, suffix)
+            # Differing args (-DFOO vs -DBAR) never split the BMI: one shared
+            # edge per spelling, regardless of compiler.
+            self.assertEqual(a, b)
+            self.assertEqual(a, c)
+            self.assertTrue(a.endswith(suffix))
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the
@@ -376,13 +434,19 @@ class InternalTests(unittest.TestCase):
 
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit
-        # A header-unit require is a resolved header path (POSIX or Windows); a
-        # named module or ':partition' is an identifier with no path separator.
+        # cl tags a header-unit require with lookup-method include-quote/angle
+        # and a named module with by-name.
+        for method in ('include-quote', 'include-angle'):
+            self.assertTrue(_is_header_unit({'logical-name': 'util.h', 'lookup-method': method}), method)
+        self.assertFalse(_is_header_unit({'logical-name': 'mod', 'lookup-method': 'by-name'}), 'by-name')
+        # GCC omits lookup-method, so fall back to shape: a header-unit require
+        # is a resolved header path (POSIX or Windows); a named module or
+        # ':partition' is an identifier with no path separator.
         for name in ('./util.h', '/usr/include/c++/16/vector', '../src/hdr.hpp',
                      '.\\util.h', 'C:\\proj\\util.h', 'C:/proj/util.h'):
-            self.assertTrue(_is_header_unit(name), name)
+            self.assertTrue(_is_header_unit({'logical-name': name}), name)
         for name in ('mod', 'mod:part', 'std', 'std.compat', 'my.module', 'pkg.sub:part'):
-            self.assertFalse(_is_header_unit(name), name)
+            self.assertFalse(_is_header_unit({'logical-name': name}), name)
 
     def test_simple_abc(self):
         from abc import abstractmethod

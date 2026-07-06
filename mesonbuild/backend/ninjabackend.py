@@ -589,10 +589,14 @@ class NinjaBackend(backends.Backend):
         # cpp_std, so each divergence is reported once.
         self._warned_module_cpp_std: T.Set[T.Tuple[str, str]] = set()
         # Header units (prototype): global dedup of unit build edges, keyed by
-        # the header's absolute path -> its stamp file; plus the per-target list
-        # of stamps its scans/compiles must order after.
+        # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
+        # stamp for GCC, the real .ifc for
+        # MSVC); plus per-target caches of those outputs (ordered before the
+        # target's scans/compiles) and, for MSVC, the /headerUnit flags its
+        # compiles need to name each unit's BMI.
         self._header_units: T.Dict[str, str] = {}
-        self._target_header_unit_stamps: T.Dict[str, T.List[str]] = {}
+        self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
+        self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
 
     def create_phony_target(self, dummy_outfile: str, rulename: str, phony_infilenames: ListifiedStr) -> NinjaBuildElement:
         '''
@@ -3179,72 +3183,116 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
     def generate_cpp_header_unit_rule(self, compiler: Compiler) -> None:
         # Compiles a header unit's BMI (prototype), named by the import spelling
-        # ($SPELLING) resolved on the include path from $ARGS. Unlike other
-        # compile rules, GCC writes the BMI to a mangled gcm.cache path we don't
-        # track, so the edge's output is only a stamp, created via `meson
-        # --internal touch` because cmd.exe has no touch; consumers find the BMI
-        # by directory lookup. -fmodule-only skips the object; $HULANG is
-        # c++-user-header or c++-system-header.
+        # ($SPELLING) resolved on the include path from $ARGS.
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
         if self.ninja.has_rule(rulename):
             return
         command = compiler.get_exelist()
+        description = 'Building C++ header unit $SPELLING'
+        if compiler.get_id() == 'msvc':
+            # cl writes the BMI to the path we pick ($out) and emits no object;
+            # /headerName:$HUMODE is quote or angle. /showIncludes feeds the msvc
+            # deps parser so editing the header rebuilds the unit.
+            huargs = NinjaCommandArg.list(
+                ['/exportHeader', '/headerName:$HUMODE', '/ifcOutput', '$out',
+                 '/showIncludes', '$SPELLING'], Quoting.none)
+            args = ['$ARGS'] + huargs
+            self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
+            return
+        # GCC writes the BMI to a mangled gcm.cache path we don't track, so the
+        # edge's output is only a stamp and consumers find the BMI by directory
+        # lookup. The stamp goes through `meson --internal touch` because
+        # cmd.exe has no touch. -fmodule-only skips the object; $HULANG is
+        # c++-user-header or c++-system-header.
         modargs = NinjaCommandArg.list(compiler.get_module_compile_args(), Quoting.none)
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
         touch = self.environment.get_build_command() + ['--internal', 'touch', '$out']
         args = ['$ARGS'] + modargs + depargs + ['-fmodule-only', '-x', '$HULANG', '-c', '$SPELLING',
                                                 '&&'] + touch
-        description = 'Building C++ header unit $SPELLING'
         self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
+
+    @staticmethod
+    def _parse_header_unit(hu: T.Union[File, str], build_to_src: str) -> T.Tuple[str, str]:
+        # A declared header unit is a File (user header, spelled build-relative),
+        # a '<pkg/hdr.h>' string (system header), or a plain string (user
+        # header). Returns (mode, spelling); mode is 'user' or 'system'.
+        if isinstance(hu, File):
+            return 'user', hu.rel_to_builddir(build_to_src)
+        if hu.startswith('<') and hu.endswith('>'):
+            return 'system', hu[1:-1]
+        return 'user', hu
 
     def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
         """Emit build edges for this target's declared header units and return
-        their stamp files (prototype).
+        their outputs (prototype).
 
-        Each entry is an *import spelling*: 'pkg/hdr.h' is a user header
-        (`-x c++-user-header`); '<pkg/hdr.h>' is a system header
-        (`-x c++-system-header`). It is resolved on the target's include path, so
-        the BMI matches what a consumer's `import "pkg/hdr.h";` / `import
-        <pkg/hdr.h>;` looks up. Edges are deduped globally by (spelling, mode);
-        the returned stamps are added as order-only deps to the target's scans
-        and compiles so the scanner is never cold and BMIs exist at compile.
+        Each entry is an *import spelling*: 'pkg/hdr.h' is a user header,
+        '<pkg/hdr.h>' is a system header. It is resolved on the target's include
+        path, so the BMI matches what a consumer's `import "pkg/hdr.h";` /
+        `import <pkg/hdr.h>;` looks up. The returned outputs are added as
+        order-only deps to the target's scans and implicit deps to its compiles
+        so the scanner is never cold (GCC) and BMIs exist at compile.
+
+        GCC writes the BMI to an untracked gcm.cache path, so the edge output is
+        a stamp and consumers resolve by directory lookup. cl writes the BMI to
+        the path we pick (the real output) and consumers must name it; those
+        per-target /headerUnit flags are recorded for the compile site.
+
+        Edges are deduped globally by (mode, spelling): a header unit with a
+        given spelling is built once and shared by every target that declares
+        it. Its compile flags must therefore be uniform build-wide -- the same
+        requirement the module support makes everywhere -- so the first edge for
+        a spelling stands in for every consumer and diverging flags for one
+        header unit are undefined. (GCC would enforce this regardless: it writes
+        one flag-independent gcm.cache path per header, so a second edge would
+        only race to write the same BMI.)
         """
-        if compiler.get_id() != 'gcc':
-            # Header units are a GCC-only opt-in; the module pipeline is shared
-            # with MSVC, which does not use this GCC-specific provisioning.
+        cid = compiler.get_id()
+        if cid not in ('gcc', 'msvc'):
             return []
         tid = target.get_id()
-        if tid in self._target_header_unit_stamps:
-            return self._target_header_unit_stamps[tid]
-        stamps: T.List[str] = []
+        if tid in self._target_header_unit_outputs:
+            return self._target_header_unit_outputs[tid]
+        outputs: T.List[str] = []
+        consumer_args: T.List[str] = []
         if target.cpp_header_units:
-            args = self._generate_single_compile_target_args(target, compiler)
-            args = compiler.compiler_args(args)
+            # Build each unit with the target's full compile args (base +
+            # per-target), the same a consumer sees, so the BMI freezes the same
+            # preprocessor state -- a unit built under different macros (e.g. cl
+            # /MDd's _DEBUG) than the importer is IFNDR.
+            args = self._generate_single_compile(target, compiler)
             rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
+            is_msvc = cid == 'msvc'
+            suffix = compiler.get_module_bmi_suffix() if is_msvc else '.stamp'
             for hu in target.cpp_header_units:
-                if isinstance(hu, File):
-                    spelling, hulang = hu.rel_to_builddir(self.build_to_src), 'c++-user-header'
-                elif hu.startswith('<') and hu.endswith('>'):
-                    spelling, hulang = hu[1:-1], 'c++-system-header'
-                else:
-                    spelling, hulang = hu, 'c++-user-header'
-                key = f'{hulang}:{spelling}'
-                stamp = self._header_units.get(key)
-                if stamp is None:
+                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+                # One BMI per (mode, spelling), shared across targets; flags are
+                # assumed uniform build-wide (see docstring), so the first edge's
+                # args build the unit for every consumer.
+                key = f'{mode}:{spelling}'
+                output = self._header_units.get(key)
+                if output is None:
                     digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
                     safe = os.path.basename(spelling) or 'header'
-                    stamp = os.path.join('meson-private', 'header-units',
-                                         f'{safe}.{digest}.stamp')
-                    elem = NinjaBuildElement(self.all_outputs, stamp, rulename, [])
+                    # Forward slashes so the path is safe in the ninja file on
+                    # Windows (cl accepts either).
+                    output = f'meson-private/header-units/{safe}.{digest}{suffix}'
+                    elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
                     elem.add_item('ARGS', args)
-                    elem.add_item('HULANG', hulang)
                     elem.add_item('SPELLING', spelling)
-                    elem.add_item('DEPFILE', stamp + '.d')
+                    if is_msvc:
+                        elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
+                    else:
+                        elem.add_item('HULANG', f'c++-{mode}-header')
+                        elem.add_item('DEPFILE', output + '.d')
                     self.add_build(elem)
-                    self._header_units[key] = stamp
-                stamps.append(stamp)
-        self._target_header_unit_stamps[tid] = stamps
-        return stamps
+                    self._header_units[key] = output
+                outputs.append(output)
+                if is_msvc:
+                    consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
+        self._target_header_unit_outputs[tid] = outputs
+        self._target_header_unit_consumer_args[tid] = consumer_args
+        return outputs
 
     def generate_compile_rules(self) -> None:
         for for_machine in MachineChoice:
@@ -3262,7 +3310,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # clang-scan-deps feature probe, which non-module clang
                     # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
-                if langname == 'cpp' and compiler.get_id() == 'gcc':
+                if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
                     self.generate_cpp_header_unit_rule(compiler)
                 for mode in compiler.get_modes():
                     self.generate_compile_rule_for(langname, mode)
@@ -3861,7 +3909,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             element.add_item('COMMAND', meson_exe_cmd)
             element.add_item('description', f'Compiling {compiler.get_display_language()} object {rel_obj}{cmd_type}')
         else:
-            element.add_item('ARGS', commands)
+            compile_commands = commands
+            if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+                # cl consumers must name each imported header unit's BMI
+                # explicitly (no directory lookup). These flags go only on the
+                # compile, never on the scan -- which reuses `commands` and may
+                # run before the BMI exists. Appending is non-mutating, so the
+                # scan's `commands` is untouched.
+                self.provision_header_units(target, compiler)
+                hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
+                if hu_consumer:
+                    compile_commands = commands + hu_consumer
+            element.add_item('ARGS', compile_commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
         # A Clang module interface's compile also writes the source-keyed BMI
@@ -3874,10 +3933,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces
         if clang_miu:
             element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
-        # Declared header units are implicit inputs: their BMIs must exist in
-        # gcm.cache before this compile, and a source that imports one must
-        # recompile when its BMI changes (prototype). GCC-only (see
-        # provision_header_units).
+        # Declared header units are implicit inputs: their BMIs must exist
+        # before this compile (in gcm.cache for GCC, at the path we chose for
+        # MSVC), and a source that imports one must recompile when its BMI
+        # changes (prototype). See provision_header_units.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
             element.add_dep(self.provision_header_units(target, compiler))
         self.add_build(element)

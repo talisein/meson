@@ -194,9 +194,11 @@ kwargs:
       target's include path: `'pkg/header.h'` is a user header unit
       (`import "pkg/header.h";`) and `'<pkg/header.h>'` is a system header unit
       (`import <pkg/header.h>;`). Meson pre-builds each unit's BMI once (shared
-      across the build) before scanning, because GCC's scanner fails on a
-      header-unit import whose BMI does not yet exist; consumers then resolve it
-      by directory lookup with no BMI path on the command line.
+      across the build) from this list, because a header unit's BMI must exist
+      before the sources that import it are scanned and compiled. On GCC
+      consumers resolve the BMI by directory lookup with no BMI path on the
+      command line; on MSVC Meson passes each consumer an explicit
+      `/headerUnit` mapping to the unit's BMI.
 
       Every header unit a source imports must be listed (the declaration does
       not propagate through dependencies, so a consumer that imports the same
@@ -208,7 +210,8 @@ kwargs:
       state it was built with, so the whole build must use uniform
       module-affecting flags. Implies module handling for the target.
 
-      Currently supported with GCC (>= 14) on the Ninja backend only.
+      Currently supported with GCC (>= 14) and MSVC (>= VS 2022 17.2, cl 19.32)
+      on the Ninja backend only.
 
   include_directories:
     type: array[inc | str]
