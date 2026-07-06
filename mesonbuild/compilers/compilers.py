@@ -1545,8 +1545,18 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_outdir_args(self, path: str) -> T.List[str]:
         raise EnvironmentException(f'{self.id} does not implement get_module_outdir_args')
 
+    def get_module_cache_dir(self) -> str:
+        raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
+
+    def get_module_bmi_suffix(self) -> str:
+        raise EnvironmentException(f'{self.id} does not implement get_module_bmi_suffix')
+
     def module_name_to_filename(self, module_name: str) -> str:
-        raise EnvironmentException(f'{self.id} does not implement module_name_to_filename')
+        # A module logical-name maps to the BMI path the compiler reads/writes:
+        # <cache-dir>/<name><suffix>, with a partition 'pkg:part' spelled
+        # 'pkg-part'. The collator (scripts/depaccumulate.py) mirrors this to
+        # name BMIs from logical-names without scanning compiler output.
+        return f'{self.get_module_cache_dir()}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
 
     def get_module_compile_args(self) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.

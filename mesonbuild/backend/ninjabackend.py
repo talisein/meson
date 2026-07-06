@@ -1222,27 +1222,24 @@ class NinjaBackend(backends.Backend):
         if 'cpp' not in target.compilers:
             return False
         cpp = target.compilers['cpp']
-        # GCC named modules: the target opts in (a module-interface source, the
-        # cpp_modules kwarg, or linking a module provider). GCC scans with its
-        # P1689 output; see generate_dependency_scan_target.
-        if cpp.get_id() == 'gcc' and target.uses_cpp_modules():
+        cid = cpp.get_id()
+        # GCC / MSVC named modules: the target opts in (a module-interface
+        # source, the cpp_modules kwarg, or linking a module provider) and is
+        # scanned with the compiler's P1689 output; see
+        # generate_dependency_scan_target. cl gained /scanDependencies in Visual
+        # Studio 2022 17.2 (cl 19.32).
+        if cid == 'gcc' and target.uses_cpp_modules():
             return True
+        if cid == 'msvc' and target.uses_cpp_modules() \
+                and mesonlib.version_compare(cpp.version, '>=19.32'):
+            return True
+        # Legacy/opt-in scan for other compilers (e.g. Clang) or a bare
+        # -fmodules/-fmodules-ts in the compile args: handled by the regex
+        # scanner (generate_dependency_scan_target's non-P1689 branch).
         for arg in target.compilers['cpp'].get_cpp_modules_args():
             if arg in target.extra_args['cpp']:
                 return True
-        # Currently only the preview version of Visual Studio is supported.
-        if cpp.get_id() != 'msvc':
-            return False
-        cppversion = self.get_target_option(target, OptionKey('cpp_std',
-                                                              machine=target.for_machine,
-                                                              subproject=target.subproject))
-        if cppversion not in ('latest', 'c++latest', 'vc++latest'):
-            return False
-        if not mesonlib.current_vs_supports_modules():
-            return False
-        if mesonlib.version_compare(cpp.version, '<19.28.28617'):
-            return False
-        return True
+        return False
 
     def generate_dependency_scan_target(self, target: build.BuildTarget,
                                         compiled_sources: T.List[str],
@@ -1314,16 +1311,17 @@ class NinjaBackend(backends.Backend):
 
     @lru_cache(maxsize=None)
     def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes) -> bool:
-        """Whether this target should use the GCC P1689 module pipeline.
+        """Whether this target should use the P1689 module pipeline (GCC/MSVC).
 
         Fortran targets keep the existing regex-scan pipeline even when they
-        also carry C++ sources; the GCC path is for pure C++-module targets.
+        also carry C++ sources; the P1689 path is for pure C++-module targets.
         The target must actually use modules (a module-interface source, the
         cpp_modules kwarg, or a linked module provider): a bare -fmodules/
         -fmodules-ts in cpp_args does not select this pipeline, so such legacy
-        targets keep the existing scan path. The P1689 pipeline needs GCC >= 14
-        (supports_cpp_modules_p1689); an older but modules-capable GCC falls back
-        to the regex scan.
+        targets (and Clang) keep the regex scan path. The P1689 pipeline needs
+        GCC >= 14, or MSVC where cl ships /scanDependencies (VS 2022 17.2, cl
+        19.32); an older but modules-capable GCC/cl falls back to the regex scan,
+        which handles only flat named modules (no partitions, no import std).
         """
         if not isinstance(target, build.BuildTarget):
             return False
@@ -1336,7 +1334,7 @@ class NinjaBackend(backends.Backend):
         return cpp.supports_cpp_modules_p1689()
 
     def target_uses_p1689_cpp_modules_edge(self, target: build.BuildTargetTypes, compiler: Compiler) -> bool:
-        """Whether this specific compile/scan edge is a GCC C++ module edge."""
+        """Whether this specific compile/scan edge is a P1689 C++ module edge."""
         return compiler.get_language() == 'cpp' and self.target_uses_p1689_cpp_modules(target)
 
     def get_provided_modules_file_for(self, target: build.BuildTarget) -> str:
@@ -1372,20 +1370,25 @@ class NinjaBackend(backends.Backend):
     def generate_p1689_module_collate_target(self, target: build.BuildTarget,
                                            compiled_sources: T.List[str],
                                            source2object: T.Dict[str, str]) -> None:
-        # GCC keeps one module cache (gcm.cache) at the build root, shared by
-        # every compile. In a cross build the build-machine and host-machine
-        # compilers would write incompatible BMIs to the same paths, so refuse
-        # C++ modules spanning more than one machine.
+        cpp = target.compilers['cpp']
+        # A single module cache (gcm.cache for GCC, ifc.cache for MSVC) sits at
+        # the build root, shared by every compile. In a cross build the
+        # build-machine and host-machine compilers would write incompatible BMIs
+        # to the same paths, so refuse C++ modules spanning more than one machine.
         if self.environment.is_cross_build():
             machines = {t.for_machine for t in self.build.get_targets().values()
                         if self.target_uses_p1689_cpp_modules(t)}
             if len(machines) > 1:
                 raise MesonException(
                     'C++ modules are not supported for targets on more than one '
-                    'machine in a cross build: GCC keeps one module cache '
-                    '(gcm.cache) at the build root, and BMIs are not '
-                    'interchangeable between the build-machine and host-machine '
-                    'compilers.')
+                    'machine in a cross build: a single module cache at the build '
+                    'root is shared, and BMIs are not interchangeable between the '
+                    'build-machine and host-machine compilers.')
+        if cpp.get_id() == 'msvc':
+            # cl does not create the /ifcOutput directory itself, so make the
+            # shared cache once, up front, before any module compile runs.
+            os.makedirs(os.path.join(self.environment.get_build_dir(),
+                                     cpp.get_module_cache_dir()), exist_ok=True)
         dyndep_file = self.get_dep_scan_file_for(target)[1]
         provmap_file = self.get_provided_modules_file_for(target)
 
@@ -1413,6 +1416,10 @@ class NinjaBackend(backends.Backend):
             elem.add_dep(dep_provmaps)
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
+        # The collator names BMIs from logical-names using the compiler's cache
+        # dir + suffix, kept in lockstep with module_name_to_filename.
+        elem.add_item('BMIDIR', cpp.get_module_cache_dir())
+        elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
         depargs: T.List[str] = []
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
@@ -2990,14 +2997,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         rule = NinjaRule(rulename, command, args, description)
         self.add_rule(rule)
 
-        # GCC named modules use a P1689 scan (per source) plus a
+        # GCC/MSVC named modules use a P1689 scan (per source) plus a
         # dedicated collate rule that turns the per-source scans + dependency
         # provided-module maps into a dyndep and this target's own map.
         rulename = 'cpp_module_collate'
         if not self.ninja.has_rule(rulename):
             command = self.environment.get_build_command() + \
                 ['--internal', 'depaccumulate', '--p1689']
-            args = ['--dyndep', '$DYNDEP', '--provmap', '$PROVMAP', '$DEPARGS', '$in']
+            args = ['--dyndep', '$DYNDEP', '--provmap', '$PROVMAP',
+                    '--bmi-dir', '$BMIDIR', '--bmi-suffix', '$BMISUFFIX',
+                    '$DEPARGS', '$in']
             description = 'Collating C++ module dependencies for target $name'
             rule = NinjaRule(rulename, command, args, description)
             self.add_rule(rule)
@@ -3014,7 +3023,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             compiler.get_module_scanner_args('$out', '$OBJ', '$DEPFILE'), Quoting.none)
         args = ['$ARGS'] + scanargs + ['$in']
         description = 'Scanning $in for C++ module dependencies'
-        rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
+        # GCC emits a make-style header depfile alongside the scan; cl does not,
+        # so the scan there tracks only its source (generated-header existence is
+        # covered by order-only deps in generate_cpp_module_scan).
+        if compiler.get_id() == 'gcc':
+            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
+        else:
+            rule = NinjaRule(rulename, command, args, description)
         self.add_rule(rule)
 
     def generate_compile_rules(self) -> None:
@@ -3027,7 +3042,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     self.generate_tasking_mil_compile_rules(compiler)
                 self.generate_compile_rule_for(langname, compiler)
                 self.generate_pch_rule_for(langname, compiler)
-                if langname == 'cpp' and compiler.get_id() == 'gcc':
+                if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
                     self.generate_cpp_module_scan_rule(compiler)
                 for mode in compiler.get_modes():
                     self.generate_compile_rule_for(langname, mode)
@@ -3455,11 +3470,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         # C++ named modules: compile every TU of a module-enabled target with
         # the module flags, exactly as it will be scanned. The module name and
-        # BMI path never appear on the command line -- ordering is
-        # carried by the dyndep and BMIs are found by directory lookup in
-        # gcm.cache.
+        # BMI path never appear on the command line -- ordering is carried by
+        # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
             commands += compiler.get_module_compile_args()
+            # cl needs each module-interface unit flagged explicitly (GCC infers
+            # it from the source). Detected by extension as everywhere else,
+            # never by reading the source.
+            if compiler.get_id() == 'msvc':
+                suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
+                if suffix in {'cppm', 'ixx'}:
+                    commands += ['/interface', '/TP']
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
@@ -3605,8 +3626,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
         self.add_build(element)
-        # Emit the P1689 scan edge for GCC module targets, reusing the
-        # exact compile args so scan and compile see the same dialect.
+        # Emit the P1689 scan edge for GCC/MSVC module targets, reusing
+        # the exact compile args so scan and compile see the same dialect.
         self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
                                       header_deps=header_deps, order_deps=order_deps)
         assert isinstance(rel_obj, str)

@@ -21,7 +21,7 @@ from mesonbuild.mesonlib import (
 )
 from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
-    detect_c_compiler, detect_d_compiler, compiler_from_language,
+    detect_c_compiler, detect_cpp_compiler, detect_d_compiler, compiler_from_language,
 )
 from mesonbuild.programs import ExternalProgram
 import mesonbuild.dependencies.base
@@ -444,6 +444,86 @@ class WindowsTests(BasePlatformTests):
             raise SkipTest('C++ modules are only supported with VS 2019 Preview or newer.')
         self.init(os.path.join(self.unit_test_dir, '85 cpp modules'))
         self.build()
+
+    def test_msvc_cpp_modules(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '149 msvc cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC named modules.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        self.init(testdir)
+        self.build()
+        # The library provides a module, imported by an executable that merely
+        # links it, plus partitions, an explicit-opt-in target, and a generated
+        # interface; each test() exercises a producer/consumer pair.
+        self.run_tests()
+        # BMIs land in a single shared cache at the build root, named by cl's
+        # scheme incl. partition ':' -> '-'.
+        ifc = os.path.join(self.builddir, 'ifc.cache')
+        for bmi in ('modlib.ifc', 'pkg.ifc', 'pkg-part.ifc', 'kwmod.ifc', 'genmod.ifc'):
+            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
+        # No compile or scan command may name a module or a BMI path.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS ='):
+                    self.assertNotIn('.ifc', line)
+                    self.assertNotIn('/reference', line)
+
+    def test_msvc_cpp_module_rebuild_on_interface_change(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '149 msvc cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC named modules.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        # Editing a module interface must rebuild its .ifc and recompile every
+        # importer, otherwise consumers link against a stale BMI.
+        srcdir = self.copy_srcdir(testdir)
+        self.init(srcdir)
+        self.build()
+        self.run_tests()  # modfunc() == 42 -> prog exits 0
+        iface = os.path.join(srcdir, 'modlib.ixx')
+        with open(iface, encoding='utf-8') as f:
+            content = f.read()
+        newcontent = content.replace('return ', 'return 1000 + ', 1)
+        self.assertNotEqual(content, newcontent, 'interface edit was a no-op')
+        with open(iface, 'w', encoding='utf-8') as f:
+            f.write(newcontent)
+        out = self.build()
+        self.assertIn('Linking target prog', out)
+        prog = os.path.join(self.builddir, 'prog.exe')
+        self.assertNotEqual(0, subprocess.run([prog]).returncode,
+                            'importer did not pick up the module change (stale BMI)')
+
+    def test_msvc_import_std(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '150 msvc import std')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC import std.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        if not cpp.get_std_module_sources():
+            raise SkipTest('MSVC toolset does not ship the std module (modules.json).')
+        # `import std;` / `import std.compat;` resolved via dependency('std'),
+        # which synthesizes one static library carrying both std module objects
+        # and puts it on the link line of every consumer -- including a target
+        # that only links a std-importing library without importing std itself.
+        self.init(testdir)
+        self.build()
+        self.run_tests()
+        ifc = os.path.join(self.builddir, 'ifc.cache')
+        for bmi in ('std.ifc', 'std.compat.ifc'):
+            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

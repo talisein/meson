@@ -93,24 +93,37 @@ class InternalTests(unittest.TestCase):
             OS name: "linux", version: "5.12.17", arch: "amd64", family: "unix"'''),
             '3.8.1')
 
-    def test_gcc_module_bmi_naming_lockstep(self):
-        # The GCC gcm.cache BMI path is derived independently by the compiler
-        # (GnuCPPCompiler.module_name_to_filename) and the collator
-        # (depaccumulate.module_to_filename); they must agree, and must use
-        # forward slashes on every platform (they feed ninja paths / dyndep).
-        from mesonbuild.compilers.cpp import GnuCPPCompiler
+    def test_module_bmi_naming_lockstep(self):
+        # The BMI path is derived independently by the compiler
+        # (module_name_to_filename) and the collator (depaccumulate.
+        # module_to_filename, fed the compiler's dir/suffix); they must agree,
+        # and must use forward slashes on every platform (they feed ninja paths
+        # / dyndep).
+        from mesonbuild.compilers.cpp import GnuCPPCompiler, VisualStudioCPPCompiler
         from mesonbuild.scripts.depaccumulate import module_to_filename
-        expected = {
-            'foo': 'gcm.cache/foo.gcm',
-            'pkg:part': 'gcm.cache/pkg-part.gcm',
-            'my.module': 'gcm.cache/my.module.gcm',
-        }
-        for name, want in expected.items():
-            # module_name_to_filename is pure (does not touch self).
-            compiler_side = GnuCPPCompiler.module_name_to_filename(None, name)
-            self.assertEqual(compiler_side, want)
-            self.assertEqual(compiler_side, module_to_filename(name))
-            self.assertNotIn('\\', compiler_side)
+        cases = [
+            (GnuCPPCompiler, {
+                'foo': 'gcm.cache/foo.gcm',
+                'pkg:part': 'gcm.cache/pkg-part.gcm',
+                'my.module': 'gcm.cache/my.module.gcm',
+            }),
+            (VisualStudioCPPCompiler, {
+                'foo': 'ifc.cache/foo.ifc',
+                'pkg:part': 'ifc.cache/pkg-part.ifc',
+                'my.module': 'ifc.cache/my.module.ifc',
+            }),
+        ]
+        for cls, expected in cases:
+            # These methods use no instance state, so an uninitialized instance
+            # is enough to exercise the (self-dispatching) mapping.
+            comp = cls.__new__(cls)
+            bmidir = comp.get_module_cache_dir()
+            suffix = comp.get_module_bmi_suffix()
+            for name, want in expected.items():
+                compiler_side = comp.module_name_to_filename(name)
+                self.assertEqual(compiler_side, want)
+                self.assertEqual(compiler_side, module_to_filename(name, bmidir, suffix))
+                self.assertNotIn('\\', compiler_side)
 
     def test_depaccumulate_p1689_empty_ddis(self):
         # A C++-module-enabled target can have zero compiled C++ TUs (e.g. only
@@ -121,7 +134,8 @@ class InternalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dyndep = os.path.join(d, 'out.dd')
             provmap = os.path.join(d, 'provided-modules.json')
-            rc = run_p1689(['--dyndep', dyndep, '--provmap', provmap])
+            rc = run_p1689(['--dyndep', dyndep, '--provmap', provmap,
+                             '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm'])
             self.assertEqual(rc, 0)
             with open(provmap, encoding='utf-8') as f:
                 self.assertEqual(json.load(f), {})
@@ -133,7 +147,8 @@ class InternalTests(unittest.TestCase):
         # an older but modules-capable GCC, or Clang, is gated out (module
         # targets there fall back to the regex scan and header units are
         # unsupported).
-        from mesonbuild.compilers.cpp import GnuCPPCompiler, ClangCPPCompiler
+        from mesonbuild.compilers.cpp import (
+            GnuCPPCompiler, VisualStudioCPPCompiler, ClangCPPCompiler)
 
         def gate(cls, version):
             comp = cls.__new__(cls)
@@ -142,7 +157,21 @@ class InternalTests(unittest.TestCase):
 
         self.assertFalse(gate(GnuCPPCompiler, '13.2.0'))
         self.assertTrue(gate(GnuCPPCompiler, '14.0.0'))
+        self.assertFalse(gate(VisualStudioCPPCompiler, '19.31'))
+        self.assertTrue(gate(VisualStudioCPPCompiler, '19.32'))
         self.assertFalse(gate(ClangCPPCompiler, '18.0.0'))
+
+    def test_msvc_module_compile_args_use_cache_dir(self):
+        # /ifcSearchDir and /ifcOutput must point at the compiler's own module
+        # cache dir (get_module_cache_dir), not a hardcoded literal, so the BMI
+        # search/output dir stays in lockstep with the collator's dir.
+        comp = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
+        with mock.patch.object(comp, 'get_module_cache_dir', return_value='sentinel.cache'):
+            args = comp.get_module_compile_args()
+        self.assertNotIn('ifc.cache', args)
+        self.assertNotIn('ifc.cache/', args)
+        self.assertIn('sentinel.cache', args)
+        self.assertIn('sentinel.cache/', args)
 
     def test_cpp_std_supports_modules(self):
         # C++ modules need C++20+. The helper must accept c++20 and later in all
@@ -223,7 +252,8 @@ class InternalTests(unittest.TestCase):
                                       'requires': [{'logical-name': 'mod'}]}]}, f)
             with self.assertRaises(MesonException) as cm:
                 run_p1689(['--dyndep', os.path.join(d, 'out.dd'),
-                            '--provmap', os.path.join(d, 'pm.json'), ddi])
+                            '--provmap', os.path.join(d, 'pm.json'),
+                            '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm', ddi])
             msg = str(cm.exception)
             self.assertIn('provided by no target', msg)
             self.assertIn('cpp_modules: true', msg)
@@ -236,41 +266,34 @@ class InternalTests(unittest.TestCase):
         from mesonbuild.scripts.depaccumulate import run_p1689
         from mesonbuild.utils.core import MesonException
 
-        def collate(tgt: str) -> int:
-            ddi = f'{tgt}.cpp.o.ddi'
+        def collate(d: str, bmidir: str, tgt: str) -> int:
+            ddi = os.path.join(d, f'{tgt}.cpp.o.ddi')
             with open(ddi, 'w', encoding='utf-8') as f:
                 json.dump({'rules': [{'primary-output': f'{tgt}.cpp.o',
                                       'provides': [{'logical-name': 'dupmod'}]}]}, f)
-            return run_p1689(['--dyndep', f'{tgt}.dd',
-                              '--provmap', f'{tgt}-pm.json', ddi])
+            return run_p1689(['--dyndep', os.path.join(d, f'{tgt}.dd'),
+                              '--provmap', os.path.join(d, f'{tgt}-pm.json'),
+                              '--bmi-dir', bmidir, '--bmi-suffix', '.gcm', ddi])
 
-        # The owner claim lives next to the BMI in the collator's fixed
-        # gcm.cache path, relative to the build root (the collate's cwd) --
-        # so run inside the tmpdir.
-        oldcwd = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
-            os.chdir(d)
-            try:
-                self.assertEqual(collate('liba'), 0)
-                # Re-collating the same target (an ordinary rebuild) is no
-                # duplicate.
-                self.assertEqual(collate('liba'), 0)
-                with self.assertRaises(MesonException) as cm:
-                    collate('libb')
-                msg = str(cm.exception)
-                self.assertIn('exported by more than one target', msg)
-                self.assertIn('dupmod', msg)
-                # A stale claim heals: once the owner's map no longer lists
-                # the module (it moved away and the old provider re-collated),
-                # another target may take the name over ...
-                with open('liba-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({}, f)
-                self.assertEqual(collate('libb'), 0)
-                # ... after which the original owner is the refused stranger.
-                with self.assertRaises(MesonException):
-                    collate('liba')
-            finally:
-                os.chdir(oldcwd)
+            bmidir = os.path.join(d, 'gcm.cache')
+            self.assertEqual(collate(d, bmidir, 'liba'), 0)
+            # Re-collating the same target (an ordinary rebuild) is no duplicate.
+            self.assertEqual(collate(d, bmidir, 'liba'), 0)
+            with self.assertRaises(MesonException) as cm:
+                collate(d, bmidir, 'libb')
+            msg = str(cm.exception)
+            self.assertIn('exported by more than one target', msg)
+            self.assertIn('dupmod', msg)
+            # A stale claim heals: once the owner's map no longer lists the
+            # module (it moved away and the old provider re-collated), another
+            # target may take the name over ...
+            with open(os.path.join(d, 'liba-pm.json'), 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+            self.assertEqual(collate(d, bmidir, 'libb'), 0)
+            # ... after which the original owner is the refused stranger.
+            with self.assertRaises(MesonException):
+                collate(d, bmidir, 'liba')
 
     def test_simple_abc(self):
         from abc import abstractmethod

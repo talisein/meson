@@ -1,0 +1,30 @@
+## C++20 named modules with MSVC
+
+C++20 named modules (and module partitions) now build with MSVC on the Ninja
+backend, through the same pipeline used for GCC. Sources are scanned with cl's
+`/scanDependencies` P1689 output and ordered through Ninja `dyndep`;
+compiled module interfaces (`.ifc`) live in a single shared `ifc.cache` at the
+build root and are found by name through `/ifcSearchDir`. No `/reference`
+mappings or module names appear on any compile command line.
+
+The user-facing interface is identical to the GCC one: a target is
+module-enabled when it has a module-interface source (`.cppm` / `.ixx`, including
+a build-time generated one), when it links a target that provides modules, or
+when the `cpp_modules` keyword is set.
+
+```meson
+modlib = static_library('modlib', 'modlib.ixx')
+# The executable imports modlib's module and only links the library.
+executable('prog', 'main.cpp', link_with: modlib)
+```
+
+`import std;` and `import std.compat;` are available through `dependency('std')`,
+built from the standard library's module sources shipped with the MSVC toolset
+(`modules.json`). Requires Visual Studio 2022 (cl 19.3x or newer) and
+`cpp_std=c++20` or later; `import std;` additionally needs a toolset that ships
+the std module sources.
+
+Diagnostics (a module required by no target, a duplicate module name reaching one
+link, and module dependency cycles) are reported at build time for MSVC exactly
+as for GCC. Header units are not covered; all translation units sharing modules
+must use the same module-affecting flags.

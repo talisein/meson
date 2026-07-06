@@ -577,14 +577,11 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # GCC 14.
         return version_compare(self.version, '>=14')
 
-    def module_name_to_filename(self, module_name: str) -> str:
-        # GCC writes and reads BMIs in gcm.cache relative to the process CWD
-        # (the build root under Ninja), mapping a module name to
-        # gcm.cache/<name>.gcm and a partition 'pkg:part' to
-        # gcm.cache/pkg-part.gcm. This is GCC's documented, static scheme; the
-        # collator (scripts/depaccumulate.py) mirrors it to name BMIs without
-        # scanning output filenames.
-        return 'gcm.cache/' + module_name.replace(':', '-') + '.gcm'
+    def get_module_cache_dir(self) -> str:
+        return 'gcm.cache'
+
+    def get_module_bmi_suffix(self) -> str:
+        return '.gcm'
 
     def get_module_compile_args(self) -> T.List[str]:
         # -fmodules enables named modules. -Mno-modules stops GCC from writing
@@ -1029,6 +1026,64 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
 
     def get_cpp_modules_args(self) -> T.List[str]:
         return ['/interface']
+
+    def supports_cpp_modules_p1689(self) -> bool:
+        # cl ships /scanDependencies (the P1689 scanner the pipeline needs)
+        # from VS 2022 17.2, i.e. cl 19.32.
+        return version_compare(self.version, '>=19.32')
+
+    def get_module_cache_dir(self) -> str:
+        return 'ifc.cache'
+
+    def get_module_bmi_suffix(self) -> str:
+        return '.ifc'
+
+    def get_module_compile_args(self) -> T.List[str]:
+        # Read and write BMIs by directory, shared by every compile. /interface
+        # is per interface-unit and is added at the compile site, not here. The
+        # trailing slash marks /ifcOutput as a directory; a forward slash avoids
+        # backslash-escaping in the generated ninja file (cl accepts either).
+        cache = self.get_module_cache_dir()
+        return ['/ifcSearchDir', cache, '/ifcOutput', f'{cache}/']
+
+    def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
+        # P1689 scan. No /c: cl only scans and writes no object. /Fo sets
+        # the scan's primary-output to the eventual object so the collator can
+        # match it. Module info goes to outfile; there is no make-style depfile.
+        return ['/scanDependencies', outfile, '/Fo' + target]
+
+    @lazy_property
+    def _std_module_sources(self) -> T.Dict[str, str]:
+        # cl ships the standard library's module-interface sources under
+        # %VCToolsInstallDir%\modules with a modules.json manifest listing their
+        # filenames; the logical name is the filename without its .ixx suffix
+        # (std.ixx -> std, std.compat.ixx -> std.compat). Empty when the toolset
+        # is too old to ship the manifest.
+        root = os.environ.get('VCToolsInstallDir')
+        if not root:
+            return {}
+        moddir = os.path.join(root, 'modules')
+        manifest = os.path.join(moddir, 'modules.json')
+        if not os.path.isfile(manifest):
+            return {}
+        try:
+            with open(manifest, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        result: T.Dict[str, str] = {}
+        for src in data.get('module-sources', []):
+            path = os.path.normpath(os.path.join(moddir, src))
+            if os.path.isfile(path):
+                name = os.path.basename(src)
+                if name.endswith('.ixx'):
+                    name = name[:-len('.ixx')]
+                result[name] = path
+        return result
+
+    def get_std_module_sources(self) -> T.Dict[str, str]:
+        """{logical-name: source path} for auto-provisioned stdlib modules."""
+        return self._std_module_sources
 
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):
 
