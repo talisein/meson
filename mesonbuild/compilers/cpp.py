@@ -6,6 +6,8 @@ from __future__ import annotations
 import functools
 import json
 import os.path
+import shutil
+import tempfile
 import typing as T
 
 from .. import options
@@ -353,6 +355,88 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
     def get_cpp_modules_args(self) -> T.List[str]:
         # Although -fmodules-ts is removed in LLVM 17, we keep this in for compatibility with old compilers.
         return ['-fmodules', '-fmodules-ts']
+
+    @lazy_property
+    def _clang_scan_deps(self) -> T.Optional[str]:
+        """Path to a clang-scan-deps proven to support P1689, else None.
+
+        Clang's module scanner is the separate clang-scan-deps binary, and its
+        P1689 support is feature-tested by running it rather than inferred from
+        a version number: the candidate next to this clang binary is preferred
+        (the matching install), then PATH candidates in get_llvm_tool_names
+        order. A candidate is accepted only if the exact invocation shape the
+        scan rule uses -- -format=p1689 with -o and
+        -resource-dir-recipe=invoke-compiler, wrapping this compiler --
+        succeeds on an import plus a system #include (exercising the
+        scanner's resource-directory resolution) and yields JSON with the
+        P1689 'rules' shape, so acceptance implies the build-time contract
+        works.
+        """
+        from .. import tooldetect
+        candidates: T.List[str] = []
+        exe = self.get_exelist(ccache=False)[0]
+        exe_path = shutil.which(exe) or exe
+        bindir = os.path.dirname(os.path.realpath(exe_path))
+        candidates.append(os.path.join(bindir, 'clang-scan-deps'))
+        for name in tooldetect.get_llvm_tool_names('clang-scan-deps'):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+        tried: T.Set[str] = set()
+        with tempfile.TemporaryDirectory() as tdir:
+            src = os.path.join(tdir, 'probe.cpp')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('#include <cstddef>\nimport probe;\n')
+            ddi = os.path.join(tdir, 'probe.ddi')
+            obj = os.path.join(tdir, 'probe.o')
+            depfile = os.path.join(tdir, 'probe.d')
+            for cand in candidates:
+                cand = os.path.realpath(cand)
+                if cand in tried or not os.path.isfile(cand):
+                    continue
+                tried.add(cand)
+                cmd = [cand, '-format=p1689', '-resource-dir-recipe=invoke-compiler',
+                       '-o', ddi, '--',
+                       *self.get_exelist(ccache=False), '-std=c++20', '-c', src, '-o', obj,
+                       '-MD', '-MF', depfile]
+                try:
+                    p, _, err = Popen_safe(cmd)
+                except OSError:
+                    continue
+                if p.returncode != 0:
+                    mlog.debug(f'clang-scan-deps P1689 probe failed for {cand}: {err}')
+                    continue
+                try:
+                    with open(ddi, encoding='utf-8') as f:
+                        result = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if 'rules' in result:
+                    mlog.debug(f'Using clang-scan-deps for C++ modules: {cand}')
+                    return cand
+        return None
+
+    def supports_cpp_modules_p1689(self) -> bool:
+        # Feature-tested, not version-gated: True iff a working clang-scan-deps
+        # was found (see _clang_scan_deps).
+        return self._clang_scan_deps is not None
+
+    def get_module_scanner_exelist(self) -> T.List[str]:
+        assert self._clang_scan_deps is not None, 'only valid when supports_cpp_modules_p1689()'
+        return [self._clang_scan_deps]
+
+    def get_module_cache_dir(self) -> str:
+        return 'pcm.cache'
+
+    def get_module_bmi_suffix(self) -> str:
+        return '.pcm'
+
+    def get_module_compile_args(self) -> T.List[str]:
+        # Imports resolve by name lookup in the shared cache. Producers write
+        # their BMI next to the object (-fmodule-output, added per interface
+        # unit by the backend) and a harvest edge publishes it into the cache;
+        # no module name or BMI path ever appears on a command line.
+        return [f'-fprebuilt-module-path={self.get_module_cache_dir()}']
 
 
 class ArmLtdClangCPPCompiler(ClangCPPCompiler):

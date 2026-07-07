@@ -143,10 +143,12 @@ class InternalTests(unittest.TestCase):
                 self.assertIn('ninja_dyndep_version = 1', f.read())
 
     def test_supports_cpp_modules_p1689(self):
-        # The P1689 pipeline (P1689 scan/collate, header units) needs GCC >= 14;
-        # an older but modules-capable GCC, or Clang, is gated out (module
-        # targets there fall back to the regex scan and header units are
-        # unsupported).
+        # The P1689 pipeline (P1689 scan/collate, header units) needs
+        # GCC >= 14 or MSVC >= 19.32; an older but modules-capable compiler
+        # is gated out (module targets there fall back to the regex scan and
+        # header units are unsupported). Clang is feature-probed rather than
+        # version-gated: the gate is whether a P1689-capable clang-scan-deps
+        # was found, so preset the lazy probe result.
         from mesonbuild.compilers.cpp import (
             GnuCPPCompiler, VisualStudioCPPCompiler, ClangCPPCompiler)
 
@@ -159,7 +161,13 @@ class InternalTests(unittest.TestCase):
         self.assertTrue(gate(GnuCPPCompiler, '14.0.0'))
         self.assertFalse(gate(VisualStudioCPPCompiler, '19.31'))
         self.assertTrue(gate(VisualStudioCPPCompiler, '19.32'))
-        self.assertFalse(gate(ClangCPPCompiler, '18.0.0'))
+
+        clang = ClangCPPCompiler.__new__(ClangCPPCompiler)
+        clang._clang_scan_deps = None
+        self.assertFalse(clang.supports_cpp_modules_p1689())
+        clang = ClangCPPCompiler.__new__(ClangCPPCompiler)
+        clang._clang_scan_deps = '/usr/bin/clang-scan-deps'
+        self.assertTrue(clang.supports_cpp_modules_p1689())
 
     def test_msvc_module_compile_args_use_cache_dir(self):
         # /ifcSearchDir and /ifcOutput must point at the compiler's own module

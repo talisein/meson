@@ -175,12 +175,14 @@ kwargs:
       Module detection never reads source contents; it is driven entirely by
       extensions, this keyword and the link graph. With GCC, a module
       interface in a plain `.cpp`/`.cc` therefore needs this keyword (or a
-      rename to `.cppm`/`.ixx`). With MSVC, interfaces must use the
-      `.cppm`/`.ixx` extension in any case: cl needs each interface unit
-      compiled with `/interface`, and Meson derives that per-source flag from
-      the extension alone, so this keyword only covers consumers there.
+      rename to `.cppm`/`.ixx`). With MSVC and Clang, interfaces must use the
+      `.cppm`/`.ixx` extension in any case: those compilers need each
+      interface unit flagged explicitly (`/interface`, `-x c++-module`), and
+      Meson derives that per-source flag from the extension alone, so this
+      keyword only covers consumers there.
 
-      Currently supported with GCC (>= 14) and MSVC on the Ninja backend only.
+      Currently supported with GCC (>= 14), MSVC, and Clang (needs a
+      P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
   include_directories:
     type: array[inc | str]

@@ -832,11 +832,11 @@ class LinuxlikeTests(BasePlatformTests):
                     self.assertNotIn('.gcm', line)
                     self.assertNotIn('-fmodule-file', line)
 
-    def _check_module_rebuild(self) -> None:
+    def _check_module_rebuild(self, testdir_name: str = '139 gcc cpp modules') -> None:
         # Editing a module interface must rebuild its BMI and recompile every
         # importer, exactly as editing a normally #included header does --
         # otherwise consumers link against a stale BMI.
-        testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
+        testdir = os.path.join(self.unit_test_dir, testdir_name)
         srcdir = self.copy_srcdir(testdir)
         self.init(srcdir)
         self.build()
@@ -888,6 +888,50 @@ class LinuxlikeTests(BasePlatformTests):
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             contents = f.read()
         self.assertNotIn('provided-modules.json', contents)
+
+    def test_clang_cpp_modules(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '156 clang cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang named modules.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        out = self.init(testdir)
+        # Uniform cpp_std across all module-sharing targets: no divergence warning.
+        self.assertNotIn('divergent cpp_std', out)
+        self.build()
+        self.run_tests()
+        # BMIs are harvested into a single shared cache at the build root,
+        # named by the module name (partition ':' -> '-') -- including
+        # oddname.pcm, whose module name differs from its file name, proving
+        # the harvest names BMIs from the scan, not the source.
+        cache = os.path.join(self.builddir, 'pcm.cache')
+        for bmi in ('modlib.pcm', 'pkg.pcm', 'pkg-part.pcm', 'kwmod.pcm',
+                    'genmod.pcm', 'oddname.pcm'):
+            self.assertTrue(os.path.isfile(os.path.join(cache, bmi)), f'missing BMI {bmi}')
+        # No compile or scan command may name a module or a BMI path: the only
+        # module flags are -fprebuilt-module-path=<dir>, bare -fmodule-output
+        # and -x c++-module, none of which contain '.pcm'.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS ='):
+                    self.assertNotIn('.pcm', line)
+                    self.assertNotIn('-fmodule-file', line)
+
+    def test_clang_cpp_module_rebuild_on_interface_change(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '156 clang cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang named modules.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        self._check_module_rebuild('156 clang cpp modules')
 
     def test_gcc_modules_cross_machine(self):
         if self.backend is not Backend.ninja:

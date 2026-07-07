@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import textwrap
 import typing as T
 
@@ -231,6 +232,11 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='BMI file suffix including the dot (e.g. .gcm).')
     parser.add_argument('--dep-provmap', action='append', default=[],
                         help='Provided-module map of a dependency target. Repeatable.')
+    parser.add_argument('--stamp-suffix', default=None,
+                        help='Clang: BMIs reach the shared cache via harvest edges, so '
+                             'map a provided module to its harvest stamp '
+                             '(<primary-output> + this suffix) instead of the cache BMI '
+                             'path, and declare no implicit outputs on object edges.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
     args = parser.parse_args(argv)
 
@@ -256,7 +262,13 @@ def run_p1689(argv: T.List[str]) -> int:
                 raise MesonException(
                     f'Module "{name}" is provided by two sources in this target '
                     f'({provider_of[name]} and {obj}). Module names must be unique.')
-            modfile = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
+            if args.stamp_suffix is not None:
+                # Consumers order against the provider's harvest stamp; the
+                # cache BMI itself stays out of Ninja's graph (its name is
+                # only known at build time).
+                modfile = obj + args.stamp_suffix
+            else:
+                modfile = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
             provided[name] = modfile
             resolvable[name] = modfile
             provider_of[name] = obj
@@ -284,8 +296,13 @@ def run_p1689(argv: T.List[str]) -> int:
         dd.write('ninja_dyndep_version = 1\n\n')
         for rule in rules:
             obj = rule['primary-output']
-            outs = [module_to_filename(p['logical-name'], args.bmi_dir, args.bmi_suffix)
-                    for p in rule.get('provides', [])]
+            if args.stamp_suffix is not None:
+                # The object edge's BMI side-output is declared statically by
+                # the backend; the cache copy belongs to the harvest edge.
+                outs: T.List[str] = []
+            else:
+                outs = [module_to_filename(p['logical-name'], args.bmi_dir, args.bmi_suffix)
+                        for p in rule.get('provides', [])]
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 name = req['logical-name']
@@ -318,9 +335,53 @@ def run_p1689(argv: T.List[str]) -> int:
     return 0
 
 
+def run_harvest(argv: T.List[str]) -> int:
+    """Publish a Clang module interface's BMI into the shared cache.
+
+    Clang's bare -fmodule-output names the BMI after the source, next to the
+    object; this copies it to <bmi-dir>/<module-name><bmi-suffix> -- the path
+    -fprebuilt-module-path consumers look up -- with the module name read from
+    the interface's P1689 scan at build time, so it never appears on a command
+    line. The stamp is the edge's declared output; consumers' dyndep entries
+    order against it (run_p1689 --stamp-suffix).
+    """
+    parser = argparse.ArgumentParser(prog='depaccumulate --harvest')
+    parser.add_argument('--pcm', required=True,
+                        help='The source-keyed BMI the compile wrote next to the object.')
+    parser.add_argument('--ddi', required=True,
+                        help="The interface's P1689 scan result.")
+    parser.add_argument('--bmi-dir', required=True,
+                        help='The shared module cache directory (e.g. pcm.cache).')
+    parser.add_argument('--bmi-suffix', required=True,
+                        help='BMI file suffix including the dot (e.g. .pcm).')
+    parser.add_argument('--stamp', required=True, help='Stamp file to write on success.')
+    args = parser.parse_args(argv)
+
+    with open(args.ddi, encoding='utf-8') as f:
+        data: Description = json.load(f)
+    provides = [p['logical-name']
+                for rule in data.get('rules', [])
+                for p in rule.get('provides', [])]
+    if len(provides) != 1:
+        if not provides:
+            raise MesonException(
+                f'{args.pcm}: its scan ({args.ddi}) reports no provided module; a '
+                'module-interface source must contain an export module declaration.')
+        raise MesonException(
+            f'{args.pcm}: its scan ({args.ddi}) reports more than one provided module '
+            f'({", ".join(provides)}); cannot determine the BMI name.')
+    os.makedirs(args.bmi_dir, exist_ok=True)
+    shutil.copy2(args.pcm, module_to_filename(provides[0], args.bmi_dir, args.bmi_suffix))
+    with open(args.stamp, 'w', encoding='utf-8'):
+        pass
+    return 0
+
+
 def run(args: T.List[str]) -> int:
     if args and args[0] == '--p1689':
         return run_p1689(args[1:])
+    if args and args[0] == '--harvest':
+        return run_harvest(args[1:])
 
     assert len(args) >= 2, 'got wrong number of arguments!'
     outfile, jsonfile, *jsondeps = args

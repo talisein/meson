@@ -983,6 +983,7 @@ class NinjaBackend(backends.Backend):
             return
         assert isinstance(target, build.BuildTarget)
         self.check_cpp_modules_std(target)
+        self.check_clang_cpp_modules_scanner(target)
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
         compiled_sources: T.List[str] = []
         source2object: T.Dict[str, str] = {}
@@ -1213,12 +1214,13 @@ class NinjaBackend(backends.Backend):
         """Which C++ module scanning pipeline this target uses, if any.
 
         'p1689': the compiler's own P1689 scanner feeding the per-target
-        collator (GCC >= 14, cl >= 19.32 -- supports_cpp_modules_p1689);
-        handles partitions and import std.
+        collator (GCC >= 14, cl >= 19.32, Clang with a feature-probed
+        clang-scan-deps -- supports_cpp_modules_p1689); handles partitions
+        and import std.
         'regex': the homemade regex scanner, flat named modules only: older
         but modules-capable compilers (GCC < 14, cl 19.28.28617 - 19.31), and
         the legacy escape hatch of a bare -fmodules/-fmodules-ts in the
-        target's cpp_args (e.g. Clang).
+        target's cpp_args.
         'none': no C++ module scanning.
 
         A target opts in by declaration (a module-interface source, the
@@ -1248,6 +1250,14 @@ class NinjaBackend(backends.Backend):
             if cpp.get_id() == 'msvc' and mesonlib.current_vs_supports_modules() \
                     and mesonlib.version_compare(cpp.version, '>=19.28.28617'):
                 return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
+            # Clang has no regex fallback: its P1689 support lives in the
+            # separate clang-scan-deps tool, feature-probed by
+            # supports_cpp_modules_p1689. Without it, fall through -- the
+            # legacy -fmodules/-fmodules-ts escape hatch below still applies,
+            # and check_clang_cpp_modules_scanner reports the gap at
+            # generation time.
+            if cpp.get_id() == 'clang' and cpp.supports_cpp_modules_p1689():
+                return 'p1689'
         for arg in cpp.get_cpp_modules_args():
             if arg in target.extra_args['cpp']:
                 return 'regex'
@@ -1327,6 +1337,25 @@ class NinjaBackend(backends.Backend):
                 f'Target {target.name!r} uses C++ modules, which require cpp_std '
                 f'c++20 or later; got cpp_std={std}.')
 
+    def check_clang_cpp_modules_scanner(self, target: build.BuildTarget) -> None:
+        # Clang's module pipeline needs a working clang-scan-deps (feature-
+        # probed, no version assumption). Without it a module-using target
+        # would silently get no scanning and fail at build time with confusing
+        # compiler errors, so report the missing tool at setup instead. The
+        # legacy -fmodules/-fmodules-ts regex escape hatch is exempt (it does
+        # not need the scanner), as are builds whose ninja lacks dyndep, which
+        # never scan on any compiler.
+        if not self.ninja_has_dyndeps or 'cpp' not in target.compilers:
+            return
+        cpp = target.compilers['cpp']
+        if cpp.get_id() != 'clang' or not target.uses_cpp_modules():
+            return
+        if self.cpp_module_scanner_for_target(target) == 'none':
+            raise MesonException(
+                f'Target {target.name!r} uses C++ modules with Clang, which '
+                'requires a clang-scan-deps with P1689 support (-format=p1689) '
+                'matching the compiler; none was found.')
+
     def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes | build.Target) -> bool:
         """Whether this target should use the P1689 module pipeline (GCC/MSVC)."""
         return self.cpp_module_scanner_for_target(target) == 'p1689'
@@ -1349,6 +1378,11 @@ class NinjaBackend(backends.Backend):
                                  order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None) -> None:
         if not self.target_uses_p1689_cpp_modules_edge(target, compiler):
             return
+        if compiler.get_id() == 'clang':
+            # Registered lazily (idempotent): creating clang's scan rule needs
+            # the clang-scan-deps feature probe, which projects without module
+            # targets must not pay for.
+            self.generate_cpp_module_scan_rule(compiler)
         ddi = self.get_ddi_file_for(rel_obj)
         depfile = ddi + '.d'
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
@@ -1363,6 +1397,41 @@ class NinjaBackend(backends.Backend):
         # generated header.
         self.add_header_deps(target, elem, header_deps or [])
         elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
+        self.add_build(elem)
+
+    @staticmethod
+    def get_clang_pcm_file_for(objfile: str) -> str:
+        # Bare -fmodule-output writes the interface's BMI at the object path
+        # with .o -> .pcm (source-keyed, so knowable at generation time).
+        return objfile.rsplit('.', 1)[0] + '.pcm'
+
+    @staticmethod
+    def get_clang_pcm_stamp_for(objfile: str) -> str:
+        # The harvest edge's declared output. The collator derives the same
+        # path from the .ddi's primary-output (run_harvest/--stamp-suffix must
+        # stay in lockstep with this).
+        return objfile + '.pcm.stamp'
+
+    def generate_cpp_module_harvest(self, target: build.BuildTarget, compiler: Compiler,
+                                    rel_obj: str) -> None:
+        """Publish a Clang module interface's BMI into the shared cache.
+
+        Clang self-names BMIs after the source, not the module, so a
+        build-time step must copy obj-side <src>.pcm to
+        pcm.cache/<module-name>.pcm; the name is read from the interface's
+        already-scanned .ddi. The edge's command line is static -- the module
+        name never appears on it -- and its stamp is what consumers' dyndep
+        entries order against.
+        """
+        self.generate_cpp_module_harvest_rule()
+        pcm = self.get_clang_pcm_file_for(rel_obj)
+        ddi = self.get_ddi_file_for(rel_obj)
+        stamp = self.get_clang_pcm_stamp_for(rel_obj)
+        elem = NinjaBuildElement(self.all_outputs, stamp, 'cpp_module_harvest', [pcm, ddi])
+        elem.add_item('PCM', pcm)
+        elem.add_item('DDI', ddi)
+        elem.add_item('BMIDIR', compiler.get_module_cache_dir())
+        elem.add_item('BMISUFFIX', compiler.get_module_bmi_suffix())
         self.add_build(elem)
 
     def generate_p1689_module_collate_target(self, target: build.BuildTarget,
@@ -1382,9 +1451,11 @@ class NinjaBackend(backends.Backend):
                     'machine in a cross build: a single module cache at the build '
                     'root is shared, and BMIs are not interchangeable between the '
                     'build-machine and host-machine compilers.')
-        if cpp.get_id() == 'msvc':
-            # cl does not create the /ifcOutput directory itself, so make the
-            # shared cache once, up front, before any module compile runs.
+        if cpp.get_id() in {'msvc', 'clang'}:
+            # cl does not create the /ifcOutput directory itself, and clang
+            # consumers name pcm.cache via -fprebuilt-module-path before the
+            # first harvest populates it, so make the shared cache once, up
+            # front, before any module compile runs.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      cpp.get_module_cache_dir()), exist_ok=True)
         dyndep_file = self.get_dep_scan_file_for(target)[1]
@@ -1421,6 +1492,12 @@ class NinjaBackend(backends.Backend):
         depargs: T.List[str] = []
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
+        if cpp.get_id() == 'clang':
+            # Clang BMIs reach the cache via harvest edges; the dyndep orders
+            # consumers against the harvest stamps (derived from each
+            # provider's object path), not the cache paths. Must stay in
+            # lockstep with get_clang_pcm_stamp_for.
+            depargs += ['--stamp-suffix', '.pcm.stamp']
         elem.add_item('DEPARGS', depargs)
         elem.add_item('name', target.name)
         self.add_build(elem)
@@ -3009,9 +3086,49 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             rule = NinjaRule(rulename, command, args, description)
             self.add_rule(rule)
 
+    def generate_cpp_module_harvest_rule(self) -> None:
+        # Clang writes a module interface's BMI next to the object, named
+        # after the source; the harvest edge publishes it into the shared
+        # cache under the module's own name, read from the interface's .ddi at
+        # build time. Ordering rides the stamp: consumers' dyndep inputs point
+        # at it, so the cache path itself never needs to enter Ninja's graph.
+        # Registered lazily (with the first harvest edge) so builds without
+        # Clang modules see no new rule.
+        rulename = 'cpp_module_harvest'
+        if self.ninja.has_rule(rulename):
+            return
+        command = self.environment.get_build_command() + \
+            ['--internal', 'depaccumulate', '--harvest']
+        args = ['--pcm', '$PCM', '--ddi', '$DDI', '--bmi-dir', '$BMIDIR',
+                '--bmi-suffix', '$BMISUFFIX', '--stamp', '$out']
+        description = 'Publishing C++ module BMI of $in'
+        rule = NinjaRule(rulename, command, args, description)
+        self.add_rule(rule)
+
     def generate_cpp_module_scan_rule(self, compiler: Compiler) -> None:
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
         if self.ninja.has_rule(rulename):
+            return
+        description = 'Scanning $in for C++ module dependencies'
+        if compiler.get_id() == 'clang':
+            # Clang's scanner is the separate clang-scan-deps tool, wrapping
+            # the full compile command after '--'. It preprocesses with the
+            # wrapped -MD/-MF, so the scan gets a make-style header depfile
+            # exactly like GCC's; -c/-o inside the wrapper are inspected, not
+            # executed (nothing is compiled). invoke-compiler makes the
+            # scanner ask the wrapped compiler for its resource directory --
+            # the default recipe guesses it from the compiler path, which
+            # fails for a bare 'clang++' and loses the builtin headers
+            # (float.h and friends) during the scan's preprocessing.
+            command = compiler.get_module_scanner_exelist()
+            args = NinjaCommandArg.list(['-format=p1689',
+                                         '-resource-dir-recipe=invoke-compiler',
+                                         '-o', '$out', '--'], Quoting.none) + \
+                compiler.get_exelist() + \
+                NinjaCommandArg.list(['$ARGS', '-c', '$in', '-o', '$OBJ',
+                                      '-MD', '-MF', '$DEPFILE'], Quoting.none)
+            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
+            self.add_rule(rule)
             return
         command = compiler.get_exelist()
         # $ARGS carries exactly the target's compile flags (same dialect/BMI
@@ -3020,7 +3137,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         scanargs = NinjaCommandArg.list(
             compiler.get_module_scanner_args('$out', '$OBJ', '$DEPFILE'), Quoting.none)
         args = ['$ARGS'] + scanargs + ['$in']
-        description = 'Scanning $in for C++ module dependencies'
         # GCC emits a make-style header depfile alongside the scan; cl does not,
         # so the scan there tracks only its source (generated-header existence is
         # covered by order-only deps in generate_cpp_module_scan).
@@ -3041,6 +3157,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 self.generate_compile_rule_for(langname, compiler)
                 self.generate_pch_rule_for(langname, compiler)
                 if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
+                    # Clang's scan rule is registered lazily with the first
+                    # module scan edge instead: creating it needs the
+                    # clang-scan-deps feature probe, which non-module clang
+                    # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
                 for mode in compiler.get_modes():
                     self.generate_compile_rule_for(langname, mode)
@@ -3472,13 +3592,19 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
             commands += compiler.get_module_compile_args()
-            # cl needs each module-interface unit flagged explicitly (GCC infers
-            # it from the source). Detected by extension as everywhere else,
-            # never by reading the source.
-            if compiler.get_id() == 'msvc':
-                suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-                if suffix in {'cppm', 'ixx'}:
+            # cl and clang need each module-interface unit flagged explicitly
+            # (GCC infers it from the source). Detected by extension as
+            # everywhere else, never by reading the source.
+            suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
+            if suffix in {'cppm', 'ixx'}:
+                if compiler.get_id() == 'msvc':
                     commands += ['/interface', '/TP']
+                elif compiler.get_id() == 'clang':
+                    # -x c++-module parses the TU as an interface unit (.ixx
+                    # needs it; uniform for .cppm too); bare -fmodule-output
+                    # writes the BMI next to the object, where the harvest
+                    # edge picks it up. No BMI path on the command line.
+                    commands += ['-x', 'c++-module', '-fmodule-output']
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
@@ -3623,11 +3749,24 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             element.add_item('ARGS', commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
+        # A Clang module interface's compile also writes the source-keyed BMI
+        # (-fmodule-output); declare it so Ninja knows its producer, and
+        # publish it into the shared cache with a harvest edge.
+        clang_miu = False
+        if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+                and compiler.get_id() == 'clang':
+            miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
+            clang_miu = miu_suffix in {'cppm', 'ixx'}
+        if clang_miu:
+            element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
         self.add_build(element)
-        # Emit the P1689 scan edge for GCC/MSVC module targets, reusing
-        # the exact compile args so scan and compile see the same dialect.
+        # Emit the P1689 scan edge for GCC/MSVC/Clang module targets,
+        # reusing the exact compile args so scan and compile see the same
+        # dialect.
         self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
                                       header_deps=header_deps, order_deps=order_deps)
+        if clang_miu:
+            self.generate_cpp_module_harvest(target, compiler, rel_obj)
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))

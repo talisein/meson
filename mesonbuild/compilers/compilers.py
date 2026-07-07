@@ -1548,6 +1548,11 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_cache_dir(self) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
 
+    def get_module_scanner_exelist(self) -> T.List[str]:
+        # Only for compilers whose P1689 scanner is a separate tool (Clang's
+        # clang-scan-deps); GCC and MSVC scan with the compiler binary itself.
+        raise EnvironmentException(f'{self.id} does not implement get_module_scanner_exelist')
+
     def get_module_bmi_suffix(self) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_bmi_suffix')
 
