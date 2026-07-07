@@ -3605,6 +3605,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
+            elif compiler.get_id() == 'clang' and target.cpp_sources_are_module_interfaces:
+                # The std synthesis marks its target: every source is an
+                # interface unit even without the module extension
+                # (libstdc++'s bits/std.cc).
+                commands += ['-x', 'c++-module', '-fmodule-output']
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
@@ -3756,7 +3761,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
                 and compiler.get_id() == 'clang':
             miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            clang_miu = miu_suffix in {'cppm', 'ixx'}
+            clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces
         if clang_miu:
             element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
         self.add_build(element)

@@ -75,6 +75,35 @@ def cpp_std_supports_modules(std: str) -> bool:
     return std.rsplit('++', 1)[-1] in _MODULE_STD_TOKENS
 
 
+def _parse_std_module_manifest(manifest: str) -> T.Tuple[T.Dict[str, str], T.List[str]]:
+    """Parse a standard library's module manifest (*.modules.json).
+
+    Both libstdc++'s and libc++'s manifests share the shape: a 'modules' list
+    whose entries carry 'logical-name', a manifest-relative 'source-path' and
+    an 'is-std-library' flag. Returns ({logical-name: absolute source path},
+    [extra system include dirs]); the include dirs come from the entries'
+    local-arguments.system-include-directories (libc++ needs them to compile
+    its std.cppm; libstdc++ has none), manifest-relative too.
+    """
+    try:
+        with open(manifest, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}, []
+    base = os.path.dirname(manifest)
+    sources: T.Dict[str, str] = {}
+    incdirs: T.List[str] = []
+    for mod in data.get('modules', []):
+        if mod.get('is-std-library') and 'source-path' in mod:
+            sources[mod['logical-name']] = os.path.normpath(
+                os.path.join(base, mod['source-path']))
+            for d in mod.get('local-arguments', {}).get('system-include-directories', []):
+                d = os.path.normpath(os.path.join(base, d))
+                if d not in incdirs:
+                    incdirs.append(d)
+    return sources, incdirs
+
+
 def non_msvc_eh_options(eh: str, args: T.List[str]) -> None:
     if eh == 'none':
         args.append('-fno-exceptions')
@@ -438,6 +467,60 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # no module name or BMI path ever appears on a command line.
         return [f'-fprebuilt-module-path={self.get_module_cache_dir()}']
 
+    @functools.lru_cache(maxsize=None)
+    def _std_module_info(self, extra_args: T.Tuple[str, ...]) -> T.Tuple[T.Dict[str, str], T.List[str]]:
+        """(std module sources, extra -isystem dirs) for the selected stdlib.
+
+        Unlike GCC, Clang serves two standard libraries, so which manifest to
+        read is decided by probing which stdlib these compiles will actually
+        use: preprocess a '#include <cstddef>' and look for the identifying
+        macro the stdlib's config header defines. <cstddef> rather than
+        <version> because any standard header carries the identification at
+        every -std level, with no C++20 assumption -- this runs at configure
+        time, before any cpp_std gate. The probe includes the build's
+        configure-time cpp args (options + global + project), so a
+        -stdlib=libc++ from any of them -- or from a clang config file or the
+        platform default -- is honored. Per-target -stdlib divergence is not
+        (and cannot be) supported: a BMI bakes in its stdlib.
+        """
+        with tempfile.TemporaryDirectory() as tdir:
+            src = os.path.join(tdir, 'probe.cpp')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('#include <cstddef>\n')
+            cmd = self.get_exelist(ccache=False) + list(extra_args) + ['-x', 'c++', '-E', '-dM', src]
+            try:
+                p, out, _ = Popen_safe(cmd)
+            except OSError:
+                return {}, []
+        if p.returncode != 0:
+            return {}, []
+        manifest_name = 'libc++.modules.json' if '_LIBCPP_VERSION' in out else 'libstdc++.modules.json'
+        try:
+            _, out, _ = Popen_safe(self.get_exelist(ccache=False) + list(extra_args)
+                                   + [f'-print-file-name={manifest_name}'])
+        except OSError:
+            return {}, []
+        manifest = out.strip()
+        if not manifest or not os.path.isfile(manifest):
+            return {}, []
+        return _parse_std_module_manifest(manifest)
+
+    def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
+        """{logical-name: source path} for auto-provisioned stdlib modules."""
+        return self._std_module_info(tuple(extra_args))[0]
+
+    def get_std_module_extra_args(self, extra_args: T.Tuple[str, ...] = ()) -> T.List[str]:
+        sources, incdirs = self._std_module_info(tuple(extra_args))
+        if not sources:
+            return []
+        # The std interface sources declare the reserved module name on
+        # purpose; libc++'s additionally need their own support headers on the
+        # include path (the manifest's system-include-directories).
+        args = ['-Wno-reserved-module-identifier']
+        for d in incdirs:
+            args += ['-isystem', d]
+        return args
+
 
 class ArmLtdClangCPPCompiler(ClangCPPCompiler):
 
@@ -702,20 +785,9 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         manifest = out.strip()
         if not manifest or not os.path.isfile(manifest):
             return {}
-        try:
-            with open(manifest, encoding='utf-8') as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return {}
-        base = os.path.dirname(manifest)
-        result: T.Dict[str, str] = {}
-        for mod in data.get('modules', []):
-            if mod.get('is-std-library') and 'source-path' in mod:
-                result[mod['logical-name']] = os.path.normpath(
-                    os.path.join(base, mod['source-path']))
-        return result
+        return _parse_std_module_manifest(manifest)[0]
 
-    def get_std_module_sources(self) -> T.Dict[str, str]:
+    def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules."""
         return self._std_module_sources
 
@@ -1165,7 +1237,7 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
                 result[name] = path
         return result
 
-    def get_std_module_sources(self) -> T.Dict[str, str]:
+    def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules."""
         return self._std_module_sources
 

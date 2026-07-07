@@ -2019,13 +2019,27 @@ class Interpreter(InterpreterBase, HoldableObject):
             return cached
 
         cpp = self.compilers[for_machine].get('cpp')
-        sources = cpp.get_std_module_sources() if cpp is not None else {}
+        if cpp is not None:
+            # Compilers that serve more than one standard library (Clang)
+            # probe which one these compiles will use, so hand them the same
+            # configure-time cpp args a real compile gets: the cpp_args
+            # option (+ CXXFLAGS/machine files), add_global_arguments and
+            # add_project_arguments. The set is frozen by the time it
+            # matters: synthesizing the std library below declares a build
+            # target, after which further add_project_arguments error out.
+            probe_args = tuple(self.coredata.get_external_args(for_machine, 'cpp')) \
+                + tuple(self.build.global_args[for_machine].get('cpp', [])) \
+                + tuple(self.current_build_project().project_args[for_machine].get('cpp', []))
+            sources = cpp.get_std_module_sources(probe_args)
+        else:
+            sources = {}
         if not sources:
             if required:
                 raise InterpreterException(
                     'C++ standard library modules (import std) are unavailable: they '
                     'need a C++ compiler that ships the standard library as modules '
-                    '(GCC >= 15 with libstdc++.modules.json).')
+                    '(GCC >= 15 with libstdc++.modules.json, or Clang with a stdlib '
+                    'module manifest and a P1689-capable clang-scan-deps).')
             mlog.log('Dependency', mlog.bold('std'), 'found:', mlog.red('NO'))
             dep = dependencies.NotFoundDependency('std', self.environment)
             self.build.cpp_std_module_deps[for_machine]['std'] = dep
@@ -2047,6 +2061,12 @@ class Interpreter(InterpreterBase, HoldableObject):
             'install': False,
             'native': for_machine is MachineChoice.BUILD,
         }
+        # Some compilers need extra flags on the std interface compiles only
+        # (Clang: -Wno-reserved-module-identifier, and libc++'s
+        # support-header include dirs from the manifest).
+        std_extra_args = cpp.get_std_module_extra_args(probe_args)
+        if std_extra_args:
+            libkwargs['cpp_args'] = std_extra_args
         # The internal name mirrors CMake's __cmake_cxx_std_* convention: the
         # archive (lib__meson_cxx_std.a) is obviously synthesized, and cannot
         # collide with a user target named 'std'.
@@ -2055,6 +2075,10 @@ class Interpreter(InterpreterBase, HoldableObject):
         # keyword, so this internal target does not raise a spurious FeatureNew
         # about a keyword the user never wrote.
         std_lib.cpp_modules = True
+        # The manifest declares these sources as module interfaces regardless
+        # of extension (libstdc++ ships bits/std.cc): record that, for
+        # compilers that must flag interface units per source (Clang).
+        std_lib.cpp_sources_are_module_interfaces = True
         dep = dependencies.InternalDependency(
             self.project_version, libraries=[std_lib], name='std')
         self.build.cpp_std_module_deps[for_machine]['std'] = dep

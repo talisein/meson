@@ -1091,6 +1091,49 @@ class LinuxlikeTests(BasePlatformTests):
             self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
         self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
 
+    def test_clang_import_std(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '157 clang import std')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang import std.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        if not cpp.get_std_module_sources():
+            raise SkipTest('The selected standard library ships no module manifest.')
+        self.init(testdir)
+        self.build()
+        # As on GCC: dependency('std') synthesizes one module-providing static
+        # library; a user module that itself imports std links across a target
+        # boundary. With the default libstdc++ the interface source is
+        # bits/std.cc -- a module interface without the module extension,
+        # covering the interface-marked synthesized target.
+        self.run_tests()
+        cache = os.path.join(self.builddir, 'pcm.cache')
+        for bmi in ('std.pcm', 'std.compat.pcm', 'usemod.pcm'):
+            self.assertTrue(os.path.isfile(os.path.join(cache, bmi)), f'missing BMI {bmi}')
+        self.assertTrue(os.path.isfile(os.path.join(self.builddir, 'lib__meson_cxx_std.a')),
+                        'std module static library not built')
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            ninja = f.read()
+
+        def link_edge(t):
+            lines = ninja.splitlines()
+            for i, line in enumerate(lines):
+                if line.startswith(f'build {t}:'):
+                    block = [line]
+                    for nxt in lines[i + 1:]:
+                        if not nxt.startswith((' ', '\t')):
+                            break
+                        block.append(nxt)
+                    return '\n'.join(block)
+            return ''
+        for exe in ('prog', 'compatprog', 'usemain'):
+            self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
+        self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
+
     def test_gcc_import_std_link_whole(self):
         if self.backend is not Backend.ninja:
             raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')

@@ -1570,12 +1570,24 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
-    def get_std_module_sources(self) -> T.Dict[str, str]:
+    def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules.
 
-        Returns {} for compilers that cannot auto-provision `import std;`.
+        ``extra_args`` are the build's configure-time cpp args (options +
+        global + project), for compilers that must probe which standard
+        library is selected (Clang). Returns {} for compilers that cannot
+        auto-provision `import std;`.
         """
         return {}
+
+    def get_std_module_extra_args(self, extra_args: T.Tuple[str, ...] = ()) -> T.List[str]:
+        """Extra compile args for the synthesized std module library.
+
+        Only the std interface sources get these (e.g. Clang's
+        -Wno-reserved-module-identifier and libc++'s support-header include
+        dirs); [] for compilers whose std sources need nothing special.
+        """
+        return []
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         """Args to make the compiler emit a P1689r5 dependency scan of a C++ TU.
