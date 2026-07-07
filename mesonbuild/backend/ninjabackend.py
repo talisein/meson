@@ -1209,40 +1209,55 @@ class NinjaBackend(backends.Backend):
                 self.add_build(elem)
 
     @lru_cache(maxsize=None)
-    def should_use_dyndeps_for_target(self, target: build.BuildTargetTypes) -> bool:
-        # Memoized: re-asked once per source on the ninja-gen hot path, and the
-        # inputs (ninja/compiler versions, dev-prompt, target flags) are frozen
-        # by generation time. Same for target_uses_p1689_cpp_modules below.
+    def cpp_module_scanner_for_target(self, target: build.BuildTargetTypes | build.Target) -> Literal['none', 'regex', 'p1689']:
+        """Which C++ module scanning pipeline this target uses, if any.
+
+        'p1689': the compiler's own P1689 scanner feeding the per-target
+        collator (GCC >= 14, cl >= 19.32 -- supports_cpp_modules_p1689);
+        handles partitions and import std.
+        'regex': the homemade regex scanner, flat named modules only: older
+        but modules-capable compilers (GCC < 14, cl 19.28.28617 - 19.31), and
+        the legacy escape hatch of a bare -fmodules/-fmodules-ts in the
+        target's cpp_args (e.g. Clang).
+        'none': no C++ module scanning.
+
+        A target opts in by declaration (a module-interface source, the
+        cpp_modules kwarg, or linking a module provider --
+        uses_cpp_modules()); source contents are never read. cl before build
+        19.28.28617 (VS 16.8/16.9) has broken modules, and
+        current_vs_supports_modules() rejects a too-old developer prompt.
+        Mixed C++/Fortran targets stay on the Fortran scanner, which
+        should_use_dyndeps_for_target enables without this pipeline.
+
+        Memoized: re-asked once per source on the ninja-gen hot path, and the
+        inputs (ninja/compiler versions, dev-prompt, target flags) are frozen
+        by generation time.
+        """
         if not self.ninja_has_dyndeps:
-            return False
+            return 'none'
         if not isinstance(target, build.BuildTarget):
-            return False
+            return 'none'
         if 'fortran' in target.compilers:
-            return True
-        if 'cpp' not in target.compilers:
-            return False
-        cpp = target.compilers['cpp']
-        cid = cpp.get_id()
-        # GCC / MSVC named modules: the target opts in (a module-interface
-        # source, the cpp_modules kwarg, or linking a module provider) and is
-        # scanned for build ordering. GCC and cl >= 19.32 use the P1689
-        # scan; older but modules-capable cl falls back to the regex scan. The
-        # p1689-vs-regex choice is made in target_uses_p1689_cpp_modules.
-        # cl before build 19.28.28617 (VS 16.8/16.9) has broken modules, and
-        # current_vs_supports_modules() rejects a too-old developer prompt.
-        if cid == 'gcc' and target.uses_cpp_modules():
-            return True
-        if cid == 'msvc' and target.uses_cpp_modules() \
-                and mesonlib.current_vs_supports_modules() \
-                and mesonlib.version_compare(cpp.version, '>=19.28.28617'):
-            return True
-        # Legacy/opt-in scan for other compilers (e.g. Clang) or a bare
-        # -fmodules/-fmodules-ts in the compile args: handled by the regex
-        # scanner (generate_dependency_scan_target's non-P1689 branch).
-        for arg in target.compilers['cpp'].get_cpp_modules_args():
+            return 'none'
+        cpp = target.compilers.get('cpp')
+        if cpp is None:
+            return 'none'
+        if target.uses_cpp_modules():
+            if cpp.get_id() == 'gcc':
+                return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
+            if cpp.get_id() == 'msvc' and mesonlib.current_vs_supports_modules() \
+                    and mesonlib.version_compare(cpp.version, '>=19.28.28617'):
+                return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
+        for arg in cpp.get_cpp_modules_args():
             if arg in target.extra_args['cpp']:
-                return True
-        return False
+                return 'regex'
+        return 'none'
+
+    def should_use_dyndeps_for_target(self, target: build.BuildTargetTypes | build.Target) -> bool:
+        if self.ninja_has_dyndeps and isinstance(target, build.BuildTarget) \
+                and 'fortran' in target.compilers:
+            return True
+        return self.cpp_module_scanner_for_target(target) != 'none'
 
     def generate_dependency_scan_target(self, target: build.BuildTarget,
                                         compiled_sources: T.List[str],
@@ -1312,29 +1327,9 @@ class NinjaBackend(backends.Backend):
                 f'Target {target.name!r} uses C++ modules, which require cpp_std '
                 f'c++20 or later; got cpp_std={std}.')
 
-    @lru_cache(maxsize=None)
-    def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes) -> bool:
-        """Whether this target should use the P1689 module pipeline (GCC/MSVC).
-
-        Fortran targets keep the existing regex-scan pipeline even when they
-        also carry C++ sources; the P1689 path is for pure C++-module targets.
-        The target must actually use modules (a module-interface source, the
-        cpp_modules kwarg, or a linked module provider): a bare -fmodules/
-        -fmodules-ts in cpp_args does not select this pipeline, so such legacy
-        targets (and Clang) keep the regex scan path. The P1689 pipeline needs
-        GCC >= 14, or MSVC where cl ships /scanDependencies (VS 2022 17.2, cl
-        19.32); an older but modules-capable GCC/cl falls back to the regex scan,
-        which handles only flat named modules (no partitions, no import std).
-        """
-        if not isinstance(target, build.BuildTarget):
-            return False
-        if 'fortran' in target.compilers:
-            return False
-        cpp = target.compilers.get('cpp')
-        if cpp is None or not target.uses_cpp_modules() \
-                or not self.should_use_dyndeps_for_target(target):
-            return False
-        return cpp.supports_cpp_modules_p1689()
+    def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes | build.Target) -> bool:
+        """Whether this target should use the P1689 module pipeline (GCC/MSVC)."""
+        return self.cpp_module_scanner_for_target(target) == 'p1689'
 
     def target_uses_p1689_cpp_modules_edge(self, target: build.BuildTargetTypes, compiler: Compiler) -> bool:
         """Whether this specific compile/scan edge is a P1689 C++ module edge."""
