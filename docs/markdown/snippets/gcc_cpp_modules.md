@@ -21,6 +21,13 @@ modlib = static_library('modlib', 'modlib.cppm')
 executable('prog', 'main.cpp', link_with: modlib)
 ```
 
+Module usage is declared, never sniffed: Meson decides which targets get the
+module machinery from file extensions, keywords and the link graph alone, and
+never reads source contents. A module interface in a source with a non-module
+extension (an `export module` in a plain `.cpp`/`.cc`) is therefore not
+detected by itself — rename the interface to `.cppm`/`.ixx`, or set
+`cpp_modules: true` on the target that carries it.
+
 `import std;` and `import std.compat;` are available through `dependency('std')`.
 Meson locates the standard library's module sources from the selected libstdc++
 (GCC >= 15, which ships `libstdc++.modules.json`) and builds them into the shared
