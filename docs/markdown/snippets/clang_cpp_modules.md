@@ -26,6 +26,22 @@ publishes each interface's BMI into the shared cache under its scanned module
 name as a small build-time step; this is invisible in the API and keeps every
 compile command line static.
 
+`import std;` and `import std.compat;` are available through
+`dependency('std')`, exactly as on GCC and MSVC. Clang serves two standard
+libraries, so Meson probes which one the build actually uses — honoring the
+platform default, Clang configuration files, and a `-stdlib=libc++` given via
+`cpp_args`, `add_global_arguments` or `add_project_arguments` — and builds the
+std module from that library's own manifest: libstdc++'s
+`libstdc++.modules.json` (GCC >= 15 installed alongside) or libc++'s
+`libc++.modules.json`. Per-target `-stdlib` divergence is not supported: a
+compiled module bakes in its standard library.
+
+```meson
+std = dependency('std')
+executable('prog', 'main.cpp', dependencies: std,
+           override_options: ['cpp_std=c++23'])
+```
+
 Diagnostics (a module required by no target, a duplicate module name reaching
 one link, and module dependency cycles) are reported at build time exactly as
 for GCC and MSVC. All translation units sharing modules must use the same
