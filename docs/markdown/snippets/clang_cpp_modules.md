@@ -1,0 +1,33 @@
+## C++20 named modules with Clang
+
+C++20 named modules (and module partitions) now build with Clang on the Ninja
+backend, through the same pipeline used for GCC and MSVC. Sources are scanned
+with `clang-scan-deps` (P1689) and ordered through Ninja `dyndep`; compiled
+module interfaces (`.pcm`) live in a single shared `pcm.cache` at the build
+root and are found by name through `-fprebuilt-module-path`. No
+`-fmodule-file=` mappings or module names appear on any compile command line.
+
+The scanner requirement is detected by running `clang-scan-deps`, not by
+version: Meson looks for the tool next to the compiler (then on `PATH`) and
+verifies its P1689 support with a probe, so any Clang whose scanner works is
+supported. If a module-using target is configured with Clang and no working
+scanner is found, setup fails with a clear message.
+
+The user-facing interface is identical to the GCC and MSVC ones: a target is
+module-enabled when it has a module-interface source (`.cppm` / `.ixx`,
+including a build-time generated one), when it links a target that provides
+modules, or when the `cpp_modules` keyword is set. As with MSVC, module
+*interfaces* must use the `.cppm`/`.ixx` extension: Clang decides what is an
+interface unit per source (Meson passes `-x c++-module`, derived from the
+extension alone), so an `export module` in a plain `.cpp` is not supported.
+
+Because Clang names a compiled interface after its *source* file, Meson
+publishes each interface's BMI into the shared cache under its scanned module
+name as a small build-time step; this is invisible in the API and keeps every
+compile command line static.
+
+Diagnostics (a module required by no target, a duplicate module name reaching
+one link, and module dependency cycles) are reported at build time exactly as
+for GCC and MSVC. All translation units sharing modules must use the same
+module-affecting flags; Clang additionally enforces this itself (a `cpp_std`
+mismatch against a BMI is a hard compiler error).
