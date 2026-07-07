@@ -4161,21 +4161,20 @@ class Interpreter(InterpreterBase, HoldableObject):
         return target
 
     def _check_cpp_header_units_supported(self, name: str, target: build.BuildTarget) -> None:
-        # cpp_header_units is only acted on by the P1689 pipeline, and only
-        # its GCC and MSVC backends build header units (Clang is in the
-        # pipeline for named modules but has no header-unit support yet); on
-        # any other compiler the declaration would be silently dropped
-        # (no BMI).
+        # cpp_header_units is only acted on by the P1689 pipeline (GCC, MSVC,
+        # and Clang backends all build header units); on any other compiler
+        # the declaration would be silently dropped (no BMI).
         if not target.cpp_header_units:
             return
         cpp = target.compilers.get('cpp')
-        if cpp is None or cpp.get_id() not in {'gcc', 'msvc'} \
+        if cpp is None or cpp.get_id() not in {'gcc', 'msvc', 'clang'} \
                 or not cpp.supports_cpp_modules_p1689():
             got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
             raise InvalidArguments(
                 f'Target {name!r} declares cpp_header_units, which requires a '
                 f'C++ compiler with header-unit support in the P1689 module '
-                f'pipeline (GCC >= 14 or MSVC >= 19.32); got {got}.')
+                f'pipeline (GCC >= 14, MSVC >= 19.32, or Clang with a '
+                f'P1689-capable clang-scan-deps); got {got}.')
 
     def add_stdlib_info(self, target: build.BuildTarget) -> None:
         for l in target.compilers.keys():

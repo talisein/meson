@@ -481,6 +481,14 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return [f'-fprebuilt-module-path={self.get_module_cache_dir()}',
                 '-fmodules', '-fno-modules']
 
+    def get_header_unit_consumer_args(self, mode: str, spelling: str, bmi_path: str) -> T.List[str]:
+        # Clang has no directory lookup for header units (-fprebuilt-module-path
+        # does not apply to them): a consumer must name each unit's BMI with a
+        # bare -fmodule-file=<pcm>. No spelling on the flag -- the pcm records
+        # the resolved header's identity and matching is by that identity; the
+        # declared mode only selects -xc++-{user,system}-header at build time.
+        return [f'-fmodule-file={bmi_path}']
+
     @functools.lru_cache(maxsize=None)
     def _std_module_info(self, extra_args: T.Tuple[str, ...]) -> T.Tuple[T.Dict[str, str], T.List[str]]:
         """(std module sources, extra -isystem dirs) for the selected stdlib.

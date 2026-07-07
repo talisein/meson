@@ -1213,14 +1213,14 @@ class LinuxlikeTests(BasePlatformTests):
                     self.assertNotIn('.gcm', line)
                     self.assertNotIn('-fmodule-file', line)
 
-    def _check_header_unit_rebuild(self, header: str) -> None:
+    def _check_header_unit_rebuild(self, header: str, testdir_name: str = '142 gcc header units') -> None:
         # A change to a header consumed as a header unit must rebuild the
         # header-unit BMI and every importer, exactly as editing a normally
         # #included header does -- otherwise consumers link against a stale BMI.
-        testdir = os.path.join(self.unit_test_dir, '142 gcc header units')
+        testdir = os.path.join(self.unit_test_dir, testdir_name)
         srcdir = self.copy_srcdir(testdir)
         self.init(srcdir)
-        self.build()
+        self.build(override_envvars=self.NO_CCACHE)  # see NO_CCACHE
         self.run_tests()  # sum == 110, program exits 0
         # Bump the header's inline function by a large constant so the program's
         # checksum no longer equals 110. A stale BMI keeps the old value.
@@ -1232,7 +1232,7 @@ class LinuxlikeTests(BasePlatformTests):
         with open(header_path, 'w', encoding='utf-8') as f:
             f.write(newcontent)
         # The BMI edge must rerun and the importer (main.cpp -> prog) relink.
-        out = self.build()
+        out = self.build(override_envvars=self.NO_CCACHE)
         self.assertIn('Building C++ header unit', out)
         self.assertIn('Linking target prog', out)
         # The rebuilt program must observe the new value: checksum != 110 -> nonzero.
@@ -1263,6 +1263,55 @@ class LinuxlikeTests(BasePlatformTests):
         if version_compare(cpp.version, '<14'):
             raise SkipTest('GCC C++ modules require GCC >= 14.')
         self._check_header_unit_rebuild('angleutil.h')
+
+    def _skip_unless_clang_header_units(self, testdir: str) -> None:
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang header units.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+
+    def test_clang_header_units(self):
+        testdir = os.path.join(self.unit_test_dir, '158 clang header units')
+        self._skip_unless_clang_header_units(testdir)
+        self.init(testdir)
+        self.build()
+        # A mixed target: two declared header units (quote and angle spelling)
+        # plus a named module -- the program links and runs.
+        self.run_tests()
+        # The unit edges' declared outputs are the real BMIs (no stamps).
+        hudir = os.path.join(self.builddir, 'meson-private', 'header-units')
+        pcms = os.listdir(hudir)
+        self.assertEqual(sorted(os.path.splitext(p)[1] for p in pcms if not p.endswith('.d')),
+                         ['.pcm', '.pcm'])
+        # Clang has no header-unit directory lookup, so each consumer (and its
+        # scan) names the unit BMIs with -fmodule-file=<pcm> -- the one waived
+        # command-line surface. Named-module BMI paths must still never appear:
+        # after removing the header-unit flags, no ARGS line may mention a
+        # .pcm or -fmodule-file.
+        hu_flag = re.compile(r'-fmodule-file=meson-private/header-units/\S+?\.pcm')
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            saw_hu_flag = False
+            for line in f:
+                if line.strip().startswith('ARGS ='):
+                    stripped, n = hu_flag.subn('', line)
+                    saw_hu_flag = saw_hu_flag or n > 0
+                    self.assertNotIn('.pcm', stripped)
+                    self.assertNotIn('-fmodule-file', stripped)
+            self.assertTrue(saw_hu_flag, 'no consumer carried a header-unit -fmodule-file flag')
+
+    def test_clang_header_unit_rebuild_on_user_header_change(self):
+        testdir = os.path.join(self.unit_test_dir, '158 clang header units')
+        self._skip_unless_clang_header_units(testdir)
+        self._check_header_unit_rebuild('util.h', '158 clang header units')
+
+    def test_clang_header_unit_rebuild_on_system_header_change(self):
+        testdir = os.path.join(self.unit_test_dir, '158 clang header units')
+        self._skip_unless_clang_header_units(testdir)
+        self._check_header_unit_rebuild('angleutil.h', '158 clang header units')
 
     def test_gcc_cpp_modules_diagnostics(self):
         if self.backend is not Backend.ninja:

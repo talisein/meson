@@ -378,8 +378,8 @@ class InternalTests(unittest.TestCase):
     def test_cpp_header_units_rejected_on_unsupported_compiler(self):
         # Declaring cpp_header_units on a compiler without header-unit support
         # must error at configure time rather than silently dropping the units.
-        # P1689 support alone is not enough: Clang is in the named-modules
-        # pipeline but builds no header units yet.
+        # GCC, MSVC and Clang all build header units through the P1689
+        # pipeline; anything else (or a pipeline-incapable toolchain) errors.
         from mesonbuild.interpreter.interpreter import Interpreter
         from mesonbuild.interpreterbase import InvalidArguments
         interp = Interpreter.__new__(Interpreter)
@@ -394,11 +394,12 @@ class InternalTests(unittest.TestCase):
             target.compilers = {'cpp': cpp} if has_cpp else {}
             interp._check_cpp_header_units_supported('t', target)
 
-        check('gcc', True)  # supported compiler: no raise
+        check('gcc', True)   # supported compiler: no raise
+        check('clang', True)  # P1689-capable clang builds header units too
         with self.assertRaises(InvalidArguments):
             check('gcc', False)  # modules-incapable gcc
         with self.assertRaises(InvalidArguments):
-            check('clang', True)  # P1689-capable, but no header units
+            check('clang', False)  # clang without a P1689 clang-scan-deps
         with self.assertRaises(InvalidArguments):
             check('gcc', False, has_cpp=False)  # no C++ compiler at all
 

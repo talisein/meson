@@ -197,8 +197,9 @@ kwargs:
       across the build) from this list, because a header unit's BMI must exist
       before the sources that import it are scanned and compiled. On GCC
       consumers resolve the BMI by directory lookup with no BMI path on the
-      command line; on MSVC Meson passes each consumer an explicit
-      `/headerUnit` mapping to the unit's BMI.
+      command line; on MSVC and Clang Meson passes each consumer an explicit
+      mapping to the unit's BMI (`/headerUnit` and `-fmodule-file`
+      respectively).
 
       Every header unit a source imports must be listed (the declaration does
       not propagate through dependencies, so a consumer that imports the same
@@ -210,9 +211,15 @@ kwargs:
       state it was built with, so the whole build must use uniform
       module-affecting flags. Implies module handling for the target.
 
-      Currently supported with GCC (>= 14) and MSVC (>= VS 2022 17.2, cl 19.32)
-      on the Ninja backend only; declaring it on any other compiler is an error
-      rather than being silently ignored.
+      Currently supported with GCC (>= 14), MSVC (>= VS 2022 17.2, cl 19.32)
+      and Clang (needs a P1689-capable `clang-scan-deps`, the same requirement
+      as `cpp_modules`) on the Ninja backend only; declaring it on any other
+      compiler is an error rather than being silently ignored. Note that
+      header units are an experimental feature in Clang: it emits a
+      `-Wexperimental-header-units` warning per import, which Meson
+      deliberately does not suppress -- pass
+      `-Wno-experimental-header-units` in `cpp_args` to accept the feature's
+      status and silence it.
 
   include_directories:
     type: array[inc | str]

@@ -1397,6 +1397,13 @@ class NinjaBackend(backends.Backend):
         depfile = ddi + '.d'
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
         elem = NinjaBuildElement(self.all_outputs, ddi, rulename, rel_src)
+        hu_outputs = self.provision_header_units(target, compiler)
+        if compiler.get_id() == 'clang' and hu_outputs:
+            # A clang scan hard-errors on a header-unit import with no matching
+            # -fmodule-file, even with the BMI built (no ambient lookup), so
+            # the per-unit flags must ride the scan too. Appending is
+            # non-mutating; the compile's `commands` is untouched.
+            commands = commands + self._target_header_unit_consumer_args.get(target.get_id(), [])
         elem.add_item('ARGS', commands)
         elem.add_item('OBJ', rel_obj)
         elem.add_item('DEPFILE', depfile)
@@ -1408,7 +1415,12 @@ class NinjaBackend(backends.Backend):
         # header-unit import and yields an empty .ddi.
         self.add_header_deps(target, elem, header_deps or [])
         elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
-        elem.add_orderdep(self.provision_header_units(target, compiler))
+        if compiler.get_id() == 'clang':
+            # Real inputs, not order-only: the scan command names the pcms, so
+            # a missing unit is a graph error rather than a build-time race.
+            elem.add_dep(hu_outputs)
+        else:
+            elem.add_orderdep(hu_outputs)
         self.add_build(elem)
 
     @staticmethod
@@ -3207,6 +3219,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = ['$ARGS'] + huargs
             self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
             return
+        if compiler.get_id() == 'clang':
+            # Clang names the BMI directly (-o $out) and emits no object, so
+            # the edge's declared output is the real pcm -- no stamp, no touch.
+            # -fmodule-header is the precompile action (no -c); $HULANG is
+            # c++-user-header or c++-system-header and the spelling resolves on
+            # the include path from $ARGS.
+            depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
+            args = ['$ARGS'] + depargs + ['-fmodule-header', '-x', '$HULANG',
+                                          '$SPELLING', '-o', '$out']
+            self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
+            return
         # GCC writes the BMI to a mangled gcm.cache path we don't track, so the
         # edge's output is only a stamp and consumers find the BMI by directory
         # lookup. The stamp goes through `meson --internal touch` because
@@ -3242,9 +3265,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         so the scanner is never cold (GCC) and BMIs exist at compile.
 
         GCC writes the BMI to an untracked gcm.cache path, so the edge output is
-        a stamp and consumers resolve by directory lookup. cl writes the BMI to
-        the path we pick (the real output) and consumers must name it; those
-        per-target /headerUnit flags are recorded for the compile site.
+        a stamp and consumers resolve by directory lookup. cl and clang write
+        the BMI to the path we pick (the real output) and consumers must name
+        it; those per-target /headerUnit (-fmodule-file) flags are recorded for
+        the compile site -- and, on clang, for the scan site too.
 
         Edges are deduped globally by (mode, spelling): a header unit with a
         given spelling is built once and shared by every target that declares
@@ -3256,7 +3280,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         only race to write the same BMI.)
         """
         cid = compiler.get_id()
-        if cid not in ('gcc', 'msvc'):
+        if cid not in ('gcc', 'msvc', 'clang'):
             return []
         tid = target.get_id()
         if tid in self._target_header_unit_outputs:
@@ -3269,9 +3293,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
+            if cid == 'clang':
+                # Registered lazily (idempotent), like clang's scan rule: only
+                # projects declaring header units grow the rule.
+                self.generate_cpp_header_unit_rule(compiler)
             rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
             is_msvc = cid == 'msvc'
-            suffix = compiler.get_module_bmi_suffix() if is_msvc else '.stamp'
+            suffix = '.stamp' if cid == 'gcc' else compiler.get_module_bmi_suffix()
             for hu in target.cpp_header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 # One BMI per (mode, spelling), shared across targets; flags are
@@ -3296,8 +3324,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     self.add_build(elem)
                     self._header_units[key] = output
                 outputs.append(output)
-                if is_msvc:
-                    consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
+                # GCC consumers resolve by directory lookup (returns []).
+                consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         return outputs
@@ -3319,6 +3347,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
                 if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
+                    # Clang's header-unit rule is registered lazily with the
+                    # first unit edge (provision_header_units) instead, so
+                    # projects without header units don't grow an unused rule.
                     self.generate_cpp_header_unit_rule(compiler)
                 for mode in compiler.get_modes():
                     self.generate_compile_rule_for(langname, mode)
@@ -3919,11 +3950,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         else:
             compile_commands = commands
             if self.target_uses_p1689_cpp_modules_edge(target, compiler):
-                # cl consumers must name each imported header unit's BMI
-                # explicitly (no directory lookup). These flags go only on the
-                # compile, never on the scan -- which reuses `commands` and may
-                # run before the BMI exists. Appending is non-mutating, so the
-                # scan's `commands` is untouched.
+                # cl and clang consumers must name each imported header unit's
+                # BMI explicitly (no directory lookup). On cl the flags go only
+                # on the compile, never on the scan -- which reuses `commands`
+                # and may run before the BMI exists; clang's scan needs them
+                # too and gets its own copy in generate_cpp_module_scan.
+                # Appending is non-mutating, so the scan's `commands` is
+                # untouched.
                 self.provision_header_units(target, compiler)
                 hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
                 if hu_consumer:
