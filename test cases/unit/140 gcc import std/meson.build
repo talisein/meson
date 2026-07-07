@@ -18,3 +18,8 @@ test('compatprog', compatprog)
 usemodlib = static_library('usemod', 'usemod.cppm', dependencies: std)
 usemain = executable('usemain', 'usemain.cpp', link_with: usemodlib)
 test('usemain', usemain)
+
+# import std and a declared header unit in the same translation unit.
+huprog = executable('huprog', 'humain.cpp', dependencies: std,
+                    cpp_header_units: ['hu.h'])
+test('huprog', huprog)

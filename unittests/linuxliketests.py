@@ -1125,7 +1125,7 @@ class LinuxlikeTests(BasePlatformTests):
                         block.append(nxt)
                     return '\n'.join(block)
             return ''
-        for exe in ('prog', 'compatprog', 'usemain'):
+        for exe in ('prog', 'compatprog', 'usemain', 'huprog'):
             self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
         self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
 
@@ -1168,7 +1168,7 @@ class LinuxlikeTests(BasePlatformTests):
                         block.append(nxt)
                     return '\n'.join(block)
             return ''
-        for exe in ('prog', 'compatprog', 'usemain'):
+        for exe in ('prog', 'compatprog', 'usemain', 'huprog'):
             self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
         self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
 
