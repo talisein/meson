@@ -47,3 +47,9 @@ one link, and module dependency cycles) are reported at build time exactly as
 for GCC and MSVC. All translation units sharing modules must use the same
 module-affecting flags; Clang additionally enforces this itself (a `cpp_std`
 mismatch against a BMI is a hard compiler error).
+
+ccache does not track BMI contents and would serve stale objects for module
+consumers, so Meson makes it fall back to the real compiler for module
+compiles (as it already does for GCC's `-fmodules`); module-enabled sources
+do not benefit from ccache. A warning at setup points this out when ccache
+wraps the compiler, whether as a launcher or through distro PATH masquerade.

@@ -832,6 +832,12 @@ class LinuxlikeTests(BasePlatformTests):
                     self.assertNotIn('.gcm', line)
                     self.assertNotIn('-fmodule-file', line)
 
+    # Rebuild tests exercise Meson's dependency graph, so ccache must not
+    # answer for the compiler: it does not track the contents of BMIs, so a
+    # cached hit can hand back an object compiled against the pre-edit
+    # module -- including via distro PATH masquerade (/usr/lib64/ccache).
+    NO_CCACHE = {'CCACHE_DISABLE': '1'}
+
     def _check_module_rebuild(self, testdir_name: str = '139 gcc cpp modules') -> None:
         # Editing a module interface must rebuild its BMI and recompile every
         # importer, exactly as editing a normally #included header does --
@@ -839,7 +845,7 @@ class LinuxlikeTests(BasePlatformTests):
         testdir = os.path.join(self.unit_test_dir, testdir_name)
         srcdir = self.copy_srcdir(testdir)
         self.init(srcdir)
-        self.build()
+        self.build(override_envvars=self.NO_CCACHE)
         self.run_tests()  # modfunc() == 42 -> prog exits 0
         # Bump the exported function's value; a stale BMI keeps the old one.
         iface = os.path.join(srcdir, 'modlib.cppm')
@@ -851,7 +857,7 @@ class LinuxlikeTests(BasePlatformTests):
             f.write(newcontent)
         # The interface's BMI must rebuild and the importer (main.cpp -> prog)
         # recompile and relink.
-        out = self.build()
+        out = self.build(override_envvars=self.NO_CCACHE)
         self.assertIn('Linking target prog', out)
         prog = os.path.join(self.builddir, 'prog')
         self.assertNotEqual(0, subprocess.run([prog]).returncode,
@@ -914,12 +920,44 @@ class LinuxlikeTests(BasePlatformTests):
             self.assertTrue(os.path.isfile(os.path.join(cache, bmi)), f'missing BMI {bmi}')
         # No compile or scan command may name a module or a BMI path: the only
         # module flags are -fprebuilt-module-path=<dir>, bare -fmodule-output
-        # and -x c++-module, none of which contain '.pcm'.
+        # and -x c++-module, none of which contain '.pcm'. Module ARGS must
+        # also carry the ccache-defeating -fmodules -fno-modules pair (inert
+        # to clang; makes ccache fall back instead of serving stale objects).
+        saw_ccache_pair = False
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:
                 if line.strip().startswith('ARGS ='):
                     self.assertNotIn('.pcm', line)
                     self.assertNotIn('-fmodule-file', line)
+                    if '-fprebuilt-module-path' in line:
+                        self.assertIn('-fmodules -fno-modules', line)
+                        saw_ccache_pair = True
+        self.assertTrue(saw_ccache_pair, 'no module compile carried the ccache-defeating pair')
+
+    def test_clang_cpp_modules_user_fmodules(self):
+        # A user who enables implicit Clang modules (-fmodules, via any arg
+        # channel) must not have it silently cancelled by the trailing
+        # -fno-modules of the ccache-defeating pair; the pair is dropped and
+        # the user's -fmodules keeps ccache away on its own. Configure-only:
+        # the interaction is fully visible in build.ninja.
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '156 clang cpp modules')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang named modules.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        self.init(testdir, extra_args=['-Dcpp_args=-fmodules'])
+        saw_module_args = False
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS =') and '-fprebuilt-module-path' in line:
+                    saw_module_args = True
+                    self.assertIn('-fmodules', line)
+                    self.assertNotIn('-fno-modules', line)
+        self.assertTrue(saw_module_args, 'no module compile args found in build.ninja')
 
     def test_clang_cpp_module_rebuild_on_interface_change(self):
         if self.backend is not Backend.ninja:

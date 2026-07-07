@@ -1458,6 +1458,8 @@ class NinjaBackend(backends.Backend):
             # front, before any module compile runs.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      cpp.get_module_cache_dir()), exist_ok=True)
+        if cpp.get_id() == 'clang':
+            self.warn_on_clang_modules_ccache(cpp)
         dyndep_file = self.get_dep_scan_file_for(target)[1]
         provmap_file = self.get_provided_modules_file_for(target)
 
@@ -1501,6 +1503,27 @@ class NinjaBackend(backends.Backend):
         elem.add_item('DEPARGS', depargs)
         elem.add_item('name', target.name)
         self.add_build(elem)
+
+    def warn_on_clang_modules_ccache(self, cpp: Compiler) -> None:
+        # Module compiles carry -fmodules -fno-modules so ccache falls back to
+        # the real compiler instead of serving stale objects (see
+        # ClangCPPCompiler.get_module_compile_args). Tell users why module TUs
+        # stop getting cache hits. Checks both a launcher in the command line
+        # and PATH masquerade (e.g. Fedora's /usr/lib64/ccache).
+        import shutil
+        exelist = cpp.get_exelist()
+        wrapped = exelist != cpp.get_exelist(ccache=False)
+        if not wrapped:
+            exe = shutil.which(exelist[0])
+            wrapped = exe is not None and \
+                os.path.basename(os.path.realpath(exe)).lower() in {'ccache', 'ccache.exe'}
+        if wrapped:
+            mlog.warning(
+                'ccache is wrapping the Clang compiler while C++ modules are in use. '
+                'ccache cannot cache module compiles correctly (it does not track the '
+                'contents of imported BMIs), so Meson makes it fall back to the real '
+                'compiler for them; module-enabled sources will not benefit from ccache.',
+                once=True, fatal=False)
 
     def warn_on_module_cpp_std_divergence(self, consumer: build.BuildTarget,
                                           provider: build.BuildTarget) -> None:
@@ -3591,7 +3614,15 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # BMI path never appear on the command line -- ordering is carried by
         # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
-            commands += compiler.get_module_compile_args()
+            modargs = compiler.get_module_compile_args()
+            if compiler.get_id() == 'clang' and '-fmodules' in commands:
+                # The user turned on implicit Clang modules themselves (via
+                # cpp_args, add_project_arguments, ...; all those channels are
+                # in `commands` by now). Drop the ccache-defeating pair: its
+                # trailing -fno-modules would silently cancel their flag, and
+                # their -fmodules already makes ccache stand aside.
+                modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
+            commands += modargs
             # cl and clang need each module-interface unit flagged explicitly
             # (GCC infers it from the source). Detected by extension as
             # everywhere else, never by reading the source.

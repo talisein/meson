@@ -465,7 +465,21 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # their BMI next to the object (-fmodule-output, added per interface
         # unit by the backend) and a harvest edge publishes it into the cache;
         # no module name or BMI path ever appears on a command line.
-        return [f'-fprebuilt-module-path={self.get_module_cache_dir()}']
+        #
+        # -fmodules -fno-modules exists to defeat ccache. ccache does not
+        # track the contents of BMIs (they never appear in preprocessed
+        # output), so it serves stale objects when an imported module or
+        # header unit changes -- including via distro PATH masquerade such as
+        # Fedora's /usr/lib64/ccache. It refuses to cache anything compiled
+        # with -fmodules, which on GCC protects module builds as a side
+        # effect; this pair buys Clang the same refusal. The pair is a no-op
+        # to Clang itself: the driver cancels it before cc1. Do not pass
+        # -fmodules alone -- that enables the unrelated implicit
+        # Clang-header-modules feature. The backend drops the pair when the
+        # user passed -fmodules themselves: their flag must stay in effect,
+        # and it keeps ccache away on its own.
+        return [f'-fprebuilt-module-path={self.get_module_cache_dir()}',
+                '-fmodules', '-fno-modules']
 
     @functools.lru_cache(maxsize=None)
     def _std_module_info(self, extra_args: T.Tuple[str, ...]) -> T.Tuple[T.Dict[str, str], T.List[str]]:
