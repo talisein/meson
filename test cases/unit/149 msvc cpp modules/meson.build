@@ -2,9 +2,11 @@ project('msvc cpp modules', 'cpp', default_options: ['cpp_std=c++20'])
 
 # A library that provides a named module, imported by an executable that only
 # links the library. Nothing about modlib's sources is named in the exe -- the
-# provided-module map + dyndep carry ordering and resolution. The exe is
+# provided-module map + dyndep carry ordering and resolution. The library
+# also has a module implementation unit (plain .cpp, `module modlib;`),
+# which must be ordered after the interface's BMI without providing one. The exe is
 # module-enabled purely by linking a module provider, with no annotation.
-modlib = static_library('modlib', 'modlib.ixx')
+modlib = static_library('modlib', 'modlib.ixx', 'modlib_impl.cpp')
 prog = executable('prog', 'main.cpp', link_with: modlib)
 test('prog', prog)
 

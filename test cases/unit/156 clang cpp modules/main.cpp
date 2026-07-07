@@ -1,5 +1,6 @@
 import modlib;
 
 int main() {
-    return modfunc() == 42 ? 0 : 1;
+    // modfunc lives in the interface, implfunc in an implementation unit.
+    return modfunc() + implfunc() == 62 ? 0 : 1;
 }

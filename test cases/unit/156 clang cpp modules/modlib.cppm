@@ -9,3 +9,6 @@ export int modfunc() {
     static_assert(DBL_DIG > 0, "include was preprocessed");
     return 42;
 }
+
+// Defined in modlib_impl.cpp, a module implementation unit.
+export int implfunc();

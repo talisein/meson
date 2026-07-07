@@ -5,7 +5,10 @@ project('clang cpp modules', 'cpp', default_options: ['cpp_std=c++20'])
 
 # A library that provides a named module, imported by an executable that only
 # links the library; the exe is module-enabled purely by linking a provider.
-modlib = static_library('modlib', 'modlib.cppm')
+# The library also has a module implementation unit (plain .cpp,
+# `module modlib;`): ordered after the interface's BMI, provides none, and
+# on clang gets no -fmodule-output/harvest (it is not an interface).
+modlib = static_library('modlib', 'modlib.cppm', 'modlib_impl.cpp')
 prog = executable('prog', 'main.cpp', link_with: modlib)
 test('prog', prog)
 
