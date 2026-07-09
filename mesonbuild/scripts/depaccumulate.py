@@ -254,6 +254,11 @@ def run_p1689(argv: T.List[str]) -> int:
                              'map a provided module to its harvest stamp '
                              '(<primary-output> + this suffix) instead of the cache BMI '
                              'path, and declare no implicit outputs on object edges.')
+    parser.add_argument('--assume-interfaces', action='store_true',
+                        help='Clang: every source of this target is compiled as an '
+                             'interface unit regardless of extension (the std '
+                             'synthesis), so skip the interface-extension check on '
+                             'provided modules.')
     parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
                         help='A declared header unit as "<mode>:<spelling>". Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
@@ -288,6 +293,23 @@ def run_p1689(argv: T.List[str]) -> int:
                     f'Module "{name}" is provided by two sources in this target '
                     f'({provider_of[name]} and {obj}). Module names must be unique.')
             if args.stamp_suffix is not None:
+                # A harvest edge (and thus the stamp) exists only for sources
+                # the backend compiled as interface units, decided by extension
+                # alone (in lockstep with generate_single_compile's clang_miu).
+                # A provider outside that set would advertise a stamp nothing
+                # produces, and consumers would only fail later with the
+                # compiler's "module not found" -- reject it here instead.
+                src = prov.get('source-path')
+                if not args.assume_interfaces and src is not None \
+                        and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'}:
+                    raise MesonException(
+                        f'{src} provides the C++ module "{name}" but does not have '
+                        'a module-interface extension: Clang only emits a module '
+                        'BMI for a source compiled as an interface unit, which it '
+                        'must be told per source (-x c++-module), and Meson '
+                        'derives that from the .cppm/.ixx extension alone. Rename '
+                        'the interface to .cppm or .ixx (cpp_modules: true only '
+                        'covers consumers).')
                 # Consumers order against the provider's harvest stamp; the
                 # cache BMI itself stays out of Ninja's graph (its name is
                 # only known at build time).

@@ -460,6 +460,39 @@ class InternalTests(unittest.TestCase):
             with self.assertRaises(MesonException):
                 collate(d, bmidir, 'liba')
 
+    def test_depaccumulate_p1689_clang_interface_extension(self):
+        # Clang publishes a module BMI only for sources the backend compiled
+        # as interface units, decided by extension alone; a provider whose
+        # source lacks the module extension would advertise a harvest stamp
+        # nothing produces, and consumers would only fail later with the
+        # compiler's "module 'x' not found". The collate must reject it,
+        # naming the source and the fix. --assume-interfaces (the std
+        # synthesis, whose bits/std.cc is an interface unit by fiat) and the
+        # GCC/MSVC pipelines (no --stamp-suffix) are exempt.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import MesonException
+
+        def args(d: str, extra: T.List[str]) -> T.List[str]:
+            return ['--dyndep', os.path.join(d, 'out.dd'),
+                    '--provmap', os.path.join(d, 'pm.json'),
+                    '--bmi-dir', os.path.join(d, 'pcm.cache'), '--bmi-suffix', '.pcm',
+                    *extra, os.path.join(d, 'fmt.cc.o.ddi')]
+
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'fmt.cc.o.ddi'), 'w', encoding='utf-8') as f:
+                json.dump({'rules': [{'primary-output': 'fmt.cc.o',
+                                      'provides': [{'logical-name': 'fmt',
+                                                    'is-interface': True,
+                                                    'source-path': '../src/fmt.cc'}]}]}, f)
+            with self.assertRaises(MesonException) as cm:
+                run_p1689(args(d, ['--stamp-suffix', '.pcm.stamp']))
+            msg = str(cm.exception)
+            self.assertIn('../src/fmt.cc', msg)
+            self.assertIn('.cppm', msg)
+            self.assertEqual(run_p1689(args(d, ['--stamp-suffix', '.pcm.stamp',
+                                                '--assume-interfaces'])), 0)
+            self.assertEqual(run_p1689(args(d, [])), 0)
+
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit
         # cl tags a header-unit require with lookup-method include-quote/angle

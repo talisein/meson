@@ -1524,6 +1524,11 @@ class NinjaBackend(backends.Backend):
             # provider's object path), not the cache paths. Must stay in
             # lockstep with get_clang_pcm_stamp_for.
             depargs += ['--stamp-suffix', '.pcm.stamp']
+            if target.cpp_sources_are_module_interfaces:
+                # The std synthesis compiles every source as an interface unit
+                # regardless of extension (libstdc++'s bits/std.cc), so the
+                # collator must not reject its provides for lacking one.
+                depargs += ['--assume-interfaces']
         if cpp.get_id() == 'msvc':
             # Declared header units, so the collator can flag a source importing
             # one this target never declared. cl reports header-unit requires
@@ -3791,7 +3796,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             commands += modargs
             # cl and clang need each module-interface unit flagged explicitly
             # (GCC infers it from the source). Detected by extension as
-            # everywhere else, never by reading the source.
+            # everywhere else, never by reading the source. The collator
+            # enforces this contract for clang at build time (the
+            # interface-extension check in depaccumulate.run_p1689): a scanned
+            # provide from a source outside this set is an error there, not a
+            # downstream "module not found".
             suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
             if suffix in {'cppm', 'ixx'}:
                 if compiler.get_id() == 'msvc':
