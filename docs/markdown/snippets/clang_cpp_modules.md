@@ -27,7 +27,12 @@ name as a small build-time step; this is invisible in the API and keeps every
 compile command line static.
 
 `import std;` and `import std.compat;` are available through
-`dependency('std')`, exactly as on GCC and MSVC. Clang serves two standard
+`dependency('std')`, exactly as on GCC and MSVC. The dependency is threaded
+by default — the std module is built with the threads dependency's flags and
+every consumer inherits them, so the POSIX-thread setting Clang bakes into
+`std.pcm` matches all of its importers by construction;
+`dependency('std-nothreads')` opts out (one shared std module per build, so
+the two spellings cannot be mixed). Clang serves two standard
 libraries, so Meson probes which one the build actually uses — honoring the
 platform default, Clang configuration files, and a `-stdlib=libc++` given via
 `cpp_args`, `add_global_arguments` or `add_project_arguments` — and builds the
@@ -46,7 +51,14 @@ Diagnostics (a module required by no target, a duplicate module name reaching
 one link, and module dependency cycles) are reported at build time exactly as
 for GCC and MSVC. All translation units sharing modules must use the same
 module-affecting flags; Clang additionally enforces this itself (a `cpp_std`
-mismatch against a BMI is a hard compiler error).
+mismatch against a BMI is a hard compiler error). Watch `-pthread` in
+particular: `dependency('threads')` adds it only to its own consumers, so a
+threads-using target cannot share modules with targets built without the
+flag, in either direction. Meson warns at setup when module-sharing targets
+diverge on it; the fix is `dependency('threads')` on the target missing the
+flag (or `-pthread` build-wide via `-Dcpp_args=-pthread`). The std module
+itself is immune by default: `dependency('std')` folds the threads
+dependency in and propagates it to every consumer.
 
 ccache does not track BMI contents and would serve stale objects for module
 consumers, so Meson makes it fall back to the real compiler for module

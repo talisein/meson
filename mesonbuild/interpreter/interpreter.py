@@ -1931,8 +1931,12 @@ class Interpreter(InterpreterBase, HoldableObject):
         names = [n for n in args[0] if n]
         # The C++ standard library as importable modules (`import std;`) is not a
         # discoverable external dependency: synthesize it from the compiler.
+        # 'std' is threaded by default; 'std-nothreads' opts out (one shared
+        # std module per build, so the two cannot be mixed).
         if names == ['std']:
             return self._cpp_std_module_dependency(node, kwargs)
+        if names == ['std-nothreads']:
+            return self._cpp_std_module_dependency(node, kwargs, threads=False)
         if len(names) > 1:
             FeatureNew('dependency with more than one name', '0.60.0').use(self.subproject)
         default_options = kwargs.get('default_options')
@@ -1984,7 +1988,8 @@ class Interpreter(InterpreterBase, HoldableObject):
         return DefaultObject()
 
     def _cpp_std_module_dependency(self, node: mparser.BaseNode,
-                                   kwargs: kwtypes.FuncDependency) -> Dependency:
+                                   kwargs: kwtypes.FuncDependency,
+                                   threads: bool = True) -> Dependency:
         """`dependency('std')`: the C++ standard library as importable modules.
 
         `import std;` / `import std.compat;` need libstdc++'s module-interface
@@ -1996,25 +2001,44 @@ class Interpreter(InterpreterBase, HoldableObject):
         normal module machinery. Consumers that only link such a target -- not
         importing std themselves -- get the objects transitively.
 
+        A BMI bakes in the POSIX-thread setting of its own compile (Clang
+        rejects a divergent import outright), and threads are the common case,
+        so 'std' folds in the threads dependency by default: the std module is
+        built with the platform's thread flags and every consumer inherits
+        them through the InternalDependency, making the flag uniform across
+        std sharers by construction. `dependency('std-nothreads')` opts out.
+        There is a single shared std module per build, so the two spellings
+        cannot be mixed.
+
         'std' is reserved, but as for any reserved dependency name an explicit
         meson.override_dependency('std', ...) takes precedence over synthesis.
         """
+        name = 'std' if threads else 'std-nothreads'
         disabled, required, feature = extract_required_kwarg(kwargs, self.subproject)
         for_machine = kwargs['native']
         if disabled:
-            mlog.log('Dependency', mlog.bold('std'),
+            mlog.log('Dependency', mlog.bold(name),
                      'for', mlog.bold(for_machine.get_lower_case_name()), 'machine',
                      'skipped: feature', mlog.bold(feature), 'disabled')
-            return dependencies.NotFoundDependency('std', self.environment)
+            return dependencies.NotFoundDependency(name, self.environment)
 
         # An explicit override wins over synthesis, as for any reserved name.
         identifier = dependencies.get_dep_identifier(
-            'std', T.cast('dependencies.base.DependencyObjectKWs', kwargs))
+            name, T.cast('dependencies.base.DependencyObjectKWs', kwargs))
         override = self.build.dependency_overrides[for_machine].get(identifier)
         if override is not None:
             return override.dep
 
-        cached = self.build.cpp_std_module_deps[for_machine].get('std')
+        other = self.build.cpp_std_module_deps[for_machine].get(
+            'std-nothreads' if threads else 'std')
+        if other is not None and other.found():
+            raise InterpreterException(
+                "dependency('std') and dependency('std-nothreads') cannot be mixed "
+                'in one build: there is a single shared std module, built either '
+                'with thread support (the default) or without. Use one spelling '
+                'everywhere.')
+
+        cached = self.build.cpp_std_module_deps[for_machine].get(name)
         if cached is not None and (cached.found() or not required):
             return cached
 
@@ -2040,9 +2064,9 @@ class Interpreter(InterpreterBase, HoldableObject):
                     'need a C++ compiler that ships the standard library as modules '
                     '(GCC >= 15 with libstdc++.modules.json, or Clang with a stdlib '
                     'module manifest and a P1689-capable clang-scan-deps).')
-            mlog.log('Dependency', mlog.bold('std'), 'found:', mlog.red('NO'))
-            dep = dependencies.NotFoundDependency('std', self.environment)
-            self.build.cpp_std_module_deps[for_machine]['std'] = dep
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+            dep = dependencies.NotFoundDependency(name, self.environment)
+            self.build.cpp_std_module_deps[for_machine][name] = dep
             return dep
 
         if self.backend.name != 'ninja':
@@ -2061,6 +2085,18 @@ class Interpreter(InterpreterBase, HoldableObject):
             'install': False,
             'native': for_machine is MachineChoice.BUILD,
         }
+        # Threaded by default: the threads dependency puts the platform's
+        # thread flags (-pthread where it exists) on the std module compiles,
+        # and riding along as ext_deps below puts the same flags on every
+        # consumer, so the POSIX-thread setting Clang bakes into a BMI is
+        # uniform across std sharers by construction.
+        threads_dep: T.Optional[Dependency] = None
+        if threads:
+            threads_dep = dependencies.find_external_dependency(
+                'threads', self.environment,
+                T.cast('dependencies.base.DependencyObjectKWs',
+                       {'native': for_machine, 'required': True}))
+            libkwargs['dependencies'] = [threads_dep]
         # Some compilers need extra flags on the std interface compiles only
         # (Clang: -Wno-reserved-module-identifier, and libc++'s
         # support-header include dirs from the manifest).
@@ -2080,8 +2116,10 @@ class Interpreter(InterpreterBase, HoldableObject):
         # compilers that must flag interface units per source (Clang).
         std_lib.cpp_sources_are_module_interfaces = True
         dep = dependencies.InternalDependency(
-            self.project_version, libraries=[std_lib], name='std')
-        self.build.cpp_std_module_deps[for_machine]['std'] = dep
+            self.project_version, libraries=[std_lib],
+            ext_deps=[threads_dep] if threads_dep is not None else None,
+            name=name)
+        self.build.cpp_std_module_deps[for_machine][name] = dep
         return dep
 
     @FeatureNew('disabler', '0.44.0')

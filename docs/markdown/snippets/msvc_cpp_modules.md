@@ -36,6 +36,9 @@ link a module-providing target need nothing at all.
 built from the standard library's module sources shipped with the MSVC toolset
 (`modules.json`). The P1689 scan requires Visual Studio 2022 17.2 or newer
 (cl 19.32, where `/scanDependencies` shipped) and `cpp_std=c++20` or later.
+As on GCC and Clang, `dependency('std')` folds in the threads dependency by
+default (a no-op on MSVC, where threading needs no flags), and
+`dependency('std-nothreads')` opts out; the two cannot be mixed in one build.
 
 Older but modules-capable MSVC (VS 2019 16.8 up to VS 2022 17.1) falls back to
 the previous regex-based scanner, which handles only flat named modules --

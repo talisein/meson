@@ -1062,6 +1062,30 @@ class LinuxlikeTests(BasePlatformTests):
         self.assertIn("'prog'", out)
         self.assertIn("'submodlib'", out)
 
+    def test_module_pthread_divergence(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '159 module pthread divergence')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() == 'clang':
+            if not cpp.supports_cpp_modules_p1689():
+                raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        elif cpp.get_id() == 'gcc':
+            if version_compare(cpp.version, '<14'):
+                raise SkipTest('GCC C++ modules require GCC >= 14.')
+        else:
+            raise SkipTest('Test applies to GCC and Clang named modules.')
+        # dependency('threads') adds -pthread to 'prog' only, so the BMI and
+        # its importer disagree on the POSIX-thread setting. Clang rejects
+        # that BMI outright and GCC accepts it silently, but it is out of
+        # contract on both, so setup must warn on both, naming both targets
+        # and the fix.
+        out = self.init(testdir)
+        self.assertIn('builds with -pthread but', out)
+        self.assertIn("'prog'", out)
+        self.assertIn("'modlib'", out)
+
     def test_gcc_cpp_modules_generated_header(self):
         if self.backend is not Backend.ninja:
             raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
@@ -1171,6 +1195,62 @@ class LinuxlikeTests(BasePlatformTests):
         for exe in ('prog', 'compatprog', 'usemain', 'huprog'):
             self.assertIn('lib__meson_cxx_std.a', link_edge(exe), f'{exe} does not link the std library')
         self.assertNotIn('lib__meson_cxx_std.a', link_edge('libusemod.a'))
+        # dependency('std') is threaded by default: the threads dependency
+        # rides along to every consumer, so the POSIX-thread setting baked
+        # into std.pcm matches all importing compiles by construction.
+        seen_main = False
+        for entry in self.get_compdb():
+            if entry['file'].endswith('main.cpp'):
+                self.assertIn('-pthread', entry['command'])
+                seen_main = True
+        self.assertTrue(seen_main, 'main.cpp not found in compile database')
+
+    def test_import_std_nothreads(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '160 import std nothreads')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() == 'clang':
+            if not cpp.supports_cpp_modules_p1689():
+                raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        elif cpp.get_id() == 'gcc':
+            if version_compare(cpp.version, '<15'):
+                raise SkipTest('GCC import std requires GCC >= 15.')
+        else:
+            raise SkipTest('Test applies to GCC and Clang import std.')
+        if not cpp.get_std_module_sources():
+            raise SkipTest('The selected standard library ships no module manifest.')
+        # The opt-out spelling: no thread flags on the std module or its
+        # consumers, and no divergence warning since both sides agree.
+        out = self.init(testdir)
+        self.assertNotIn('builds with -pthread but', out)
+        self.build()
+        self.run_tests()
+        for entry in self.get_compdb():
+            self.assertNotIn('-pthread', entry['command'])
+
+    def test_import_std_threads_variant_conflict(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '161 std threads conflict')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() == 'clang':
+            if not cpp.supports_cpp_modules_p1689():
+                raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        elif cpp.get_id() == 'gcc':
+            if version_compare(cpp.version, '<15'):
+                raise SkipTest('GCC import std requires GCC >= 15.')
+        else:
+            raise SkipTest('Test applies to GCC and Clang import std.')
+        if not cpp.get_std_module_sources():
+            raise SkipTest('The selected standard library ships no module manifest.')
+        # One shared std module per build: requesting both the threaded and
+        # the nothreads variant must fail at setup, not fight over one BMI.
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir)
+        self.assertIn('cannot be mixed', cm.exception.output)
 
     def test_gcc_import_std_link_whole(self):
         if self.backend is not Backend.ninja:

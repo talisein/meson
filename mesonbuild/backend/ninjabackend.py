@@ -587,7 +587,7 @@ class NinjaBackend(backends.Backend):
         self.import_std: T.Optional[ImportStdInfo] = None
         # Consumer/provider target-id pairs already warned about for divergent
         # cpp_std, so each divergence is reported once.
-        self._warned_module_cpp_std: T.Set[T.Tuple[str, str]] = set()
+        self._warned_module_divergence: T.Set[T.Tuple[str, str, str]] = set()
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
@@ -1501,7 +1501,7 @@ class NinjaBackend(backends.Backend):
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
                 dep_provmaps.append(self.get_provided_modules_file_for(t))
-                self.warn_on_module_cpp_std_divergence(target, t)
+                self.warn_on_module_flag_divergence(target, t)
         dep_provmaps.sort()
 
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
@@ -1562,22 +1562,51 @@ class NinjaBackend(backends.Backend):
                 'compiler for them; module-enabled sources will not benefit from ccache.',
                 once=True, fatal=False)
 
-    def warn_on_module_cpp_std_divergence(self, consumer: build.BuildTarget,
-                                          provider: build.BuildTarget) -> None:
+    def warn_on_module_flag_divergence(self, consumer: build.BuildTarget,
+                                       provider: build.BuildTarget) -> None:
+        def warn_once(kind: str, message: str) -> None:
+            key = (consumer.get_id(), provider.get_id(), kind)
+            if key in self._warned_module_divergence:
+                return
+            self._warned_module_divergence.add(key)
+            mlog.warning(message)
+
         def cpp_std(t: build.BuildTarget) -> str:
             return T.cast('str', self.get_target_option(t, OptionKey('cpp_std', machine=t.for_machine,
                                                                      subproject=t.subproject)))
         consumer_std, provider_std = cpp_std(consumer), cpp_std(provider)
-        if consumer_std == provider_std:
-            return
-        pair = (consumer.get_id(), provider.get_id())
-        if pair in self._warned_module_cpp_std:
-            return
-        self._warned_module_cpp_std.add(pair)
-        mlog.warning(
-            f'Target {consumer.name!r} (cpp_std={consumer_std}) imports C++ modules '
-            f'from {provider.name!r} (cpp_std={provider_std}); targets produced using '
-            'modules built with a divergent cpp_std version may fail at build or runtime.')
+        if consumer_std != provider_std:
+            warn_once('cpp_std',
+                f'Target {consumer.name!r} (cpp_std={consumer_std}) imports C++ modules '
+                f'from {provider.name!r} (cpp_std={provider_std}); targets produced using '
+                'modules built with a divergent cpp_std version may fail at build or runtime.')
+
+        # A BMI bakes in the flags of its own compile, and -pthread routinely
+        # diverges per target: dependency('threads') injects it only into its
+        # own consumers. That breaks the uniform-flags contract on every
+        # compiler -- the BMI's view of the standard headers was expanded
+        # without _REENTRANT -- even though only Clang enforces it (a
+        # config-mismatch hard error, in both directions; GCC accepts the mix
+        # silently). Warn at generate time and name the uniform-flags fix.
+        def has_pthread(t: build.BuildTarget) -> bool:
+            return '-pthread' in self._generate_single_compile(t, t.compilers['cpp'])
+        consumer_pt, provider_pt = has_pthread(consumer), has_pthread(provider)
+        if consumer_pt != provider_pt:
+            w, wo = (consumer, provider) if consumer_pt else (provider, consumer)
+            if wo.name == '__meson_cxx_std':
+                # The synthesized std target is not user-visible; its
+                # POSIX-thread setting is chosen by the dependency spelling
+                # (kept in lockstep with _cpp_std_module_dependency).
+                fix = "use the threaded dependency('std') instead of dependency('std-nothreads')"
+            else:
+                fix = f"add dependency('threads') to {wo.name!r}"
+            warn_once('pthread',
+                f'Target {w.name!r} builds with -pthread but {wo.name!r} does not, '
+                'and they share C++ modules; a module BMI bakes in the POSIX-thread '
+                'setting of its own compile, so the divergence breaks the shared-module '
+                'flag contract (Clang rejects such a BMI with a configuration-mismatch '
+                f'error). To fix, {fix}, or apply -pthread build-wide via '
+                "-Dcpp_args=-pthread or add_global_arguments('-pthread', language: 'cpp').")
 
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:
