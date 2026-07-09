@@ -39,6 +39,13 @@ of its own. Like other reserved dependency names, an explicit
 `meson.override_dependency('std', ...)` takes precedence over this synthesis if a
 project needs to supply the standard-library modules itself.
 
+`dependency('std')` is threaded by default: the std module is built with the
+threads dependency's flags and every consumer inherits them, so the
+POSIX-thread setting compiled into the module matches all of its importers
+by construction (Clang enforces this; see below). A build that must avoid
+the thread flags can use `dependency('std-nothreads')` instead; there is a
+single shared std module per build, so the two spellings cannot be mixed.
+
 `import std;` works in any modules-capable dialect (`cpp_std=c++20` or later with
 GCC); it is not restricted to `c++23`. As always, `cpp_std` still governs which
 standard-library *facilities* are available (for example `std::println` needs
@@ -58,4 +65,10 @@ two sources reaching one link, and module dependency cycles.
 
 This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
 Header units are not covered. All translation units in a build that shares
-modules must use the same module-affecting flags (e.g. `cpp_std`).
+modules must use the same module-affecting flags (e.g. `cpp_std`). `-pthread`
+counts: `dependency('threads')` adds it only to its own consumers, so a
+threads-using target sharing modules with a target built without the flag is
+out of contract (GCC accepts the mix silently; Clang rejects it outright).
+Meson warns at setup when module-sharing targets diverge on it; the fix is
+`dependency('threads')` on the target missing the flag (or `-pthread`
+build-wide via `-Dcpp_args=-pthread`).

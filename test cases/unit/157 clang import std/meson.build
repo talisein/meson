@@ -15,8 +15,13 @@ test('compatprog', compatprog)
 # A user module that imports std, provided by a library and consumed across a
 # target boundary: usemain only links usemod and never imports std itself, yet
 # still links the std objects transitively without declaring dependency('std').
+# It does import usemod's module, whose BMI is threaded (dependency('std') is
+# threaded by default and usemodlib inherits the flags), so as a module sharer
+# it needs the threads dependency itself -- exactly what the setup-time
+# divergence warning prescribes.
 usemodlib = static_library('usemod', 'usemod.cppm', dependencies: std)
-usemain = executable('usemain', 'usemain.cpp', link_with: usemodlib)
+usemain = executable('usemain', 'usemain.cpp', link_with: usemodlib,
+                     dependencies: dependency('threads'))
 test('usemain', usemain)
 
 # import std and a declared header unit in the same translation unit.
