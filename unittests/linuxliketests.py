@@ -47,7 +47,7 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .cppmodules import CppModulesTestMixin, requires_cpp_module_caps
+from .cppmodules import CppModulesTestMixin, regex_scanner_flag, requires_cpp_module_caps
 from .helpers import *
 
 def _prepend_pkg_config_path(path: str) -> str:
@@ -833,6 +833,43 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.init(os.path.join(self.unit_test_dir, '147 gcc fmodules-ts legacy'))
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             self.assertNotIn('provided-modules.json', f.read())
+
+    @requires_cpp_module_caps('regex_scanner', compiler='gcc')
+    def test_gcc_cpp_modules_regex_scanner(self):
+        # A flat named module in plain .cpp sources with only a bare modules
+        # flag builds via the legacy regex scanner. No no-op check: the regex
+        # dyndep declares a phantom '<module>.ifc' output GCC never writes
+        # (depscan.module_name_for hardcodes the cl spelling), so the module
+        # edge stays forever dirty -- a known limitation of the legacy path.
+        flag = regex_scanner_flag(self.host_cpp_compiler())
+        self.build_and_check_modules('163 cpp modules regex scanner',
+                                     extra_args=[f'-Dmodules_flag={flag}'],
+                                     noop_check=False)
+        # The P1689 collate is not engaged; GCC itself wrote the BMI into the
+        # shared cache in the build dir.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('provided-modules.json', f.read())
+        self.assertTrue(os.path.isfile(self.bmi_path('flatmod')), 'missing BMI flatmod')
+
+    @requires_cpp_module_caps('regex_scanner', compiler='gcc')
+    def test_gcc_cpp_modules_regex_scanner_diagnostics(self):
+        # The regex scanner handles flat named modules only. Partitions and
+        # import std must fail its scan with a clear error naming the
+        # limitation, not silently under-scan into raw compiler errors.
+        testdir = os.path.join(self.unit_test_dir, '163 cpp modules regex scanner')
+        flag = regex_scanner_flag(self.host_cpp_compiler())
+        cases = {
+            'partition': 'module partitions are not supported',
+            'importpart': 'module partitions are not supported',
+            'importstd': 'import std is not supported',
+        }
+        for mode, needle in cases.items():
+            with self.subTest(mode=mode):
+                self.new_builddir()
+                self.init(testdir, extra_args=[f'-Dmode={mode}', f'-Dmodules_flag={flag}'])
+                with self.assertRaises(subprocess.CalledProcessError) as cm:
+                    self.build()
+                self.assertIn(needle, cm.exception.stdout)
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
     def test_clang_cpp_modules(self):
