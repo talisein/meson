@@ -823,6 +823,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_gcc_cpp_module_rebuild_on_interface_change(self):
         self.check_module_rebuild('139 gcc cpp modules', edit_file='modlib.cppm')
 
+    @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
+    def test_gcc_cpp_module_graph_mutation(self):
+        self.check_module_graph_mutation('164 cpp module graph mutation')
+
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_ts_legacy(self):
         # A bare -fmodules-ts cpp_arg (with no real module enablement) must not be
@@ -918,6 +922,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler='clang')
     def test_clang_cpp_module_rebuild_on_interface_change(self):
         self.check_module_rebuild('156 clang cpp modules', edit_file='modlib.cppm')
+
+    @requires_cpp_module_caps('modules', 'module_interfaces', compiler='clang')
+    def test_clang_cpp_module_graph_mutation(self):
+        self.check_module_graph_mutation('164 cpp module graph mutation')
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_modules_cross_machine(self):

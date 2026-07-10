@@ -465,6 +465,10 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_cpp_module_rebuild_on_interface_change(self):
         self.check_module_rebuild('149 msvc cpp modules', edit_file='modlib.ixx')
 
+    @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
+    def test_msvc_cpp_module_graph_mutation(self):
+        self.check_module_graph_mutation('164 cpp module graph mutation')
+
     @requires_cpp_module_caps('modules', 'import_std', compiler='msvc')
     def test_msvc_import_std(self):
         # `import std;` / `import std.compat;` resolved via dependency('std'),
