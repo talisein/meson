@@ -3863,6 +3863,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
+        elif compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc' \
+                and self.cpp_module_scanner_for_target(target) == 'regex' \
+                and any(a in commands for a in compiler.get_cpp_modules_args()):
+            # The regex escape hatch: the user's bare modules flag makes GCC
+            # write its make-style module rules into the -MD depfile, which
+            # Ninja's gcc-deps parser rejects ('inputs may not also have
+            # inputs') -- the same shape get_module_compile_args suppresses on
+            # the P1689 path. Module ordering is carried by the regex-scan
+            # dyndep, so the rules are pure poison; -Mno-modules is accepted
+            # by every GCC that accepts the bare flag.
+            commands += ['-Mno-modules']
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
