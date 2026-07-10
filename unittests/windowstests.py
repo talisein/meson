@@ -21,7 +21,7 @@ from mesonbuild.mesonlib import (
 )
 from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
-    detect_c_compiler, detect_cpp_compiler, detect_d_compiler, compiler_from_language,
+    detect_c_compiler, detect_d_compiler, compiler_from_language,
 )
 from mesonbuild.programs import ExternalProgram
 import mesonbuild.dependencies.base
@@ -33,10 +33,11 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
+from .cppmodules import CppModulesTestMixin, requires_cpp_module_caps
 from .helpers import *
 
 @skipUnless(is_windows() or is_cygwin(), "requires Windows (or Windows via Cygwin)")
-class WindowsTests(BasePlatformTests):
+class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     '''
     Tests that should run on Cygwin, MinGW, and MSVC
     '''
@@ -445,121 +446,44 @@ class WindowsTests(BasePlatformTests):
         self.init(os.path.join(self.unit_test_dir, '85 cpp modules'))
         self.build()
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
     def test_msvc_cpp_modules(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
-        testdir = os.path.join(self.unit_test_dir, '149 msvc cpp modules')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC named modules.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
-        self.init(testdir)
-        self.build()
         # The library provides a module, imported by an executable that merely
         # links it, plus partitions, an explicit-opt-in target, and a generated
         # interface; each test() exercises a producer/consumer pair.
-        self.run_tests()
-        # BMIs land in a single shared cache at the build root, named by cl's
-        # scheme incl. partition ':' -> '-'.
-        ifc = os.path.join(self.builddir, 'ifc.cache')
-        for bmi in ('modlib.ifc', 'pkg.ifc', 'pkg-part.ifc', 'kwmod.ifc', 'genmod.ifc'):
-            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
-        # No compile or scan command may name a module or a BMI path.
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.strip().startswith('ARGS ='):
-                    self.assertNotIn('.ifc', line)
-                    self.assertNotIn('/reference', line)
+        self.build_and_check_modules('149 msvc cpp modules',
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'])
 
+    @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
     def test_msvc_cpp_module_interfaces(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
-        testdir = os.path.join(self.unit_test_dir, '162 cpp module interfaces')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC named modules.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
-        self.init(testdir)
-        self.build()
         # A .cc source declared a module interface via cpp_module_interfaces gets
         # /interface and its BMI lands in the shared cache under the module name.
-        self.run_tests()
-        ifc = os.path.join(self.builddir, 'ifc.cache')
-        for bmi in ('mymod.ifc', 'filemod.ifc'):
-            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
+        self.build_and_check_modules('162 cpp module interfaces',
+                                     bmis=['mymod', 'filemod'])
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_cpp_module_rebuild_on_interface_change(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
-        testdir = os.path.join(self.unit_test_dir, '149 msvc cpp modules')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC named modules.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
-        # Editing a module interface must rebuild its .ifc and recompile every
-        # importer, otherwise consumers link against a stale BMI.
-        srcdir = self.copy_srcdir(testdir)
-        self.init(srcdir)
-        self.build()
-        self.run_tests()  # modfunc() == 42 -> prog exits 0
-        iface = os.path.join(srcdir, 'modlib.ixx')
-        with open(iface, encoding='utf-8') as f:
-            content = f.read()
-        newcontent = content.replace('return ', 'return 1000 + ', 1)
-        self.assertNotEqual(content, newcontent, 'interface edit was a no-op')
-        with open(iface, 'w', encoding='utf-8') as f:
-            f.write(newcontent)
-        out = self.build()
-        self.assertIn('Linking target prog', out)
-        prog = os.path.join(self.builddir, 'prog.exe')
-        self.assertNotEqual(0, subprocess.run([prog]).returncode,
-                            'importer did not pick up the module change (stale BMI)')
+        self.check_module_rebuild('149 msvc cpp modules', edit_file='modlib.ixx')
 
+    @requires_cpp_module_caps('modules', 'import_std', compiler='msvc')
     def test_msvc_import_std(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
-        testdir = os.path.join(self.unit_test_dir, '150 msvc import std')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC import std.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
-        if not cpp.get_std_module_sources():
-            raise SkipTest('MSVC toolset does not ship the std module (modules.json).')
         # `import std;` / `import std.compat;` resolved via dependency('std'),
         # which synthesizes one static library carrying both std module objects
         # and puts it on the link line of every consumer -- including a target
         # that only links a std-importing library without importing std itself.
-        self.init(testdir)
-        self.build()
-        self.run_tests()
-        ifc = os.path.join(self.builddir, 'ifc.cache')
-        for bmi in ('std.ifc', 'std.compat.ifc'):
-            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
+        self.build_and_check_modules('150 msvc import std',
+                                     bmis=['std', 'std.compat'])
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_units(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
-        testdir = os.path.join(self.unit_test_dir, '151 msvc header units')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC header units.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
         # A user unit, a system unit and a named module in one target; a second
         # target reimports the user unit. Building + running proves the units
         # are pre-built, mapped onto the consumers, and ordered before the scan.
-        self.init(testdir)
-        self.build()
-        self.run_tests()
+        # cl names unit BMIs on consumer command lines (as /headerUnit
+        # mappings), so the default ARGS check is off; the bespoke scan below
+        # enforces the sharper rule.
+        self.build_and_check_modules('151 msvc header units',
+                                     ninja_args_not_contains=())
         # Units are pre-built to a Meson-chosen .ifc, deduped globally by
         # (mode, spelling): the user unit shared by both targets is one edge/BMI.
         hudir = os.path.join(self.builddir, 'meson-private', 'header-units')
@@ -574,16 +498,9 @@ class WindowsTests(BasePlatformTests):
                 if line.strip().startswith('ARGS =') and '.ifc' in line:
                     self.assertIn('/headerUnit', line)
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_undeclared_header_unit(self):
-        if self.backend is not Backend.ninja:
-            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
         testdir = os.path.join(self.unit_test_dir, '152 msvc undeclared header unit')
-        env = get_fake_env(testdir, self.builddir, self.prefix)
-        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
-        if cpp.get_id() != 'msvc':
-            raise SkipTest('Test only applies to MSVC header units.')
-        if version_compare(cpp.version, '<19.32'):
-            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
         # A source imports a header unit the target never declared; the collator
         # must fail with a clear error rather than letting the compile fail with
         # a bare C7612.
