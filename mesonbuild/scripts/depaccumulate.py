@@ -259,6 +259,12 @@ def run_p1689(argv: T.List[str]) -> int:
                              'interface unit regardless of extension (the std '
                              'synthesis), so skip the interface-extension check on '
                              'provided modules.')
+    parser.add_argument('--interface-source', action='append', default=[],
+                        dest='interface_sources',
+                        help='Clang: a source declared a module interface via '
+                             'cpp_module_interfaces, so it is compiled as an interface '
+                             'unit despite lacking a module extension. Its provides pass '
+                             'the interface-extension check. Repeatable.')
     parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
                         help='A declared header unit as "<mode>:<spelling>". Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
@@ -269,6 +275,7 @@ def run_p1689(argv: T.List[str]) -> int:
     # requires from a cold scan (with a lookup-method), so this check is
     # effective for MSVC; GCC fails earlier, at the scan itself.
     declared_units = {tuple(hu.split(':', 1)) for hu in args.header_units}
+    interface_sources = {os.path.normpath(p) for p in args.interface_sources}
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -301,15 +308,16 @@ def run_p1689(argv: T.List[str]) -> int:
                 # compiler's "module not found" -- reject it here instead.
                 src = prov.get('source-path')
                 if not args.assume_interfaces and src is not None \
-                        and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'}:
+                        and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'} \
+                        and os.path.normpath(src) not in interface_sources:
                     raise MesonException(
-                        f'{src} provides the C++ module "{name}" but does not have '
-                        'a module-interface extension: Clang only emits a module '
-                        'BMI for a source compiled as an interface unit, which it '
-                        'must be told per source (-x c++-module), and Meson '
-                        'derives that from the .cppm/.ixx extension alone. Rename '
-                        'the interface to .cppm or .ixx (cpp_modules: true only '
-                        'covers consumers).')
+                        f'{src} provides the C++ module "{name}" but is not marked a '
+                        'module interface: Clang only emits a module BMI for a source '
+                        'compiled as an interface unit, which it must be told per '
+                        'source (-x c++-module), and Meson derives that from the '
+                        '.cppm/.ixx extension alone. Rename the interface to .cppm or '
+                        '.ixx, or list it in the target\'s cpp_module_interfaces '
+                        '(cpp_modules: true only covers consumers).')
                 # Consumers order against the provider's harvest stamp; the
                 # cache BMI itself stays out of Ninja's graph (its name is
                 # only known at build time).

@@ -832,6 +832,25 @@ class LinuxlikeTests(BasePlatformTests):
                     self.assertNotIn('.gcm', line)
                     self.assertNotIn('-fmodule-file', line)
 
+    def test_gcc_cpp_module_interfaces(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '162 cpp module interfaces')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'gcc':
+            raise SkipTest('Test only applies to GCC named modules.')
+        if version_compare(cpp.version, '<14'):
+            raise SkipTest('GCC C++ modules require GCC >= 14.')
+        self.init(testdir)
+        self.build()
+        # A .cc source declared a module interface via cpp_module_interfaces
+        # (string and files() forms) provides its module across a link boundary.
+        self.run_tests()
+        gcm = os.path.join(self.builddir, 'gcm.cache')
+        for bmi in ('mymod.gcm', 'filemod.gcm'):
+            self.assertTrue(os.path.isfile(os.path.join(gcm, bmi)), f'missing BMI {bmi}')
+
     # Rebuild tests exercise Meson's dependency graph, so ccache must not
     # answer for the compiler: it does not track the contents of BMIs, so a
     # cached hit can hand back an object compiled against the pre-edit
@@ -933,6 +952,25 @@ class LinuxlikeTests(BasePlatformTests):
                         self.assertIn('-fmodules -fno-modules', line)
                         saw_ccache_pair = True
         self.assertTrue(saw_ccache_pair, 'no module compile carried the ccache-defeating pair')
+
+    def test_clang_cpp_module_interfaces(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '162 cpp module interfaces')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang named modules.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        self.init(testdir)
+        self.build()
+        # A .cc source declared a module interface via cpp_module_interfaces gets
+        # -x c++-module and its BMI is harvested into the shared cache by name.
+        self.run_tests()
+        cache = os.path.join(self.builddir, 'pcm.cache')
+        for bmi in ('mymod.pcm', 'filemod.pcm'):
+            self.assertTrue(os.path.isfile(os.path.join(cache, bmi)), f'missing BMI {bmi}')
 
     def test_clang_cpp_modules_user_fmodules(self):
         # A user who enables implicit Clang modules (-fmodules, via any arg
@@ -1419,6 +1457,25 @@ class LinuxlikeTests(BasePlatformTests):
                 with self.assertRaises(subprocess.CalledProcessError) as cm:
                     self.build()
                 self.assertIn(needle, cm.exception.stdout)
+
+    def test_clang_cpp_modules_diagnostics(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '141 gcc cpp modules diagnostics')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'clang':
+            raise SkipTest('Test only applies to Clang named modules.')
+        if not cpp.supports_cpp_modules_p1689():
+            raise SkipTest('No P1689-capable clang-scan-deps found for this clang.')
+        # A source that provides a module but is neither a module extension nor
+        # declared via cpp_module_interfaces must be rejected by the collator with
+        # a clear message, not fail downstream with "module not found". GCC infers
+        # interface-ness, so this diagnostic is Clang-only.
+        self.init(testdir, extra_args=['-Dmode=undeclared'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('is not marked a module interface', cm.exception.stdout)
 
     def test_gcc_import_std_subproject(self):
         if self.backend is not Backend.ninja:

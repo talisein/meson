@@ -473,6 +473,25 @@ class WindowsTests(BasePlatformTests):
                     self.assertNotIn('.ifc', line)
                     self.assertNotIn('/reference', line)
 
+    def test_msvc_cpp_module_interfaces(self):
+        if self.backend is not Backend.ninja:
+            raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')
+        testdir = os.path.join(self.unit_test_dir, '162 cpp module interfaces')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if cpp.get_id() != 'msvc':
+            raise SkipTest('Test only applies to MSVC named modules.')
+        if version_compare(cpp.version, '<19.32'):
+            raise SkipTest('MSVC C++ modules need /scanDependencies (VS 2022 17.2, cl 19.32+).')
+        self.init(testdir)
+        self.build()
+        # A .cc source declared a module interface via cpp_module_interfaces gets
+        # /interface and its BMI lands in the shared cache under the module name.
+        self.run_tests()
+        ifc = os.path.join(self.builddir, 'ifc.cache')
+        for bmi in ('mymod.ifc', 'filemod.ifc'):
+            self.assertTrue(os.path.isfile(os.path.join(ifc, bmi)), f'missing BMI {bmi}')
+
     def test_msvc_cpp_module_rebuild_on_interface_change(self):
         if self.backend is not Backend.ninja:
             raise SkipTest(f'C++ modules only work with the Ninja backend (not {self.backend.name}).')

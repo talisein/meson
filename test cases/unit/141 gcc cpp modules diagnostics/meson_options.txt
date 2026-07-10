@@ -1,4 +1,4 @@
 option('mode', type: 'combo',
-       choices: ['missing', 'cycle', 'duplicate', 'crosslink', 'duptargets'],
+       choices: ['missing', 'cycle', 'duplicate', 'crosslink', 'duptargets', 'undeclared'],
        value: 'missing',
        description: 'Which module diagnostic to provoke.')

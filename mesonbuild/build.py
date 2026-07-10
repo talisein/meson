@@ -86,6 +86,7 @@ if T.TYPE_CHECKING:
         cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
         cpp_modules: bool
         cpp_header_units: T.List[T.Union[str, File]]
+        cpp_module_interfaces: T.List[T.Union[str, File]]
         d_debug: T.List[T.Union[str, int]]
         d_import_dirs: T.List[IncludeDirs]
         d_module_versions: T.List[T.Union[str, int]]
@@ -927,6 +928,7 @@ class BuildTarget(Target):
         # per source (Clang) key off this in addition to the .cppm/.ixx suffix.
         self.cpp_sources_are_module_interfaces = False
         self.cpp_header_units = kwargs.get('cpp_header_units', [])
+        self.cpp_module_interfaces = kwargs.get('cpp_module_interfaces', [])
         self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')
         self.rust_dependency_map = kwargs.get('rust_dependency_map', {})
 
@@ -1762,12 +1764,12 @@ class BuildTarget(Target):
         return 'fortran' in self.compilers
 
     def _has_cpp_module_source(self) -> bool:
-        # Detection is by extension only (never by reading contents): a source
-        # with a C++ module-interface suffix marks the target as a module
-        # provider. This is a hint for "scan/compile-as-module", not the source
-        # of module *names* (those come from the build-time scan). Generated
-        # module interfaces count too -- their declared output names are
-        # known at configure time even though their module names are not.
+        # Whether the target carries a module-interface source, marking it a
+        # module provider. Decided without reading contents: by the cppm/ixx
+        # extension (also on generated outputs) or an explicit cpp_module_interfaces
+        # declaration. The module *names* come later, from the build-time scan.
+        if self.cpp_module_interfaces:
+            return True
         for s in self.get_sources():
             suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()
             if suffix in {'cppm', 'ixx'}:

@@ -3813,7 +3813,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         """
         # copy common arguments directly
         for arg in ('build_by_default', 'build_rpath', 'build_subdir', 'c_pch',
-                    'cpp_modules', 'cpp_header_units', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
+                    'cpp_modules', 'cpp_header_units', 'cpp_module_interfaces', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
                     'dependencies', 'gnu_symbol_visibility', 'install',
                     'install_mode', 'install_rpath',
                     'implicit_include_directories', 'link_args', 'link_early_args',
@@ -4193,6 +4193,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'with the Ninja backend (current backend: {self.backend.name}).')
 
         self._check_cpp_header_units_supported(name, target)
+        self._check_cpp_module_interfaces(name, target)
 
         self.add_target(name, target)
         self.project_args_frozen = True
@@ -4213,6 +4214,21 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'C++ compiler with header-unit support in the P1689 module '
                 f'pipeline (GCC >= 14, MSVC >= 19.32, or Clang with a '
                 f'P1689-capable clang-scan-deps); got {got}.')
+
+    def _check_cpp_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
+        # Every cpp_module_interfaces entry must name one of the target's own
+        # sources; otherwise the declaration silently does nothing (the worst
+        # outcome for a typo). A string resolves the same way a source string
+        # does -- File(is_built=False, subdir, fname) -- so File equality matches.
+        if not target.cpp_module_interfaces:
+            return
+        sources = set(target.sources)
+        for entry in target.cpp_module_interfaces:
+            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
+            if f not in sources:
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in cpp_module_interfaces, but '
+                    "it is not one of the target's sources.")
 
     def add_stdlib_info(self, target: build.BuildTarget) -> None:
         for l in target.compilers.keys():

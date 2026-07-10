@@ -1461,11 +1461,17 @@ class NinjaBackend(backends.Backend):
     def generate_p1689_module_collate_target(self, target: build.BuildTarget,
                                            compiled_sources: T.List[str],
                                            source2object: T.Dict[str, str]) -> None:
+        """Emit the per-target P1689 collate edge.
+
+        It consumes this target's per-source .ddi scans plus the provided-module
+        maps of its module-providing dependencies, and produces the dyndep that
+        orders the module compiles together with this target's own provided-module
+        map. A single module cache at the build root is shared by every compile,
+        so C++ modules cannot span machines in a cross build, and the cache dir is
+        created up front for cl/clang. Per-compiler collator flags come from
+        _module_collate_depargs.
+        """
         cpp = target.compilers['cpp']
-        # A single module cache (gcm.cache for GCC, ifc.cache for MSVC) sits at
-        # the build root, shared by every compile. In a cross build the
-        # build-machine and host-machine compilers would write incompatible BMIs
-        # to the same paths, so refuse C++ modules spanning more than one machine.
         if self.environment.is_cross_build():
             machines = {t.for_machine for t in self.build.get_targets().values()
                         if self.target_uses_p1689_cpp_modules(t)}
@@ -1476,26 +1482,18 @@ class NinjaBackend(backends.Backend):
                     'root is shared, and BMIs are not interchangeable between the '
                     'build-machine and host-machine compilers.')
         if cpp.get_id() in {'msvc', 'clang'}:
-            # cl does not create the /ifcOutput directory itself, and clang
-            # consumers name pcm.cache via -fprebuilt-module-path before the
-            # first harvest populates it, so make the shared cache once, up
-            # front, before any module compile runs.
+            # cl does not create /ifcOutput itself, and clang consumers name
+            # pcm.cache before the first harvest populates it.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      cpp.get_module_cache_dir()), exist_ok=True)
         if cpp.get_id() == 'clang':
             self.warn_on_clang_modules_ccache(cpp)
-        dyndep_file = self.get_dep_scan_file_for(target)[1]
-        provmap_file = self.get_provided_modules_file_for(target)
 
-        # This target's own per-source P1689 scans (emitted with each compile).
         ddis: T.List[str] = []
         for src, lang in self.select_sources_to_scan(compiled_sources):
-            if lang != 'cpp':
-                continue
-            ddis.append(self.get_ddi_file_for(source2object[src]))
+            if lang == 'cpp':
+                ddis.append(self.get_ddi_file_for(source2object[src]))
 
-        # Dependency targets' provided-module maps: linking a module
-        # provider is sufficient to resolve and order its modules here.
         dep_provmaps: T.List[str] = []
         for t in target.get_all_linked_targets():
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
@@ -1504,42 +1502,49 @@ class NinjaBackend(backends.Backend):
                 self.warn_on_module_flag_divergence(target, t)
         dep_provmaps.sort()
 
+        dyndep_file = self.get_dep_scan_file_for(target)[1]
+        provmap_file = self.get_provided_modules_file_for(target)
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
                                  'cpp_module_collate', sorted(ddis))
         if dep_provmaps:
-            # Implicit inputs: the maps must exist before we collate.
             elem.add_dep(dep_provmaps)
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
-        # The collator names BMIs from logical-names using the compiler's cache
-        # dir + suffix, kept in lockstep with module_name_to_filename.
+        # BMIs are named from logical-names, in lockstep with module_name_to_filename.
         elem.add_item('BMIDIR', cpp.get_module_cache_dir())
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
+        elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps))
+        elem.add_item('name', target.name)
+        self.add_build(elem)
+
+    def _module_collate_depargs(self, target: build.BuildTarget, cpp: Compiler,
+                                dep_provmaps: T.List[str]) -> T.List[str]:
+        """Per-compiler flags for the P1689 collator (depaccumulate --p1689).
+
+        Clang BMIs reach the shared cache via harvest edges, so the dyndep orders
+        consumers against the harvest stamps (--stamp-suffix, in lockstep with
+        get_clang_pcm_stamp_for), and the collator rejects a provide from a source
+        Clang did not compile as an interface unit -- extension-less interfaces
+        (the std synthesis, or cpp_module_interfaces) are passed as source paths so
+        the collator accepts them. For cl the declared header units are passed so
+        the collator can flag an import of one this target never declared (cl
+        reports header-unit requires from a cold scan; GCC cannot, so it is
+        omitted there).
+        """
         depargs: T.List[str] = []
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
-            # Clang BMIs reach the cache via harvest edges; the dyndep orders
-            # consumers against the harvest stamps (derived from each
-            # provider's object path), not the cache paths. Must stay in
-            # lockstep with get_clang_pcm_stamp_for.
             depargs += ['--stamp-suffix', '.pcm.stamp']
             if target.cpp_sources_are_module_interfaces:
-                # The std synthesis compiles every source as an interface unit
-                # regardless of extension (libstdc++'s bits/std.cc), so the
-                # collator must not reject its provides for lacking one.
                 depargs += ['--assume-interfaces']
+            for p in sorted(self._module_interface_paths(target)):
+                depargs += ['--interface-source', p]
         if cpp.get_id() == 'msvc':
-            # Declared header units, so the collator can flag a source importing
-            # one this target never declared. cl reports header-unit requires
-            # from a cold scan (with a lookup-method); GCC cannot, so it is
-            # omitted there.
             for hu in target.cpp_header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
-        elem.add_item('DEPARGS', depargs)
-        elem.add_item('name', target.name)
-        self.add_build(elem)
+        return depargs
 
     def warn_on_clang_modules_ccache(self, cpp: Compiler) -> None:
         # Module compiles carry -fmodules -fno-modules so ccache falls back to
@@ -3287,6 +3292,26 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return 'system', hu[1:-1]
         return 'user', hu
 
+    def _module_interface_paths(self, target: build.BuildTarget) -> T.Set[str]:
+        # Normalized build-root-relative paths of the sources this target
+        # declares as module interfaces (cpp_module_interfaces). This is the
+        # form rel_src and the P1689 scan's source-path take, so the per-source
+        # interface flags, the Clang harvest edge and the collator all decide
+        # interface-ness from one comparable key and cannot drift.
+        paths: T.Set[str] = set()
+        for entry in target.cpp_module_interfaces:
+            f = entry if isinstance(entry, File) else \
+                File.from_source_file(self.source_dir, target.get_subdir(), entry)
+            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
+        return paths
+
+    def _is_declared_module_interface(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
+        # Whether src is one of target's declared cpp_module_interfaces sources.
+        if not target.cpp_module_interfaces:
+            return False
+        key = src.rel_to_builddir(self.build_to_src) if isinstance(src, File) else src
+        return os.path.normpath(key) in self._module_interface_paths(target)
+
     def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
         """Emit build edges for this target's declared header units and return
         their outputs.
@@ -3831,7 +3856,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # provide from a source outside this set is an error there, not a
             # downstream "module not found".
             suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            if suffix in {'cppm', 'ixx'}:
+            if suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src):
                 if compiler.get_id() == 'msvc':
                     commands += ['/interface', '/TP']
                 elif compiler.get_id() == 'clang':
@@ -4009,7 +4034,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
                 and compiler.get_id() == 'clang':
             miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces
+            clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces \
+                or self._is_declared_module_interface(target, src)
         if clang_miu:
             element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
         # Declared header units are implicit inputs: their BMIs must exist
