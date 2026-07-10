@@ -57,6 +57,13 @@ if T.TYPE_CHECKING:
 
 CPP_IMPORT_RE = re.compile(r'\w*import ([a-zA-Z0-9]+);')
 CPP_EXPORT_RE = re.compile(r'\w*export module ([a-zA-Z0-9]+);')
+# Constructs this scanner cannot model. It handles flat named modules only;
+# silently under-scanning these would surface later as raw compiler errors,
+# so reject them with a clear message instead. `module :private;` carries no
+# cross-TU dependency and stays permitted (no name before the colon).
+CPP_PARTITION_DECL_RE = re.compile(r'\s*(?:export\s+)?module\s+[\w.]+\s*:\s*\w')
+CPP_PARTITION_IMPORT_RE = re.compile(r'\s*(?:export\s+)?import\s*:\s*\w')
+CPP_IMPORT_STD_RE = re.compile(r'\s*(?:export\s+)?import\s+std(?:\.compat)?\s*;')
 
 FORTRAN_INCLUDE_PAT = r"^\s*include\s*['\"](\w+\.\w+)['\"]"
 FORTRAN_MODULE_PAT = r"^\s*\bmodule\b\s+(\w+)\s*(?:!+.*)*$"
@@ -132,6 +139,16 @@ class DependencyScanner:
     def scan_cpp_file(self, fname: str) -> None:
         fpath = pathlib.Path(fname)
         for line in fpath.read_text(encoding='utf-8-sig', errors='ignore').split('\n'):
+            if CPP_PARTITION_DECL_RE.match(line) or CPP_PARTITION_IMPORT_RE.match(line):
+                raise RuntimeError(
+                    f'{fname}: C++ module partitions are not supported by the fallback '
+                    'module scanner; use a compiler with P1689 scanning '
+                    '(GCC >= 14, cl >= 19.32, Clang with a P1689-capable clang-scan-deps).')
+            if CPP_IMPORT_STD_RE.match(line):
+                raise RuntimeError(
+                    f'{fname}: import std is not supported by the fallback module '
+                    "scanner; it needs dependency('std') on a compiler with P1689 "
+                    'scanning and a standard library shipping a module manifest.')
             import_match = CPP_IMPORT_RE.match(line)
             export_match = CPP_EXPORT_RE.match(line)
             if import_match:
