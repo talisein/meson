@@ -38,12 +38,18 @@ Token vocabulary (the API for the C++ module test series):
     The compiler can emit a BMI with no object file (GCC ``-fmodule-only``,
     Clang ``--precompile``, cl ``/ifcOnly``). Probed by compiling a trivial
     interface unit and checking a BMI appears and no object does. The
-    prerequisite for BMI-only variant targets; nothing consumes it yet.
+    prerequisite for BMI-only variants.
+``bmi_classes``
+    Divergent BMI equivalence classes work rather than warn: Meson gives
+    each class its own cache subdirectory and synthesizes BMI-only variants
+    of shared module providers (``Compiler.supports_bmi_classes()``, plus
+    the ``bmionly`` probe). Currently Clang only.
 """
 
 from __future__ import annotations
 import functools
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -65,7 +71,7 @@ if T.TYPE_CHECKING:
 
 CPP_MODULE_CAPS = frozenset({
     'modules', 'partitions', 'header_units', 'module_interfaces',
-    'import_std', 'regex_scanner', 'bmionly',
+    'import_std', 'regex_scanner', 'bmionly', 'bmi_classes',
 })
 
 _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
@@ -192,6 +198,8 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
         caps.add('regex_scanner')
     if 'modules' in caps and bmionly_works(cpp):
         caps.add('bmionly')
+        if cpp.supports_bmi_classes():
+            caps.add('bmi_classes')
     result = frozenset(caps)
     _caps_cache[key] = result
     return result
@@ -403,6 +411,21 @@ class CppModulesTestMixin:
         write('meson.build', build_template.format(srcs="'mod.cc'"))
         build_and_verify()
 
+    def link_edge(self, target: str) -> str:
+        """The given output's build.ninja edge block (its 'build <target>:'
+        line plus indented continuations), or '' when absent."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith(f'build {target}:'):
+                block = [line]
+                for nxt in lines[i + 1:]:
+                    if not nxt.startswith((' ', '\t')):
+                        break
+                    block.append(nxt)
+                return '\n'.join(block)
+        return ''
+
     def assert_std_link_edges(self, linked: T.Sequence[str], not_linked: T.Sequence[str]) -> None:
         """dependency('std') synthesizes one static library carrying the std
         module objects; it must be on the link line of every target that
@@ -410,20 +433,109 @@ class CppModulesTestMixin:
         stdlib = 'lib__meson_cxx_std.a'
         self.assertTrue(os.path.isfile(os.path.join(self.builddir, stdlib)),
                         'std module static library not built')
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            lines = f.read().splitlines()
-
-        def link_edge(t: str) -> str:
-            for i, line in enumerate(lines):
-                if line.startswith(f'build {t}:'):
-                    block = [line]
-                    for nxt in lines[i + 1:]:
-                        if not nxt.startswith((' ', '\t')):
-                            break
-                        block.append(nxt)
-                    return '\n'.join(block)
-            return ''
         for target in linked:
-            self.assertIn(stdlib, link_edge(target), f'{target} does not link the std library')
+            self.assertIn(stdlib, self.link_edge(target), f'{target} does not link the std library')
         for target in not_linked:
-            self.assertNotIn(stdlib, link_edge(target))
+            self.assertNotIn(stdlib, self.link_edge(target))
+
+    def count_on_link_line(self, target: str, needle: str) -> int:
+        """Occurrences of needle on the given output's LINK_ARGS line (the
+        edge block also names archives as ninja inputs, which is not the
+        link command)."""
+        return sum(line.count(needle) for line in self.link_edge(target).splitlines()
+                   if line.strip().startswith('LINK_ARGS ='))
+
+    def bmi_variant_ids(self) -> T.Set[str]:
+        """The distinct BMI-only variant private dirs named in build.ninja
+        (one per provider x divergent class)."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            contents = f.read()
+        return set(re.findall(r'meson-private/[^/\s]*@bmi@[0-9a-f]{12}', contents))
+
+    def header_unit_digests(self, basename: str, *, edges: str = '') -> T.Set[str]:
+        """The distinct digests of 'meson-private/header-units/<basename>.<digest>.*'
+        paths in build.ninja, one per (mode, spelling) and, on per-class
+        compilers, per BMI class. `edges` restricts the search to edge blocks
+        whose 'build' line contains it (e.g. 'prog.p/' for one target's
+        compiles and scans, '@bmi@' for BMI-variant edges)."""
+        pattern = re.compile(r'header-units/' + re.escape(basename) + r'\.([0-9a-f]{16})\.')
+        digests: T.Set[str] = set()
+        wanted = False
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build '):
+                    wanted = edges in line
+                if wanted:
+                    digests.update(pattern.findall(line))
+        return digests
+
+    def bmi_class_dirs(self) -> T.List[str]:
+        """The BMI class subdirectories of the shared module cache, sorted."""
+        cpp = self.host_cpp_compiler()
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        return sorted(e for e in os.listdir(cache)
+                      if os.path.isdir(os.path.join(cache, e)))
+
+    def check_bmi_classes(self, testdir_name: str, *, module_name: str,
+                          provider_lib: str, consumers: T.Sequence[str],
+                          expected_targets: T.Sequence[str]) -> None:
+        """The canonical two-class fixture: one module provider, one consumer
+        in the provider's own BMI class, one divergent consumer. Divergence
+        must build and run without the Stage-1 warning, with exactly one
+        object-producing provider (the divergent consumer resolves against a
+        BMI-only variant), one BMI per class dir, no flat BMI, and exactly
+        one variant build-wide -- the compatible consumer must reuse the
+        provider's BMI, not spawn a redundant variant."""
+        cpp = self.host_cpp_compiler()
+        self.build_and_check_modules(testdir_name,
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        bmi = module_name.replace(':', '-') + cpp.get_module_bmi_suffix()
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        class_dirs = self.bmi_class_dirs()
+        self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
+        for d in class_dirs:
+            self.assertTrue(os.path.isfile(os.path.join(cache, d, bmi)),
+                            f'missing {bmi} in class dir {d}')
+        self.assertFalse(os.path.exists(os.path.join(cache, bmi)),
+                         'flat BMI must not exist in a multi-class build')
+        targets = sorted(t['name'] for t in self.introspect('--targets'))
+        self.assertEqual(targets, sorted(expected_targets),
+                         'variants must not appear as targets')
+        variants = self.bmi_variant_ids()
+        self.assertEqual(len(variants), 1,
+                         f'expected exactly one BMI variant, got {sorted(variants)}')
+        for t in consumers:
+            self.assertEqual(self.count_on_link_line(t, provider_lib), 1,
+                             f'{t} must link the real provider exactly once')
+            self.assertNotIn('@bmi@', self.link_edge(t), f'{t} must not link variant artifacts')
+
+    def check_import_std_bmi_classes(self, testdir_name: str, *, progs: T.Sequence[str],
+                                     compat_progs: T.Sequence[str] = ()) -> None:
+        """Two dialects sharing dependency('std') in one build: one
+        __meson_cxx_std target provides the objects for both, each class dir
+        carries its own std BMI set (std.compat only where imported), and
+        exactly one variant exists -- all through the generic variant rule,
+        with no std-specific machinery."""
+        cpp = self.host_cpp_compiler()
+        suffix = cpp.get_module_bmi_suffix()
+        self.build_and_check_modules(testdir_name,
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assert_std_link_edges(progs, ())
+        for t in progs:
+            self.assertEqual(self.count_on_link_line(t, 'lib__meson_cxx_std.a'), 1,
+                             f'{t} must link the std library exactly once')
+        std_targets = [t for t in self.introspect('--targets') if t['name'] == '__meson_cxx_std']
+        self.assertEqual(len(std_targets), 1, 'exactly one std module target must exist')
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        class_dirs = self.bmi_class_dirs()
+        self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
+        for d in class_dirs:
+            self.assertTrue(os.path.isfile(os.path.join(cache, d, 'std' + suffix)),
+                            f'missing std{suffix} in class dir {d}')
+        if compat_progs:
+            compat = [d for d in class_dirs
+                      if os.path.isfile(os.path.join(cache, d, 'std.compat' + suffix))]
+            self.assertEqual(len(compat), 1,
+                             'std.compat must be published only in the class that imports it')
+        self.assertEqual(len(self.bmi_variant_ids()), 1,
+                         'expected exactly one BMI variant of the std target')
