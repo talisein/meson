@@ -772,22 +772,32 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     def get_module_bmi_suffix(self) -> str:
         return '.gcm'
 
+    def _named_modules_flag(self) -> str:
+        # GCC 15 renamed -fmodules-ts to -fmodules and deprecated the old
+        # spelling; GCC 14, the first P1689 release, accepts only
+        # -fmodules-ts.
+        return '-fmodules' if version_compare(self.version, '>=15') else '-fmodules-ts'
+
     def get_module_compile_args(self) -> T.List[str]:
-        # -fmodules enables named modules. -Mno-modules stops GCC from writing
-        # its make-style module dependency rules (phony '<name>.c++-module'
-        # targets and an order-only 'gcm.cache/<name>.gcm:| <obj>' line) into
-        # the -MD depfile: Ninja's gcc-deps parser cannot handle that shape, and
-        # module ordering is carried by the dyndep instead. BMI generation is
-        # unaffected.
-        return ['-fmodules', '-Mno-modules']
+        # The modules flag enables named modules. -Mno-modules stops GCC from
+        # writing its make-style module dependency rules (phony
+        # '<name>.c++-module' targets and an order-only
+        # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
+        # gcc-deps parser cannot handle that shape, and module ordering is
+        # carried by the dyndep instead. BMI generation is unaffected.
+        return [self._named_modules_flag(), '-Mno-modules']
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
-        # A P1689 scan runs before any BMI exists, so it must not compile: no
-        # -c/-o here, only the scan + header-dep flags. -fmodules matches the
-        # compile so the scan sees the same dialect; -Mno-modules
-        # keeps the -M header depfile plain (module info goes to the .ddi).
-        return ['-fmodules', '-Mno-modules', '-fdeps-format=p1689r5', f'-fdeps-file={outfile}',
-                f'-fdeps-target={target}', '-M', '-MF', depfile]
+        # A P1689 scan runs before any BMI exists, so it must not compile:
+        # preprocess only (-E, output discarded to a .pp beside the .ddi).
+        # It must be -E -MD, not a plain -M make-rule pass: GCC 14 only
+        # populates the -fdeps-* P1689 provides when really preprocessing
+        # ("module dependencies require preprocessing"). The modules flag
+        # matches the compile so the scan sees the same dialect; -Mno-modules
+        # keeps the header depfile plain (module info goes to the .ddi).
+        return [self._named_modules_flag(), '-Mno-modules', '-fdeps-format=p1689r5',
+                f'-fdeps-file={outfile}', f'-fdeps-target={target}',
+                '-E', '-MD', '-MQ', target, '-MF', depfile, '-o', f'{outfile}.pp']
 
     @lazy_property
     def _std_module_sources(self) -> T.Dict[str, str]:
