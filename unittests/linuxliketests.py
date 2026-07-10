@@ -809,7 +809,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # links it, plus partitions and an explicit-opt-in target; each test()
         # exercises a producer/consumer pair across the link.
         self.build_and_check_modules('139 gcc cpp modules',
-                                     setup_not_contains=['divergent cpp_std'],
+                                     setup_not_contains=['divergent BMI-affecting flags'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'])
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
@@ -880,7 +880,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # oddname.pcm's module name differs from its file name, proving the
         # harvest names BMIs from the scan, not the source.
         self.build_and_check_modules('156 clang cpp modules',
-                                     setup_not_contains=['divergent cpp_std'],
+                                     setup_not_contains=['divergent BMI-affecting flags'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
                                            'genmod', 'oddname'])
         # Module ARGS must carry the ccache-defeating -fmodules -fno-modules
@@ -968,11 +968,11 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_gcc_module_cpp_std_divergence(self):
         testdir = os.path.join(self.unit_test_dir, '145 gcc module cpp_std divergence')
         # A module provider (c++20) consumed by a target overridden to c++23 must
-        # warn: BMIs are shared in one cache and are not std-versioned.
+        # warn, naming both targets and the differing -std flags.
         out = self.init(testdir)
-        self.assertIn('divergent cpp_std', out)
-        self.assertIn("'prog'", out)
-        self.assertIn("'modlib'", out)
+        self.assertIn('divergent BMI-affecting flags', out)
+        self.assertIn("'-std=c++23' only in 'prog'", out)
+        self.assertIn("'-std=c++20' only in 'modlib'", out)
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_module_subproject_cpp_std_divergence(self):
@@ -980,9 +980,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The divergence crosses a subproject boundary: parent c++23 consumes a
         # subproject module library built at c++20.
         out = self.init(testdir)
-        self.assertIn('divergent cpp_std', out)
-        self.assertIn("'prog'", out)
-        self.assertIn("'submodlib'", out)
+        self.assertIn('divergent BMI-affecting flags', out)
+        self.assertIn("'-std=c++23' only in 'prog'", out)
+        self.assertIn("'-std=c++20' only in 'submodlib'", out)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence(self):
@@ -990,12 +990,33 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # dependency('threads') adds -pthread to 'prog' only, so the BMI and
         # its importer disagree on the POSIX-thread setting. Clang rejects
         # that BMI outright and GCC accepts it silently, but it is out of
-        # contract on both, so setup must warn on both, naming both targets
-        # and the fix.
+        # contract on both, so setup must warn on both, naming both targets,
+        # the flag, and the fix.
         out = self.init(testdir)
-        self.assertIn('builds with -pthread but', out)
-        self.assertIn("'prog'", out)
+        self.assertIn('divergent BMI-affecting flags', out)
+        self.assertIn("'-pthread' only in 'prog'", out)
         self.assertIn("'modlib'", out)
+        self.assertIn("add dependency('threads') to 'modlib'", out)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_bmi_divergence_ignores_bmi_irrelevant_flags(self):
+        # Provider and consumer differ only in optimization, which is on the
+        # BMI-irrelevant allowlist: no divergence warning, and the mixed build
+        # runs fine.
+        self.build_and_check_modules('165 module bmi flag divergence',
+                                     extra_args=['-Dwithfoo=false'],
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_define_divergence_warns(self):
+        # A -D divergence must split the BMI class and be named in the warning;
+        # the simultaneous optimization divergence is allowlisted and must not.
+        testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
+        out = self.init(testdir)
+        self.assertIn('divergent BMI-affecting flags', out)
+        self.assertIn("'-DFOO' only in 'modlib'", out)
+        self.assertIn("'prog'", out)
+        self.assertNotIn("'-O", out)
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_generated_header(self):
@@ -1046,7 +1067,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The opt-out spelling: no thread flags on the std module or its
         # consumers, and no divergence warning since both sides agree.
         self.build_and_check_modules('160 import std nothreads',
-                                     setup_not_contains=['builds with -pthread but'],
+                                     setup_not_contains=['divergent BMI-affecting flags'],
                                      ninja_args_not_contains=())
         for entry in self.get_compdb():
             self.assertNotIn('-pthread', entry['command'])

@@ -481,6 +481,16 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return [f'-fprebuilt-module-path={self.get_module_cache_dir()}',
                 '-fmodules', '-fno-modules']
 
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+        # After xmake's speculative Clang strip list. Defines are deliberately
+        # absent: a -D difference must split the BMI class. fPIC/fPIE are
+        # listed because Meson injects them asymmetrically (library vs
+        # executable). A user-passed -fmodules is intentionally NOT stripped:
+        # implicit Clang header modules genuinely change the compile.
+        return (frozenset({'g', 'O', 'W', 'w', 'Q', 'fmodule-file', 'fPIC',
+                           'fpic', 'fPIE', 'fpie', 'fsanitize', 'embed-dir'}),
+                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
+
     def get_header_unit_consumer_args(self, mode: str, spelling: str, bmi_path: str) -> T.List[str]:
         # Clang has no directory lookup for header units (-fprebuilt-module-path
         # does not apply to them): a consumer must name each unit's BMI with a
@@ -786,6 +796,16 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected.
         return [self._named_modules_flag(), '-Mno-modules']
+
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+        # After xmake's speculative GCC strip list. Defines are deliberately
+        # absent: a -D difference must split the BMI class. fPIC/fPIE are
+        # listed because Meson injects them asymmetrically (library vs
+        # executable); -Mno-modules shapes only the depfile, never the BMI.
+        return (frozenset({'O', 'W', 'w', 'Q', 'fmodule-mapper', 'fmodules-ts',
+                           'fmodules', 'fPIC', 'fpic', 'fPIE', 'fpie',
+                           'fsanitize', 'embed-dir', 'Mno-modules'}),
+                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         # A P1689 scan runs before any BMI exists, so it must not compile:
@@ -1233,6 +1253,24 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # backslash-escaping in the generated ninja file (cl accepts either).
         cache = self.get_module_cache_dir()
         return ['/ifcSearchDir', cache, '/ifcOutput', f'{cache}/']
+
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+        # After xmake's speculative MSVC strip list. Defines are deliberately
+        # absent (a -D difference must split the BMI class) and so is /O
+        # (conservative: optimization divergence splits here). 'isystem' is
+        # listed because Meson emits system includes as unix-form two-token
+        # ['-isystem', dir] until native conversion at write time. Inherited
+        # coarse spot: the 'E' prefix also strips /EHsc, so an exception-model
+        # divergence goes unnoticed -- acceptable for a warning-only key.
+        return (frozenset({'TP', 'errorReport', 'W', 'w', 'sourceDependencies',
+                           'scanDependencies', 'PD', 'nologo', 'MP',
+                           'internalPartition', 'interface', 'ifcOutput',
+                           'help', 'headerName', 'Fp', 'Fm', 'Fe', 'Fd', 'FC',
+                           'exportHeader', 'EP', 'E', 'doc', 'diagnostics',
+                           'cgthreads', 'C', 'analyze', '?', 'external',
+                           'fsanitize'}),
+                frozenset({'Fo', 'I', 'reference', 'headerUnit', 'isystem',
+                           'ifcSearchDir'}))
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         # P1689 scan. No /c: cl only scans and writes no object. /Fo sets

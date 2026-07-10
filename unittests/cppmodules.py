@@ -34,6 +34,11 @@ Token vocabulary (the API for the C++ module test series):
     (``get_cpp_modules_args()``). Probed by actually compiling, not by
     version: in practice GCC qualifies, Clang does not (an interface unit
     needs ``-x c++-module`` there, which the regex path never passes).
+``bmionly``
+    The compiler can emit a BMI with no object file (GCC ``-fmodule-only``,
+    Clang ``--precompile``, cl ``/ifcOnly``). Probed by compiling a trivial
+    interface unit and checking a BMI appears and no object does. The
+    prerequisite for BMI-only variant targets; nothing consumes it yet.
 """
 
 from __future__ import annotations
@@ -60,11 +65,12 @@ if T.TYPE_CHECKING:
 
 CPP_MODULE_CAPS = frozenset({
     'modules', 'partitions', 'header_units', 'module_interfaces',
-    'import_std', 'regex_scanner',
+    'import_std', 'regex_scanner', 'bmionly',
 })
 
 _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
 _regex_flag_cache: T.Dict[T.Tuple[str, str], T.Optional[str]] = {}
+_bmionly_cache: T.Dict[T.Tuple[str, str], bool] = {}
 
 
 @functools.lru_cache(maxsize=None)
@@ -116,10 +122,56 @@ def regex_scanner_flag(cpp: CPPCompiler) -> T.Optional[str]:
     return flag
 
 
+def _bmionly_probe_builds(cpp: CPPCompiler) -> bool:
+    """Compile a trivial interface unit in the compiler's BMI-only mode and
+    check that a BMI appears and no object does (a failing rc, a missing BMI
+    or a stray object all mean the mode is unusable)."""
+    if cpp.get_id() == 'msvc':
+        src = 'mod.ixx'
+        attempts = [['/nologo', '/std:c++20', '/c', '/interface', '/ifcOnly', src]]
+    elif cpp.get_id() == 'clang':
+        src = 'mod.cppm'
+        attempts = [['-std=c++20', '--precompile', src, '-o', 'mod.pcm']]
+    else:
+        src = 'mod.cpp'
+        attempts = [[flag, '-std=c++20', '-fmodule-only', '-c', src]
+                    for flag in cpp.get_cpp_modules_args()]
+    exelist = cpp.get_exelist(ccache=False)
+    for args in attempts:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, src), 'w', encoding='utf-8') as f:
+                f.write('export module bmiprobe;\nexport int probefunc() { return 42; }\n')
+            try:
+                p = subprocess.run(exelist + args, cwd=tmpdir,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if p.returncode != 0:
+                continue
+            produced = [name for root, _, files in os.walk(tmpdir) for name in files]
+            if any(name.endswith(('.gcm', '.pcm', '.ifc')) for name in produced) \
+                    and not any(name.endswith(('.o', '.obj')) for name in produced):
+                return True
+    return False
+
+
+def bmionly_works(cpp: CPPCompiler) -> bool:
+    """Whether this compiler can emit a BMI without an object file."""
+    key = (cpp.get_id(), cpp.version)
+    try:
+        return _bmionly_cache[key]
+    except KeyError:
+        pass
+    result = _bmionly_probe_builds(cpp)
+    _bmionly_cache[key] = result
+    return result
+
+
 def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
     """The capability tokens of the given compiler; see the module docstring
-    for the vocabulary. Memoized per (id, version); import_std and
-    regex_scanner probe by invoking the compiler."""
+    for the vocabulary. Memoized per (id, version); import_std, regex_scanner
+    and bmionly probe by invoking the compiler."""
     key = (cpp.get_id(), cpp.version)
     try:
         return _caps_cache[key]
@@ -138,6 +190,8 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
                 caps.add('import_std')
     if regex_scanner_flag(cpp) is not None:
         caps.add('regex_scanner')
+    if 'modules' in caps and bmionly_works(cpp):
+        caps.add('bmionly')
     result = frozenset(caps)
     _caps_cache[key] = result
     return result

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict, OrderedDict
+from collections import Counter, defaultdict, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, unique
 from functools import lru_cache
@@ -586,8 +586,8 @@ class NinjaBackend(backends.Backend):
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
         # Consumer/provider target-id pairs already warned about for divergent
-        # cpp_std, so each divergence is reported once.
-        self._warned_module_divergence: T.Set[T.Tuple[str, str, str]] = set()
+        # BMI-affecting flags, so each divergence is reported once.
+        self._warned_module_divergence: T.Set[T.Tuple[str, str]] = set()
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
@@ -1567,49 +1567,43 @@ class NinjaBackend(backends.Backend):
 
     def warn_on_module_flag_divergence(self, consumer: build.BuildTarget,
                                        provider: build.BuildTarget) -> None:
-        def warn_once(kind: str, message: str) -> None:
-            key = (consumer.get_id(), provider.get_id(), kind)
-            if key in self._warned_module_divergence:
-                return
-            self._warned_module_divergence.add(key)
-            mlog.warning(message)
+        """Warn when targets that share C++ modules compile in different BMI
+        equivalence classes (Compiler.get_bmi_class_key), once per (consumer,
+        provider) pair, naming the differing flags. A BMI bakes in the flags of
+        its own compile: Clang refuses a mismatched import with a
+        configuration-mismatch hard error, GCC accepts it silently and can
+        miscompile. -pthread gets tailored advice because dependency('threads')
+        injects it per target; the synthesized std target's POSIX-thread
+        setting is chosen by the dependency spelling (kept in lockstep with
+        _cpp_std_module_dependency).
+        """
+        def key_of(t: build.BuildTarget) -> T.Tuple[str, ...]:
+            cpp = t.compilers['cpp']
+            return cpp.get_bmi_class_key(self._generate_single_compile(t, cpp))
 
-        def cpp_std(t: build.BuildTarget) -> str:
-            return T.cast('str', self.get_target_option(t, OptionKey('cpp_std', machine=t.for_machine,
-                                                                     subproject=t.subproject)))
-        consumer_std, provider_std = cpp_std(consumer), cpp_std(provider)
-        if consumer_std != provider_std:
-            warn_once('cpp_std',
-                f'Target {consumer.name!r} (cpp_std={consumer_std}) imports C++ modules '
-                f'from {provider.name!r} (cpp_std={provider_std}); targets produced using '
-                'modules built with a divergent cpp_std version may fail at build or runtime.')
+        pair = (consumer.get_id(), provider.get_id())
+        if pair in self._warned_module_divergence:
+            return
+        consumer_key, provider_key = key_of(consumer), key_of(provider)
+        if consumer_key == provider_key:
+            return
+        self._warned_module_divergence.add(pair)
 
-        # A BMI bakes in the flags of its own compile, and -pthread routinely
-        # diverges per target: dependency('threads') injects it only into its
-        # own consumers. That breaks the uniform-flags contract on every
-        # compiler -- the BMI's view of the standard headers was expanded
-        # without _REENTRANT -- even though only Clang enforces it (a
-        # config-mismatch hard error, in both directions; GCC accepts the mix
-        # silently). Warn at generate time and name the uniform-flags fix.
-        def has_pthread(t: build.BuildTarget) -> bool:
-            return '-pthread' in self._generate_single_compile(t, t.compilers['cpp'])
-        consumer_pt, provider_pt = has_pthread(consumer), has_pthread(provider)
-        if consumer_pt != provider_pt:
-            w, wo = (consumer, provider) if consumer_pt else (provider, consumer)
+        cdiff = sorted((Counter(consumer_key) - Counter(provider_key)).keys())
+        pdiff = sorted((Counter(provider_key) - Counter(consumer_key)).keys())
+        parts = [', '.join(repr(f) for f in diff) + f' only in {t.name!r}'
+                 for diff, t in ((cdiff, consumer), (pdiff, provider)) if diff]
+        message = (
+            f'Targets {consumer.name!r} and {provider.name!r} share C++ modules '
+            'but compile with divergent BMI-affecting flags: ' + '; '.join(parts) + '.')
+        if '-pthread' in cdiff or '-pthread' in pdiff:
+            wo = provider if '-pthread' in cdiff else consumer
             if wo.name == '__meson_cxx_std':
-                # The synthesized std target is not user-visible; its
-                # POSIX-thread setting is chosen by the dependency spelling
-                # (kept in lockstep with _cpp_std_module_dependency).
                 fix = "use the threaded dependency('std') instead of dependency('std-nothreads')"
             else:
                 fix = f"add dependency('threads') to {wo.name!r}"
-            warn_once('pthread',
-                f'Target {w.name!r} builds with -pthread but {wo.name!r} does not, '
-                'and they share C++ modules; a module BMI bakes in the POSIX-thread '
-                'setting of its own compile, so the divergence breaks the shared-module '
-                'flag contract (Clang rejects such a BMI with a configuration-mismatch '
-                f'error). To fix, {fix}, or apply -pthread build-wide via '
-                "-Dcpp_args=-pthread or add_global_arguments('-pthread', language: 'cpp').")
+            message += f' For -pthread, {fix}.'
+        mlog.warning(message)
 
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:

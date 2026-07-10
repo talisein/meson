@@ -181,6 +181,54 @@ class InternalTests(unittest.TestCase):
         self.assertIn('sentinel.cache', args)
         self.assertIn('sentinel.cache/', args)
 
+    def test_bmi_class_key(self):
+        # The BMI equivalence-class key must be conservative: only allowlisted
+        # (BMI-irrelevant) flag differences may hash equal; a difference in any
+        # other flag -- including one the allowlist has never heard of -- must
+        # split the class. Getting this wrong in the strict direction shares an
+        # incompatible BMI; in the loose direction it only duplicates one.
+        from mesonbuild.compilers.cpp import (
+            GnuCPPCompiler, VisualStudioCPPCompiler, ClangCPPCompiler)
+
+        gcc = GnuCPPCompiler.__new__(GnuCPPCompiler)
+        clang = ClangCPPCompiler.__new__(ClangCPPCompiler)
+        msvc = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
+
+        base = ['-std=c++20', '-DBAR', '-pthread']
+        # Allowlisted differences do not split.
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-O2', '-Ia', '-Wall', '-fPIC']),
+                         gcc.get_bmi_class_key(base + ['-O0', '-Ib', '-Werror']))
+        # Two-token and joined include spellings are both stripped.
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-isystem', '/x']),
+                         gcc.get_bmi_class_key(base + ['-isystem/y']))
+        # Non-allowlisted differences split, unknown flags included.
+        for divergent in (['-DFOO'], ['-std=c++23'], ['-ftrivial-auto-var-init=zero']):
+            self.assertNotEqual(gcc.get_bmi_class_key(base),
+                                gcc.get_bmi_class_key(base + divergent), divergent)
+        self.assertNotEqual(gcc.get_bmi_class_key(['-std=c++20']),
+                            gcc.get_bmi_class_key(['-std=c++20', '-pthread']))
+
+        # Clang additionally strips -g and its module-machinery flags.
+        self.assertEqual(clang.get_bmi_class_key(base + ['-g', '-fmodule-file=m=x.pcm']),
+                         clang.get_bmi_class_key(base))
+        self.assertNotEqual(clang.get_bmi_class_key(base),
+                            clang.get_bmi_class_key(base + ['-DFOO']))
+
+        # MSVC: warnings and BMI plumbing are stripped (both slash and dash
+        # spellings), defines and /std: divergences split.
+        mbase = ['/std:c++20', '/DBAR']
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/W4', '-Ipath', '-isystem', '/x']),
+                         msvc.get_bmi_class_key(mbase + ['/w']))
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/reference', 'm=x.ifc']),
+                         msvc.get_bmi_class_key(mbase))
+        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
+                            msvc.get_bmi_class_key(mbase + ['/DFOO']))
+        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
+                            msvc.get_bmi_class_key(['/std:c++23', '/DBAR']))
+        # The '/' lead is MSVC-only: a stray absolute path must survive on a
+        # GNU-syntax command line even though 'W' would prefix-match it.
+        self.assertIn('/Work/lib.a', gcc.get_bmi_class_key(base + ['/Work/lib.a']))
+
     def test_cpp_std_supports_modules(self):
         # C++ modules need C++20+. The helper must accept c++20 and later in all
         # spellings (c++/gnu++/vc++, draft aliases, latest) and reject older

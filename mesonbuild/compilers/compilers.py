@@ -1570,6 +1570,43 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+        """(prefix flags, argument-consuming flags) known not to affect a C++ module BMI.
+
+        Spelled without the leading '-', '--' or '/'. A prefix flag drops any
+        argument starting with it; a consuming flag additionally drops the
+        following argument when it matches exactly. This is a best-effort list
+        (after xmake's strip lists): a missing entry only splits a BMI
+        equivalence class too eagerly, so the cost of getting it wrong is a
+        redundant BMI, never a shared incompatible one. Empty by default: with
+        no knowledge, every flag difference splits the class.
+        """
+        return frozenset(), frozenset()
+
+    def get_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
+        """The BMI equivalence class of a compile command: the sorted flags
+        surviving get_bmi_irrelevant_args stripping. Targets with equal keys
+        may legitimately share BMIs. Unrecognized flags stay in the key, so an
+        unknown divergence splits the class rather than sharing a potentially
+        incompatible BMI.
+        """
+        prefixes, consuming = self.get_bmi_irrelevant_args()
+        strippable = prefixes | consuming
+        leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
+        kept: T.List[str] = []
+        it = iter(args)
+        for arg in it:
+            body = next((arg[len(lead):] for lead in leads if arg.startswith(lead)), None)
+            if body is None:
+                kept.append(arg)
+                continue
+            if body in consuming:
+                next(it, None)
+                continue
+            if not any(body.startswith(s) for s in strippable):
+                kept.append(arg)
+        return tuple(sorted(kept))
+
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules.
 
