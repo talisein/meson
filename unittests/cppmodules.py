@@ -41,6 +41,7 @@ import functools
 import os
 import subprocess
 import tempfile
+import textwrap
 import typing as T
 import unittest
 
@@ -296,6 +297,57 @@ class CppModulesTestMixin:
         exe = os.path.join(self.builddir, prog + ('.exe' if is_windows() else ''))
         self.assertNotEqual(0, subprocess.run([exe]).returncode,
                             'importer did not pick up the module change (stale BMI)')
+
+    def check_module_graph_mutation(self, testdir_name: str) -> None:
+        """Mutate the module graph across rebuilds: add a second interface
+        source, rename its file (module name unchanged, also covering
+        file name != module name on the kwarg path), then remove it. Each
+        phase is a reconfigure -- source lists changed -- and must yield a
+        correct program and a clean no-op follow-up build. This exercises the
+        collator's provider-claim handling as providers appear, move and
+        disappear. The removed module's stale BMI is deliberately not
+        asserted gone: nothing cleans the harvest cache."""
+        testdir = os.path.join(self.unit_test_dir, testdir_name)
+        srcdir = self.copy_srcdir(testdir)
+        build_template = textwrap.dedent('''\
+            project('cpp module graph mutation', 'cpp', default_options: ['cpp_std=c++20'])
+
+            modlib = static_library('modlib', {srcs}, cpp_module_interfaces: [{srcs}])
+            prog = executable('prog', 'main.cpp', link_with: modlib)
+            test('prog', prog)
+            ''')
+        base_main = 'import mymod;\n\nint main() {\n    return modfunc() - 42;\n}\n'
+        extra_main = ('import mymod;\nimport extra;\n\n'
+                      'int main() {\n    return modfunc() - 42 + extraval();\n}\n')
+        extra_src = 'export module extra;\n\nexport int extraval() {\n    return 0;\n}\n'
+
+        def write(name: str, content: str) -> None:
+            with open(os.path.join(srcdir, name), 'w', encoding='utf-8') as f:
+                f.write(content)
+
+        def build_and_verify() -> str:
+            out = self.build(override_envvars=self.NO_CCACHE)
+            self.run_tests()
+            self.assertBuildIsNoop()
+            return out
+
+        self.init(srcdir)
+        build_and_verify()
+
+        write('extra.cc', extra_src)
+        write('main.cpp', extra_main)
+        write('meson.build', build_template.format(srcs="'mod.cc', 'extra.cc'"))
+        out = build_and_verify()
+        self.assertIn('Linking target prog', out)
+
+        os.rename(os.path.join(srcdir, 'extra.cc'), os.path.join(srcdir, 'other.cc'))
+        write('meson.build', build_template.format(srcs="'mod.cc', 'other.cc'"))
+        build_and_verify()
+
+        os.unlink(os.path.join(srcdir, 'other.cc'))
+        write('main.cpp', base_main)
+        write('meson.build', build_template.format(srcs="'mod.cc'"))
+        build_and_verify()
 
     def assert_std_link_edges(self, linked: T.Sequence[str], not_linked: T.Sequence[str]) -> None:
         """dependency('std') synthesizes one static library carrying the std
