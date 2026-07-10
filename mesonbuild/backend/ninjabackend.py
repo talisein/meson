@@ -3225,7 +3225,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         command = compiler.get_exelist()
         # $ARGS carries exactly the target's compile flags (same dialect/BMI
         # flags as the compile edge); the scan scaffolding references the
-        # per-source outputs. No -c/-o: scanning must not compile.
+        # per-source outputs. No -c: scanning must not compile.
         scanargs = NinjaCommandArg.list(
             compiler.get_module_scanner_args('$out', '$OBJ', '$DEPFILE'), Quoting.none)
         args = ['$ARGS'] + scanargs + ['$in']
@@ -3863,6 +3863,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
+                elif compiler.get_id() == 'gcc' and mesonlib.version_compare(compiler.version, '<15'):
+                    # GCC 14's driver does not know the module extensions and
+                    # would treat the file as linker input (and the -E scan
+                    # would silently emit nothing); hand it the language.
+                    # Interface-ness is still inferred from the source. GCC 15
+                    # taught the driver the extensions.
+                    commands += ['-x', 'c++']
         elif compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc' \
                 and self.cpp_module_scanner_for_target(target) == 'regex' \
                 and any(a in commands for a in compiler.get_cpp_modules_args()):
