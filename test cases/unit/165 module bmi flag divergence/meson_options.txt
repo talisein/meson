@@ -1,0 +1,1 @@
+option('withfoo', type: 'boolean', value: true)
