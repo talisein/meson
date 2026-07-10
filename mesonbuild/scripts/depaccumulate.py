@@ -254,11 +254,6 @@ def run_p1689(argv: T.List[str]) -> int:
                              'map a provided module to its harvest stamp '
                              '(<primary-output> + this suffix) instead of the cache BMI '
                              'path, and declare no implicit outputs on object edges.')
-    parser.add_argument('--assume-interfaces', action='store_true',
-                        help='Clang: every source of this target is compiled as an '
-                             'interface unit regardless of extension (the std '
-                             'synthesis), so skip the interface-extension check on '
-                             'provided modules.')
     parser.add_argument('--interface-source', action='append', default=[],
                         dest='interface_sources',
                         help='Clang: a source declared a module interface via '
@@ -307,7 +302,7 @@ def run_p1689(argv: T.List[str]) -> int:
                 # produces, and consumers would only fail later with the
                 # compiler's "module not found" -- reject it here instead.
                 src = prov.get('source-path')
-                if not args.assume_interfaces and src is not None \
+                if src is not None \
                         and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'} \
                         and os.path.normpath(src) not in interface_sources:
                     raise MesonException(
