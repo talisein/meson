@@ -1545,7 +1545,7 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_outdir_args(self, path: str) -> T.List[str]:
         raise EnvironmentException(f'{self.id} does not implement get_module_outdir_args')
 
-    def get_module_cache_dir(self) -> str:
+    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
 
     def get_module_scanner_exelist(self) -> T.List[str]:
@@ -1556,17 +1556,20 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_bmi_suffix(self) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_bmi_suffix')
 
-    def module_name_to_filename(self, module_name: str) -> str:
+    def module_name_to_filename(self, module_name: str, class_subdir: T.Optional[str] = None) -> str:
         # A module logical-name maps to the BMI path the compiler reads/writes:
         # <cache-dir>/<name><suffix>, with a partition 'pkg:part' spelled
         # 'pkg-part'. The collator (scripts/depaccumulate.py) mirrors this to
         # name BMIs from logical-names without scanning compiler output.
-        return f'{self.get_module_cache_dir()}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
+        return f'{self.get_module_cache_dir(class_subdir)}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
 
-    def get_module_compile_args(self) -> T.List[str]:
+    def get_module_compile_args(self, class_subdir: T.Optional[str] = None) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.
 
-        Returns [] for compilers/targets that do not use the module pipeline.
+        ``class_subdir`` selects a per-BMI-equivalence-class subdirectory of
+        the module cache; None means the single shared cache dir (the only
+        case for compilers without supports_bmi_classes()). Returns [] for
+        compilers/targets that do not use the module pipeline.
         """
         return []
 
@@ -1583,29 +1586,59 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return frozenset(), frozenset()
 
-    def get_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
-        """The BMI equivalence class of a compile command: the sorted flags
-        surviving get_bmi_irrelevant_args stripping. Targets with equal keys
-        may legitimately share BMIs. Unrecognized flags stay in the key, so an
-        unknown divergence splits the class rather than sharing a potentially
-        incompatible BMI.
+    def split_bmi_args(self, args: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
+        """Partition a compile command into (BMI-relevant, BMI-irrelevant)
+        flags per get_bmi_irrelevant_args, original order preserved in each
+        half; a consuming flag carries its argument into the irrelevant half.
+        Unrecognized flags are relevant, so an unknown divergence splits the
+        class rather than sharing a potentially incompatible BMI.
         """
         prefixes, consuming = self.get_bmi_irrelevant_args()
         strippable = prefixes | consuming
         leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
-        kept: T.List[str] = []
+        relevant: T.List[str] = []
+        irrelevant: T.List[str] = []
         it = iter(args)
         for arg in it:
             body = next((arg[len(lead):] for lead in leads if arg.startswith(lead)), None)
             if body is None:
-                kept.append(arg)
+                relevant.append(arg)
                 continue
             if body in consuming:
-                next(it, None)
+                irrelevant.append(arg)
+                consumed = next(it, None)
+                if consumed is not None:
+                    irrelevant.append(consumed)
                 continue
-            if not any(body.startswith(s) for s in strippable):
-                kept.append(arg)
-        return tuple(sorted(kept))
+            if any(body.startswith(s) for s in strippable):
+                irrelevant.append(arg)
+            else:
+                relevant.append(arg)
+        return relevant, irrelevant
+
+    def get_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
+        """The BMI equivalence class of a compile command: the sorted flags
+        surviving get_bmi_irrelevant_args stripping. Targets with equal keys
+        may legitimately share BMIs.
+        """
+        return tuple(sorted(self.split_bmi_args(args)[0]))
+
+    def supports_bmi_classes(self) -> bool:
+        """Whether divergent BMI equivalence classes are made to work
+        (per-class cache subdirectories plus BMI-only provider variants)
+        rather than only warned about at generate time.
+        """
+        return False
+
+    def supports_bmi_class_header_units(self) -> bool:
+        """Whether header units are built once per BMI equivalence class
+        rather than once build-wide. True only where
+        get_header_unit_consumer_args names the unit's BMI by explicit path,
+        which is all the resolution a per-class BMI needs; a directory-lookup
+        compiler (GCC) cannot relocate the search per class and keeps the
+        single shared unit plus the divergence warning.
+        """
+        return False
 
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules.

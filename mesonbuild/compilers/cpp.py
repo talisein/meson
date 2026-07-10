@@ -454,14 +454,26 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         assert self._clang_scan_deps is not None, 'only valid when supports_cpp_modules_p1689()'
         return [self._clang_scan_deps]
 
-    def get_module_cache_dir(self) -> str:
-        return 'pcm.cache'
+    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
+        return 'pcm.cache' if class_subdir is None else f'pcm.cache/{class_subdir}'
 
     def get_module_bmi_suffix(self) -> str:
         return '.pcm'
 
-    def get_module_compile_args(self) -> T.List[str]:
-        # Imports resolve by name lookup in the shared cache. Producers write
+    def supports_bmi_classes(self) -> bool:
+        # clang-cl never reaches the P1689 pipeline, and AppleClang inherits
+        # this deliberately.
+        return True
+
+    def supports_bmi_class_header_units(self) -> bool:
+        # Consumers name each unit's BMI with -fmodule-file= (see
+        # get_header_unit_consumer_args), so per-class units need no new
+        # resolution machinery.
+        return True
+
+    def get_module_compile_args(self, class_subdir: T.Optional[str] = None) -> T.List[str]:
+        # Imports resolve by name lookup in the shared cache (the target's
+        # class subdir of it, when BMI classes are in play). Producers write
         # their BMI next to the object (-fmodule-output, added per interface
         # unit by the backend) and a harvest edge publishes it into the cache;
         # no module name or BMI path ever appears on a command line.
@@ -478,7 +490,7 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # Clang-header-modules feature. The backend drops the pair when the
         # user passed -fmodules themselves: their flag must stay in effect,
         # and it keeps ccache away on its own.
-        return [f'-fprebuilt-module-path={self.get_module_cache_dir()}',
+        return [f'-fprebuilt-module-path={self.get_module_cache_dir(class_subdir)}',
                 '-fmodules', '-fno-modules']
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
@@ -776,8 +788,8 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # GCC 14.
         return version_compare(self.version, '>=14')
 
-    def get_module_cache_dir(self) -> str:
-        return 'gcm.cache'
+    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
+        return 'gcm.cache' if class_subdir is None else f'gcm.cache/{class_subdir}'
 
     def get_module_bmi_suffix(self) -> str:
         return '.gcm'
@@ -788,13 +800,18 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # -fmodules-ts.
         return '-fmodules' if version_compare(self.version, '>=15') else '-fmodules-ts'
 
-    def get_module_compile_args(self) -> T.List[str]:
+    def get_module_compile_args(self, class_subdir: T.Optional[str] = None) -> T.List[str]:
         # The modules flag enables named modules. -Mno-modules stops GCC from
         # writing its make-style module dependency rules (phony
         # '<name>.c++-module' targets and an order-only
         # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected.
+        # class_subdir is unused: GCC carries no cache dir on the command line;
+        # the stage that flips GCC's supports_bmi_classes() will consume it
+        # via the module mapper -- which is also what per-class header units
+        # (supports_bmi_class_header_units) wait on, since GCC resolves them
+        # by gcm.cache lookup with no explicit-path flag either.
         return [self._named_modules_flag(), '-Mno-modules']
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
@@ -1240,18 +1257,18 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # from VS 2022 17.2, i.e. cl 19.32.
         return version_compare(self.version, '>=19.32')
 
-    def get_module_cache_dir(self) -> str:
-        return 'ifc.cache'
+    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
+        return 'ifc.cache' if class_subdir is None else f'ifc.cache/{class_subdir}'
 
     def get_module_bmi_suffix(self) -> str:
         return '.ifc'
 
-    def get_module_compile_args(self) -> T.List[str]:
+    def get_module_compile_args(self, class_subdir: T.Optional[str] = None) -> T.List[str]:
         # Read and write BMIs by directory, shared by every compile. /interface
         # is per interface-unit and is added at the compile site, not here. The
         # trailing slash marks /ifcOutput as a directory; a forward slash avoids
         # backslash-escaping in the generated ninja file (cl accepts either).
-        cache = self.get_module_cache_dir()
+        cache = self.get_module_cache_dir(class_subdir)
         return ['/ifcSearchDir', cache, '/ifcOutput', f'{cache}/']
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
@@ -1317,6 +1334,12 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # selects /headerUnit:quote or :angle, matching the import syntax.
         flag = '/headerUnit:quote' if mode == 'user' else '/headerUnit:angle'
         return [flag, f'{spelling}={bmi_path}']
+
+    def supports_bmi_class_header_units(self) -> bool:
+        # Same explicit-path resolution as clang (/headerUnit above), so the
+        # backend's per-class unit path works unchanged; verified on Windows
+        # in the MSVC BMI-class stage. clang-cl never reaches P1689.
+        return True
 
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):
 

@@ -91,7 +91,7 @@ class FortranCompiler(CLikeCompiler, Compiler):
 
         return parameter_list
 
-    def module_name_to_filename(self, module_name: str) -> str:
+    def module_name_to_filename(self, module_name: str, class_subdir: T.Optional[str] = None) -> str:
         if '_' in module_name:  # submodule
             s = module_name.lower()
             if self.id in {'gcc', 'intel', 'intel-cl'}:

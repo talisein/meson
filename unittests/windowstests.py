@@ -486,7 +486,10 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # cl names unit BMIs on consumer command lines (as /headerUnit
         # mappings), so the default ARGS check is off; the bespoke scan below
         # enforces the sharper rule.
+        # setup_not_contains: prog and prog2 declare the same unit in the same
+        # BMI class, which must stay warning-free.
         self.build_and_check_modules('151 msvc header units',
+                                     setup_not_contains=['divergent BMI-affecting flags'],
                                      ninja_args_not_contains=())
         # Units are pre-built to a Meson-chosen .ifc, deduped globally by
         # (mode, spelling): the user unit shared by both targets is one edge/BMI.

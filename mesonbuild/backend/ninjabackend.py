@@ -558,6 +558,39 @@ class ImportStdInfo:
     gen_module_file: str
     gen_objects: T.List[str]
 
+
+@dataclass
+class BmiClassInfo:
+    """A BMI equivalence class present in this build (Compiler.get_bmi_class_key).
+
+    subdir is the class's subdirectory of the module cache, or None when the
+    machine has a single class (flat cache, command lines identical to a
+    build without BMI classes). relevant_args keeps the class's BMI-relevant
+    flags in original command-line order for variant compiles.
+    """
+    subdir: T.Optional[str]
+    relevant_args: T.List[str]
+
+
+@dataclass
+class ModuleInterfaceSource:
+    """A source a module provider compiled as an interface unit, recorded so
+    a BMI-only variant can recompile it under another class."""
+    rel_src: str
+    obj_basename: str
+    header_deps: T.Tuple[FileOrString, ...]
+    order_deps: T.Tuple[FileOrString, ...]
+
+
+@dataclass
+class BmiVariant:
+    """A synthesized BMI-only recompilation of a provider's module interfaces
+    for one BMI class. Emits BMIs into the class's cache subdir and no
+    objects; consumers link the original provider."""
+    private_dir: str
+    provmap: str
+    dyndep: str
+
 class NinjaBackend(backends.Backend):
 
     def __init__(self, build: T.Optional[build.Build]):
@@ -586,8 +619,12 @@ class NinjaBackend(backends.Backend):
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
         # Consumer/provider target-id pairs already warned about for divergent
-        # BMI-affecting flags, so each divergence is reported once.
+        # BMI-affecting flags, so each divergence is reported once. Header
+        # units get the same treatment keyed by (unit key, consumer id), with
+        # the class that built each unit recorded at edge creation.
         self._warned_module_divergence: T.Set[T.Tuple[str, str]] = set()
+        self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
+        self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
@@ -597,6 +634,14 @@ class NinjaBackend(backends.Backend):
         self._header_units: T.Dict[str, str] = {}
         self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
+        # BMI class registry, frozen by _compute_bmi_class_registry before any
+        # target is generated; only populated for compilers that
+        # supports_bmi_classes(). Variants are memoized per (provider id,
+        # class key); provider interface-unit sources are recorded during the
+        # provider's own compile generation.
+        self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
+        self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
+        self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
 
     def create_phony_target(self, dummy_outfile: str, rulename: str, phony_infilenames: ListifiedStr) -> NinjaBuildElement:
         '''
@@ -750,6 +795,7 @@ class NinjaBackend(backends.Backend):
                     if isinstance(target, build.BuildTarget):
                         captured_compile_args_per_target[target.get_id()] = self.generate_common_compile_args_per_src_type(target)
 
+            self._compute_bmi_class_registry()
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
@@ -1383,9 +1429,11 @@ class NinjaBackend(backends.Backend):
         return objfile + '.ddi'
 
     def generate_cpp_module_scan(self, target: build.BuildTarget, compiler: Compiler,
-                                 rel_src: str, rel_obj: str, commands: 'CompilerArgs',
+                                 rel_src: str, rel_obj: str,
+                                 commands: T.Union['CompilerArgs', T.List[str]],
                                  header_deps: T.Optional[T.List[FileOrString]] = None,
-                                 order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None) -> None:
+                                 order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None,
+                                 header_unit_override: T.Optional[T.List[str]] = None) -> None:
         if not self.target_uses_p1689_cpp_modules_edge(target, compiler):
             return
         if compiler.get_id() == 'clang':
@@ -1397,13 +1445,20 @@ class NinjaBackend(backends.Backend):
         depfile = ddi + '.d'
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
         elem = NinjaBuildElement(self.all_outputs, ddi, rulename, rel_src)
-        hu_outputs = self.provision_header_units(target, compiler)
-        if compiler.get_id() == 'clang' and hu_outputs:
-            # A clang scan hard-errors on a header-unit import with no matching
-            # -fmodule-file, even with the BMI built (no ambient lookup), so
-            # the per-unit flags must ride the scan too. Appending is
-            # non-mutating; the compile's `commands` is untouched.
-            commands = commands + self._target_header_unit_consumer_args.get(target.get_id(), [])
+        if header_unit_override is not None:
+            # A BMI-only variant scan: depend on the variant class's unit
+            # BMIs, whose consumer flags already ride `commands` -- the
+            # target's own units belong to another class and must not appear.
+            hu_outputs = header_unit_override
+        else:
+            hu_outputs = self.provision_header_units(target, compiler)
+            if compiler.get_id() == 'clang' and hu_outputs:
+                # A clang scan hard-errors on a header-unit import with no
+                # matching -fmodule-file, even with the BMI built (no ambient
+                # lookup), so the per-unit flags must ride the scan too.
+                # Appending is non-mutating; the compile's `commands` is
+                # untouched.
+                commands = commands + self._target_header_unit_consumer_args.get(target.get_id(), [])
         elem.add_item('ARGS', commands)
         elem.add_item('OBJ', rel_obj)
         elem.add_item('DEPFILE', depfile)
@@ -1437,8 +1492,9 @@ class NinjaBackend(backends.Backend):
         return objfile + '.pcm.stamp'
 
     def generate_cpp_module_harvest(self, target: build.BuildTarget, compiler: Compiler,
-                                    rel_obj: str) -> None:
-        """Publish a Clang module interface's BMI into the shared cache.
+                                    rel_obj: str, class_subdir: T.Optional[str] = None) -> None:
+        """Publish a Clang module interface's BMI into the shared cache
+        (into ``class_subdir`` of it, for per-class builds and variants).
 
         Clang self-names BMIs after the source, not the module, so a
         build-time step must copy obj-side <src>.pcm to
@@ -1454,7 +1510,7 @@ class NinjaBackend(backends.Backend):
         elem = NinjaBuildElement(self.all_outputs, stamp, 'cpp_module_harvest', [pcm, ddi])
         elem.add_item('PCM', pcm)
         elem.add_item('DDI', ddi)
-        elem.add_item('BMIDIR', compiler.get_module_cache_dir())
+        elem.add_item('BMIDIR', compiler.get_module_cache_dir(class_subdir))
         elem.add_item('BMISUFFIX', compiler.get_module_bmi_suffix())
         self.add_build(elem)
 
@@ -1485,7 +1541,8 @@ class NinjaBackend(backends.Backend):
             # cl does not create /ifcOutput itself, and clang consumers name
             # pcm.cache before the first harvest populates it.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
-                                     cpp.get_module_cache_dir()), exist_ok=True)
+                                     cpp.get_module_cache_dir(self._bmi_class_subdir_for(target))),
+                        exist_ok=True)
         if cpp.get_id() == 'clang':
             self.warn_on_clang_modules_ccache(cpp)
 
@@ -1498,8 +1555,7 @@ class NinjaBackend(backends.Backend):
         for t in target.get_all_linked_targets():
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
-                dep_provmaps.append(self.get_provided_modules_file_for(t))
-                self.warn_on_module_flag_divergence(target, t)
+                dep_provmaps.append(self._module_provmap_for(target, t))
         dep_provmaps.sort()
 
         dyndep_file = self.get_dep_scan_file_for(target)[1]
@@ -1511,7 +1567,7 @@ class NinjaBackend(backends.Backend):
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
         # BMIs are named from logical-names, in lockstep with module_name_to_filename.
-        elem.add_item('BMIDIR', cpp.get_module_cache_dir())
+        elem.add_item('BMIDIR', cpp.get_module_cache_dir(self._bmi_class_subdir_for(target)))
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
         elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps))
         elem.add_item('name', target.name)
@@ -1543,6 +1599,133 @@ class NinjaBackend(backends.Backend):
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
         return depargs
+
+    def _module_provmap_for(self, consumer: build.BuildTarget,
+                            provider: build.BuildTarget) -> str:
+        """The provided-modules map `consumer` resolves `provider`'s modules
+        from: the provider's own when their BMI classes agree, a BMI-only
+        variant in the consumer's class when the compiler supports classes,
+        else the provider's own plus the divergence warning.
+        """
+        if not consumer.compilers['cpp'].supports_bmi_classes():
+            self.warn_on_module_flag_divergence(consumer, provider)
+            return self.get_provided_modules_file_for(provider)
+        return self._provmap_for_class(provider, self._bmi_class_key_of(consumer))
+
+    def _provmap_for_class(self, provider: build.BuildTarget,
+                           class_key: T.Tuple[str, ...]) -> str:
+        if self._bmi_class_key_of(provider) == class_key:
+            return self.get_provided_modules_file_for(provider)
+        return self._get_or_create_bmi_variant(provider, class_key).provmap
+
+    def _get_or_create_bmi_variant(self, provider: build.BuildTarget,
+                                   class_key: T.Tuple[str, ...]) -> BmiVariant:
+        """Synthesize, once per (provider, BMI class), a BMI-only
+        recompilation of the provider's module interface units under that
+        class: same scan/collate/harvest pipeline as the provider, but the
+        compiles use --precompile, emit BMIs into the class's cache subdir
+        and produce no objects. Consumers keep linking the provider's own
+        objects, so the one-provider-per-module-name rule is untouched. The
+        variant is not a target: its edges hang off consuming collates and
+        dyndeps only, so a variant nobody links is never built.
+
+        Every recorded interface is compiled: Meson has no module visibility,
+        so by convention all interfaces are importable. If visibility is ever
+        added, private interfaces must be excluded here -- no consumer could
+        import them, and compiling them would be wasted work at best.
+        """
+        memo_key = (provider.get_id(), class_key)
+        existing = self._bmi_variants.get(memo_key)
+        if existing is not None:
+            return existing
+        cpp = provider.compilers['cpp']
+        info = self._bmi_classes[(provider.for_machine, class_key)]
+        assert info.subdir is not None, 'a class divergence implies more than one class'
+        vid = f'{provider.get_id()}@bmi@{info.subdir}'
+        private_dir = os.path.join('meson-private', vid)
+        variant = BmiVariant(private_dir,
+                             os.path.join(private_dir, 'provided-modules.json'),
+                             os.path.join(private_dir, 'depscan.dd'))
+        self._bmi_variants[memo_key] = variant
+        build_dir = self.environment.get_build_dir()
+        os.makedirs(os.path.join(build_dir, private_dir), exist_ok=True)
+        os.makedirs(os.path.join(build_dir, cpp.get_module_cache_dir(info.subdir)), exist_ok=True)
+
+        # The provider's BMI-irrelevant flags (its includes, warnings, ...)
+        # plus the class's BMI-relevant flags; later flags win, so the class
+        # overrides the provider on any conflict.
+        _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
+        args = irrelevant + info.relevant_args
+        # An interface's `import <hdr>;` must resolve this class's unit BMI,
+        # not the provider's: provision the units under the variant's class
+        # (reusing a class-mate target's edges when they exist), built from
+        # the same pre-module args as a target's own units. `args` keeps
+        # growing below, so the unit edges get their own copy.
+        hu_outputs, hu_args = self._provision_header_unit_edges(
+            cpp, provider.cpp_header_units, args.copy(), class_key, info.subdir,
+            vid, None)
+        modargs = cpp.get_module_compile_args(info.subdir)
+        if cpp.get_id() == 'clang' and '-fmodules' in args:
+            # Same shape as the compile-edge dance in generate_single_compile.
+            modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
+        args += modargs
+        args += hu_args
+
+        self.generate_bmi_variant_compile_rule(cpp)
+        rulename = self.get_compiler_rule_name('cpp', cpp.for_machine, 'BMI_VARIANT')
+        recs = self._target_module_interfaces[provider.get_id()]
+        ddis: T.List[str] = []
+        for rec in recs:
+            # The BMI is the edge's primary output, standing where the object
+            # stands in the provider's own pipeline: the scan's .ddi names it
+            # as primary-output, so the variant's dyndep and harvest stamp
+            # derive from it exactly as they do from an object path.
+            vpcm = self.get_clang_pcm_file_for(os.path.join(private_dir, rec.obj_basename))
+            header_deps = list(rec.header_deps)
+            order_deps: T.List[FileOrString] = list(rec.order_deps)
+            self.generate_cpp_module_scan(provider, cpp, rec.rel_src, vpcm,
+                                          args + ['-x', 'c++-module'],
+                                          header_deps=header_deps, order_deps=order_deps,
+                                          header_unit_override=hu_outputs)
+            ddis.append(self.get_ddi_file_for(vpcm))
+            elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
+            elem.add_item('ARGS', args)
+            elem.add_item('DEPFILE', vpcm + '.d')
+            self.add_header_deps(provider, elem, header_deps)
+            elem.add_orderdep(self.order_deps_to_strings(provider, order_deps))
+            elem.add_dep(hu_outputs)
+            elem.add_item('dyndep', variant.dyndep)
+            elem.add_orderdep(variant.dyndep)
+            self.add_build(elem)
+            self.generate_cpp_module_harvest(provider, cpp, vpcm, info.subdir)
+
+        # The variant's own imports must resolve in its class too: a linked
+        # provider in the same class keeps its original provmap, a divergent
+        # one gets (or reuses) a variant, recursively.
+        dep_provmaps = sorted({self._provmap_for_class(t, class_key)
+                               for t in provider.get_all_linked_targets()
+                               if isinstance(t, build.BuildTarget)
+                               and self.target_uses_p1689_cpp_modules(t)
+                               and t.provides_cpp_modules()})
+        elem = NinjaBuildElement(self.all_outputs, [variant.dyndep, variant.provmap],
+                                 'cpp_module_collate', sorted(ddis))
+        if dep_provmaps:
+            elem.add_dep(dep_provmaps)
+        elem.add_item('DYNDEP', variant.dyndep)
+        elem.add_item('PROVMAP', variant.provmap)
+        elem.add_item('BMIDIR', cpp.get_module_cache_dir(info.subdir))
+        elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
+        depargs: T.List[str] = []
+        for pm in dep_provmaps:
+            depargs += ['--dep-provmap', pm]
+        depargs += ['--stamp-suffix', '.pcm.stamp']
+        for rec in recs:
+            depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
+        elem.add_item('DEPARGS', depargs)
+        elem.add_item('name', vid)
+        self.add_build(elem)
+        self._uses_dyndeps = True
+        return variant
 
     def warn_on_clang_modules_ccache(self, cpp: Compiler) -> None:
         # Module compiles carry -fmodules -fno-modules so ccache falls back to
@@ -1577,33 +1760,110 @@ class NinjaBackend(backends.Backend):
         setting is chosen by the dependency spelling (kept in lockstep with
         _cpp_std_module_dependency).
         """
-        def key_of(t: build.BuildTarget) -> T.Tuple[str, ...]:
-            cpp = t.compilers['cpp']
-            return cpp.get_bmi_class_key(self._generate_single_compile(t, cpp))
-
         pair = (consumer.get_id(), provider.get_id())
         if pair in self._warned_module_divergence:
             return
-        consumer_key, provider_key = key_of(consumer), key_of(provider)
+        consumer_key, provider_key = self._bmi_class_key_of(consumer), self._bmi_class_key_of(provider)
         if consumer_key == provider_key:
             return
         self._warned_module_divergence.add(pair)
 
-        cdiff = sorted((Counter(consumer_key) - Counter(provider_key)).keys())
-        pdiff = sorted((Counter(provider_key) - Counter(consumer_key)).keys())
-        parts = [', '.join(repr(f) for f in diff) + f' only in {t.name!r}'
-                 for diff, t in ((cdiff, consumer), (pdiff, provider)) if diff]
-        message = (
+        mlog.warning(
             f'Targets {consumer.name!r} and {provider.name!r} share C++ modules '
-            'but compile with divergent BMI-affecting flags: ' + '; '.join(parts) + '.')
-        if '-pthread' in cdiff or '-pthread' in pdiff:
-            wo = provider if '-pthread' in cdiff else consumer
-            if wo.name == '__meson_cxx_std':
+            'but compile with divergent BMI-affecting flags: '
+            + self._render_bmi_divergence(consumer.name, consumer_key,
+                                          provider.name, provider_key))
+
+    @staticmethod
+    def _render_bmi_divergence(name_a: str, key_a: T.Tuple[str, ...],
+                               name_b: str, key_b: T.Tuple[str, ...]) -> str:
+        """The "<flags> only in <target>" clauses plus the tailored -pthread
+        advice, shared by the module and header-unit divergence warnings."""
+        adiff = sorted((Counter(key_a) - Counter(key_b)).keys())
+        bdiff = sorted((Counter(key_b) - Counter(key_a)).keys())
+        parts = [', '.join(repr(f) for f in diff) + f' only in {n!r}'
+                 for diff, n in ((adiff, name_a), (bdiff, name_b)) if diff]
+        message = '; '.join(parts) + '.'
+        if '-pthread' in adiff or '-pthread' in bdiff:
+            wo = name_b if '-pthread' in adiff else name_a
+            if wo == '__meson_cxx_std':
                 fix = "use the threaded dependency('std') instead of dependency('std-nothreads')"
             else:
-                fix = f"add dependency('threads') to {wo.name!r}"
+                fix = f"add dependency('threads') to {wo!r}"
             message += f' For -pthread, {fix}.'
-        mlog.warning(message)
+        return message
+
+    def warn_on_header_unit_divergence(self, target: build.BuildTarget,
+                                       class_key: T.Tuple[str, ...],
+                                       unit_key: str, spelling: str) -> None:
+        """Warn when a target reuses a header unit's BMI that was built in a
+        different BMI equivalence class, once per (unit, consumer). Only
+        reachable for compilers without supports_bmi_class_header_units()
+        (GCC): their units are deduped build-wide and built with the first
+        declarer's flags (see provision_header_units), so the target silently
+        shares a gcm.cache BMI baked under someone else's flags. This only
+        reports the hazard; nothing about the build changes.
+        """
+        owner_key, owner_name = self._header_unit_class[unit_key]
+        if class_key == owner_key:
+            return
+        pair = (unit_key, target.get_id())
+        if pair in self._warned_header_unit_divergence:
+            return
+        self._warned_header_unit_divergence.add(pair)
+        mlog.warning(
+            f'Targets {target.name!r} and {owner_name!r} import the same C++ '
+            f'header unit {spelling!r} but compile with divergent '
+            'BMI-affecting flags: '
+            + self._render_bmi_divergence(target.name, class_key, owner_name, owner_key)
+            + " The unit's BMI is built once, with the flags of the first declarer.")
+
+    def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
+        cpp = target.compilers['cpp']
+        return cpp.get_bmi_class_key(self._generate_single_compile(target, cpp))
+
+    def _compute_bmi_class_registry(self) -> None:
+        """Freeze the per-machine set of BMI equivalence classes before any
+        target is generated (compile args must not depend on generation
+        order). A machine with one class keeps the flat cache dir and
+        byte-identical command lines; with more, every class gets its own
+        subdirectory named by a digest of the class key. Only compilers with
+        supports_bmi_classes() -- or supports_bmi_class_header_units(), which
+        keys header units by the same registry -- participate; the rest keep
+        the divergence warning. The key is computed from
+        _generate_single_compile, which excludes get_module_compile_args, so
+        the chosen dir cannot feed back into the key.
+        """
+        per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
+        for t in self.build.get_targets().values():
+            if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
+                continue
+            cpp = t.compilers['cpp']
+            if not (cpp.supports_bmi_classes() or cpp.supports_bmi_class_header_units()):
+                continue
+            relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
+            per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
+        for machine, classes in per_machine.items():
+            multi = len(classes) > 1
+            for key, relevant in classes.items():
+                subdir = hashlib.sha256('\x00'.join(key).encode()).hexdigest()[:12] if multi else None
+                self._bmi_classes[(machine, key)] = BmiClassInfo(subdir, relevant)
+
+    def _bmi_class_subdir_for(self, target: build.BuildTarget) -> T.Optional[str]:
+        if 'cpp' not in target.compilers or not target.compilers['cpp'].supports_bmi_classes():
+            return None
+        info = self._bmi_classes.get((target.for_machine, self._bmi_class_key_of(target)))
+        return info.subdir if info else None
+
+    def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
+                                      class_key: T.Tuple[str, ...]) -> T.Optional[str]:
+        # The header-unit analogue of _bmi_class_subdir_for, gated on its own
+        # capability and keyed directly (the BMI-only variant path provisions
+        # units without a target to look the key up from).
+        if not compiler.supports_bmi_class_header_units():
+            return None
+        info = self._bmi_classes.get((for_machine, class_key))
+        return info.subdir if info else None
 
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:
@@ -3191,6 +3451,21 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         rule = NinjaRule(rulename, command, args, description)
         self.add_rule(rule)
 
+    def generate_bmi_variant_compile_rule(self, compiler: Compiler) -> None:
+        # Compiles a module interface unit straight to a BMI, no object
+        # (clang --precompile). -x c++-module covers extension-less declared
+        # interfaces. Registered lazily with the first variant; compilers gain
+        # a command line here when their supports_bmi_classes() flips.
+        rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'BMI_VARIANT')
+        if self.ninja.has_rule(rulename):
+            return
+        assert compiler.get_id() == 'clang', 'only Clang supports BMI classes today'
+        command = compiler.get_exelist()
+        depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
+        args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
+        self.add_rule(NinjaRule(rulename, command, args,
+                                'Precompiling C++ module BMI $out', deps='gcc', depfile='$DEPFILE'))
+
     def generate_cpp_module_scan_rule(self, compiler: Compiler) -> None:
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
         if self.ninja.has_rule(rulename):
@@ -3321,14 +3596,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         it; those per-target /headerUnit (-fmodule-file) flags are recorded for
         the compile site -- and, on clang, for the scan site too.
 
-        Edges are deduped globally by (mode, spelling): a header unit with a
-        given spelling is built once and shared by every target that declares
-        it. Its compile flags must therefore be uniform build-wide -- the same
-        requirement the module support makes everywhere -- so the first edge for
-        a spelling stands in for every consumer and diverging flags for one
-        header unit are undefined. (GCC would enforce this regardless: it writes
-        one flag-independent gcm.cache path per header, so a second edge would
-        only race to write the same BMI.)
+        Edges are deduped by (mode, spelling) plus, for compilers with
+        supports_bmi_class_header_units(), the declarer's BMI class: each
+        class builds its own BMI (a unit is interface-only, so per-class
+        copies are purely additive) and every consumer's explicit-path flags
+        name its own class's. On a single-class machine the key carries no
+        class part, keeping paths and edges byte-identical to a pre-class
+        build. GCC resolves units by gcm.cache directory lookup with no
+        per-class relocation (that waits on the module mapper stage), so its
+        units stay deduped build-wide: the first declarer's flags build the
+        one BMI and a declarer in a divergent class only gets
+        warn_on_header_unit_divergence.
         """
         cid = compiler.get_id()
         if cid not in ('gcc', 'msvc', 'clang'):
@@ -3344,42 +3622,72 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
-            if cid == 'clang':
-                # Registered lazily (idempotent), like clang's scan rule: only
-                # projects declaring header units grow the rule.
-                self.generate_cpp_header_unit_rule(compiler)
-            rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
-            is_msvc = cid == 'msvc'
-            suffix = '.stamp' if cid == 'gcc' else compiler.get_module_bmi_suffix()
-            for hu in target.cpp_header_units:
-                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
-                # One BMI per (mode, spelling), shared across targets; flags are
-                # assumed uniform build-wide (see docstring), so the first edge's
-                # args build the unit for every consumer.
-                key = f'{mode}:{spelling}'
-                output = self._header_units.get(key)
-                if output is None:
-                    digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
-                    safe = os.path.basename(spelling) or 'header'
-                    # Forward slashes so the path is safe in the ninja file on
-                    # Windows (cl accepts either).
-                    output = f'meson-private/header-units/{safe}.{digest}{suffix}'
-                    elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
-                    elem.add_item('ARGS', args)
-                    elem.add_item('SPELLING', spelling)
-                    if is_msvc:
-                        elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
-                    else:
-                        elem.add_item('HULANG', f'c++-{mode}-header')
-                        elem.add_item('DEPFILE', output + '.d')
-                    self.add_build(elem)
-                    self._header_units[key] = output
-                outputs.append(output)
-                # GCC consumers resolve by directory lookup (returns []).
-                consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
+            class_key = compiler.get_bmi_class_key(args)
+            class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
+            outputs, consumer_args = self._provision_header_unit_edges(
+                compiler, target.cpp_header_units, args, class_key, class_subdir,
+                target.name, target)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         return outputs
+
+    def _provision_header_unit_edges(self, compiler: Compiler,
+                                     header_units: T.List[T.Union[File, str]],
+                                     args: T.Union['CompilerArgs', T.List[str]],
+                                     class_key: T.Tuple[str, ...],
+                                     class_subdir: T.Optional[str],
+                                     declarer: str,
+                                     warn_target: T.Optional[build.BuildTarget]
+                                     ) -> T.Tuple[T.List[str], T.List[str]]:
+        """The edge-emitting half of provision_header_units, also used by
+        BMI-only module variants to build their class's units (with no
+        warn_target: reuse there is same-class by construction). Returns
+        (unit outputs, per-unit consumer args).
+        """
+        if not header_units:
+            return [], []
+        cid = compiler.get_id()
+        if cid == 'clang':
+            # Registered lazily (idempotent), like clang's scan rule: only
+            # projects declaring header units grow the rule.
+            self.generate_cpp_header_unit_rule(compiler)
+        rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
+        is_msvc = cid == 'msvc'
+        suffix = '.stamp' if cid == 'gcc' else compiler.get_module_bmi_suffix()
+        outputs: T.List[str] = []
+        consumer_args: T.List[str] = []
+        for hu in header_units:
+            mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+            # One BMI per (mode, spelling) and, when classes are in play, per
+            # class; within a key the first edge's args build the unit for
+            # every consumer (see the provision_header_units docstring).
+            key = f'{mode}:{spelling}'
+            if class_subdir is not None:
+                key += f':{class_subdir}'
+            output = self._header_units.get(key)
+            if output is None:
+                digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
+                safe = os.path.basename(spelling) or 'header'
+                # Forward slashes so the path is safe in the ninja file on
+                # Windows (cl accepts either).
+                output = f'meson-private/header-units/{safe}.{digest}{suffix}'
+                elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
+                elem.add_item('ARGS', args)
+                elem.add_item('SPELLING', spelling)
+                if is_msvc:
+                    elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
+                else:
+                    elem.add_item('HULANG', f'c++-{mode}-header')
+                    elem.add_item('DEPFILE', output + '.d')
+                self.add_build(elem)
+                self._header_units[key] = output
+                self._header_unit_class[key] = (class_key, declarer)
+            elif warn_target is not None:
+                self.warn_on_header_unit_divergence(warn_target, class_key, key, spelling)
+            outputs.append(output)
+            # GCC consumers resolve by directory lookup (returns []).
+            consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
+        return outputs, consumer_args
 
     def generate_compile_rules(self) -> None:
         for for_machine in MachineChoice:
@@ -3831,7 +4139,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # BMI path never appear on the command line -- ordering is carried by
         # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
-            modargs = compiler.get_module_compile_args()
+            modargs = compiler.get_module_compile_args(self._bmi_class_subdir_for(target))
             if compiler.get_id() == 'clang' and '-fmodules' in commands:
                 # The user turned on implicit Clang modules themselves (via
                 # cpp_args, add_project_arguments, ...; all those channels are
@@ -4056,7 +4364,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
                                       header_deps=header_deps, order_deps=order_deps)
         if clang_miu:
-            self.generate_cpp_module_harvest(target, compiler, rel_obj)
+            # Remember every source compiled as an interface unit (extension
+            # or declared), so a BMI-only variant can recompile the same set
+            # under another BMI class.
+            self._target_module_interfaces[target.get_id()].append(ModuleInterfaceSource(
+                rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps)))
+            self.generate_cpp_module_harvest(target, compiler, rel_obj,
+                                             self._bmi_class_subdir_for(target))
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))
