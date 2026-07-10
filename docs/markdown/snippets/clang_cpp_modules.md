@@ -16,10 +16,11 @@ scanner is found, setup fails with a clear message.
 The user-facing interface is identical to the GCC and MSVC ones: a target is
 module-enabled when it has a module-interface source (`.cppm` / `.ixx`,
 including a build-time generated one), when it links a target that provides
-modules, or when the `cpp_modules` keyword is set. As with MSVC, module
-*interfaces* must use the `.cppm`/`.ixx` extension: Clang decides what is an
-interface unit per source (Meson passes `-x c++-module`, derived from the
-extension alone), so an `export module` in a plain `.cpp` is not supported.
+modules, or when the `cpp_modules` keyword is set. Clang decides what is an
+interface unit per source (Meson passes `-x c++-module`), so a module interface
+must be identified up front — by the `.cppm`/`.ixx` extension, or by listing it
+in the target's `cpp_module_interfaces`, which marks a source an interface unit
+regardless of its extension (so an `export module` in a plain `.cpp` now builds).
 
 Because Clang names a compiled interface after its *source* file, Meson
 publishes each interface's BMI into the shared cache under its scanned module

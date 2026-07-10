@@ -19,12 +19,12 @@ executable('prog', 'main.cpp', link_with: modlib)
 ```
 
 As with GCC, module usage is declared, never sniffed — Meson never reads
-source contents to detect modules. On MSVC the declaration goes one step
-further: module *interface* units must use the `.cppm` or `.ixx` extension.
-cl requires each interface unit to be compiled with `/interface`, and Meson
-derives that per-source flag from the extension alone, so an `export module`
-in a plain `.cpp` is not supported even on a target with `cpp_modules: true`
-(the keyword still covers consumers whose sources merely `import`).
+source contents to detect modules. cl requires each interface unit to be
+compiled with `/interface`, and Meson derives that per-source flag from the
+`.cppm`/`.ixx` extension — or from the target's `cpp_module_interfaces` list,
+which marks a source an interface unit regardless of its extension, so an
+`export module` in a plain `.cpp` now builds. `cpp_modules: true` on its own
+still only covers consumers whose sources merely `import`.
 
 This replaces the previous MSVC behavior, where every target built with
 `cpp_std=c++latest` was scanned for modules by reading its sources. A project
