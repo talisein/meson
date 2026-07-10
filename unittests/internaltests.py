@@ -466,8 +466,9 @@ class InternalTests(unittest.TestCase):
         # source lacks the module extension would advertise a harvest stamp
         # nothing produces, and consumers would only fail later with the
         # compiler's "module 'x' not found". The collate must reject it,
-        # naming the source and the fix. --assume-interfaces (the std
-        # synthesis, whose bits/std.cc is an interface unit by fiat) and the
+        # naming the source and the fix. Sources declared via
+        # cpp_module_interfaces (passed per source as --interface-source;
+        # the std synthesis declares its bits/std.cc this way) and the
         # GCC/MSVC pipelines (no --stamp-suffix) are exempt.
         from mesonbuild.scripts.depaccumulate import run_p1689
         from mesonbuild.utils.core import MesonException
@@ -490,7 +491,7 @@ class InternalTests(unittest.TestCase):
             self.assertIn('../src/fmt.cc', msg)
             self.assertIn('.cppm', msg)
             self.assertEqual(run_p1689(args(d, ['--stamp-suffix', '.pcm.stamp',
-                                                '--assume-interfaces'])), 0)
+                                                '--interface-source', '../src/fmt.cc'])), 0)
             self.assertEqual(run_p1689(args(d, [])), 0)
 
     def test_depaccumulate_is_header_unit(self):

@@ -2111,10 +2111,10 @@ class Interpreter(InterpreterBase, HoldableObject):
         # keyword, so this internal target does not raise a spurious FeatureNew
         # about a keyword the user never wrote.
         std_lib.cpp_modules = True
-        # The manifest declares these sources as module interfaces regardless
-        # of extension (libstdc++ ships bits/std.cc): record that, for
-        # compilers that must flag interface units per source (Clang).
-        std_lib.cpp_sources_are_module_interfaces = True
+        # The manifest declares every source a module interface regardless of
+        # extension (libstdc++ ships bits/std.cc), for compilers that flag
+        # interface units per source (Clang). Same channel as the user kwarg.
+        std_lib.cpp_module_interfaces = list(srcs)
         dep = dependencies.InternalDependency(
             self.project_version, libraries=[std_lib],
             ext_deps=[threads_dep] if threads_dep is not None else None,

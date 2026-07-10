@@ -921,12 +921,6 @@ class BuildTarget(Target):
             self.name_suffix_set = True
         self.implicit_include_directories = kwargs.get('implicit_include_directories', True)
         self.cpp_modules = kwargs.get('cpp_modules', False)
-        # Internal only, never a kwarg: every C++ source of this target is a
-        # module interface unit. Set by the dependency('std') synthesis, whose
-        # manifest declares its sources as interfaces regardless of extension
-        # (libstdc++ ships bits/std.cc) -- compilers that flag interface units
-        # per source (Clang) key off this in addition to the .cppm/.ixx suffix.
-        self.cpp_sources_are_module_interfaces = False
         self.cpp_header_units = kwargs.get('cpp_header_units', [])
         self.cpp_module_interfaces = kwargs.get('cpp_module_interfaces', [])
         self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')

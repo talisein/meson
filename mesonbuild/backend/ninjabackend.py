@@ -1525,8 +1525,8 @@ class NinjaBackend(backends.Backend):
         consumers against the harvest stamps (--stamp-suffix, in lockstep with
         get_clang_pcm_stamp_for), and the collator rejects a provide from a source
         Clang did not compile as an interface unit -- extension-less interfaces
-        (the std synthesis, or cpp_module_interfaces) are passed as source paths so
-        the collator accepts them. For cl the declared header units are passed so
+        declared via cpp_module_interfaces are passed as source paths so the
+        collator accepts them. For cl the declared header units are passed so
         the collator can flag an import of one this target never declared (cl
         reports header-unit requires from a cold scan; GCC cannot, so it is
         omitted there).
@@ -1536,8 +1536,6 @@ class NinjaBackend(backends.Backend):
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
             depargs += ['--stamp-suffix', '.pcm.stamp']
-            if target.cpp_sources_are_module_interfaces:
-                depargs += ['--assume-interfaces']
             for p in sorted(self._module_interface_paths(target)):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'msvc':
@@ -3865,11 +3863,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
-            elif compiler.get_id() == 'clang' and target.cpp_sources_are_module_interfaces:
-                # The std synthesis marks its target: every source is an
-                # interface unit even without the module extension
-                # (libstdc++'s bits/std.cc).
-                commands += ['-x', 'c++-module', '-fmodule-output']
 
         # Metrowerks compilers require PCH include args to come after intraprocedural analysis args
         if use_pch and 'mw' in compiler.id:
@@ -4034,7 +4027,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
                 and compiler.get_id() == 'clang':
             miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            clang_miu = miu_suffix in {'cppm', 'ixx'} or target.cpp_sources_are_module_interfaces \
+            clang_miu = miu_suffix in {'cppm', 'ixx'} \
                 or self._is_declared_module_interface(target, src)
         if clang_miu:
             element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
