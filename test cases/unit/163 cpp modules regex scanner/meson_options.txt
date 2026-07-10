@@ -1,0 +1,6 @@
+option('mode', type: 'combo',
+       choices: ['flat', 'partition', 'importpart', 'importstd'],
+       value: 'flat',
+       description: 'Which regex-scanner behavior to exercise.')
+option('modules_flag', type: 'string', value: '-fmodules',
+       description: 'The bare modules flag forcing the regex scan path.')
