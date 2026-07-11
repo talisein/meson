@@ -132,6 +132,41 @@ def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
+def _flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
+    """The CMI path GCC's default (mapper-less) mapping gives a header unit.
+
+    A header unit's logical-name is its resolved header path; GCC stores its
+    CMI under the flat cache root with '.' and '..' components mangled to ','
+    and ',,' and an absolute path appended as-is: './util.h' ->
+    'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
+    'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
+    'gcm.cache/usr/include/c++/16/vector.gcm'. A per-TU mapper disables the
+    default mapping entirely, so it must reproduce this scheme for the units
+    the TU imports: GCC header units stay in the flat shared cache, which no
+    per-class relocation flag can move.
+    """
+    parts = [',' * len(p) if p in ('.', '..') else p
+             for p in logical_name.split('/')]
+    return f'{flat_dir}/' + '/'.join(p for p in parts if p) + suffix
+
+
+def _write_if_different(path: str, content: str) -> None:
+    """Write only when the content changed, preserving mtime otherwise.
+
+    Mapper files are implicit inputs of compile edges; an unconditional
+    rewrite would recompile every object in the target whenever any module
+    in it changes.
+    """
+    try:
+        with open(path, encoding='utf-8') as f:
+            if f.read() == content:
+                return
+    except OSError:
+        pass
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
 def _is_header_unit(req: Require) -> bool:
     # A header-unit require is skipped by the collator: its BMI is pre-built by a
     # static edge, so it is neither a dyndep dependency nor a missing named
@@ -238,6 +273,15 @@ def run_p1689(argv: T.List[str]) -> int:
     against the BMIs it requires/provides, plus this target's own map. The BMI
     directory and suffix (--bmi-dir/--bmi-suffix) come from the compiler so the
     logical-name -> BMI mapping matches the compiler's own.
+
+    With --mapper-suffix it also writes a GCC module mapper per translation
+    unit (<primary-output><suffix>, an implicit input of the compile edge)
+    naming the TU's provides and direct imports: GCC has no per-class
+    module-search-path flag, so relocating BMIs into a class subdirectory
+    means enumerating them per TU. Transitive imports need no entries (GCC
+    reads them from the direct imports' CMIs), so the file is linear in the
+    TU's imports. Written copy-if-different: an unconditional rewrite would
+    recompile the whole target whenever any module in it changed.
     """
     parser = argparse.ArgumentParser(prog='depaccumulate --p1689')
     parser.add_argument('--dyndep', required=True, help='Output Ninja dyndep file.')
@@ -263,6 +307,14 @@ def run_p1689(argv: T.List[str]) -> int:
                              'provides pass the interface-extension check. Repeatable.')
     parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
                         help='A declared header unit as "<mode>:<spelling>". Repeatable.')
+    parser.add_argument('--mapper-suffix', default=None,
+                        help='Also write a GCC module mapper per TU at '
+                             '<primary-output> + this suffix, mapping its provides '
+                             'and direct imports to their BMI paths.')
+    parser.add_argument('--flat-bmi-dir', default=None,
+                        help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
+                             'imports resolve in; mappers reproduce the compiler\'s '
+                             'default header-unit CMI naming under it.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
     args = parser.parse_args(argv)
 
@@ -347,13 +399,21 @@ def run_p1689(argv: T.List[str]) -> int:
         dd.write('ninja_dyndep_version = 1\n\n')
         for rule in rules:
             obj = rule['primary-output']
-            if args.stamp_suffix is not None:
-                # The object edge's BMI side-output is declared statically by
-                # the backend; the cache copy belongs to the harvest edge.
-                outs: T.List[str] = []
-            else:
-                outs = [module_to_filename(p['logical-name'], args.bmi_dir, args.bmi_suffix)
-                        for p in rule.get('provides', [])]
+            maplines: T.List[str] = []
+            outs: T.List[str] = []
+            for prov in rule.get('provides', []):
+                name = prov['logical-name']
+                if args.stamp_suffix is not None:
+                    # The object edge's BMI side-output is declared statically
+                    # by the backend; the cache copy belongs to the harvest
+                    # edge. The mapper (a BMI-only variant here: GCC is the
+                    # only compiler taking both flags) sends the export to
+                    # that declared output, the rule's primary-output.
+                    maplines.append(f'{name} {obj}')
+                else:
+                    bmi = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
+                    outs.append(bmi)
+                    maplines.append(f'{name} {bmi}')
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 if _is_header_unit(req):
@@ -369,6 +429,9 @@ def run_p1689(argv: T.List[str]) -> int:
                                 f'{obj} imports header unit "{req["logical-name"]}", '
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
+                    if args.flat_bmi_dir is not None:
+                        maplines.append(f'{req["logical-name"]} ' + _flat_cmi_path(
+                            req['logical-name'], args.flat_bmi_dir, args.bmi_suffix))
                     continue
                 name = req['logical-name']
                 modfile = resolvable.get(name)
@@ -383,10 +446,17 @@ def run_p1689(argv: T.List[str]) -> int:
                     raise MesonException(
                         f'{obj} requires module "{name}", which is provided by no '
                         f'target in this build.{hint}')
+                # The compiler must be pointed at the class-cache BMI itself;
+                # `modfile` is the ordering handle, which under --stamp-suffix
+                # is a harvest stamp rather than a readable BMI.
+                maplines.append(f'{name} {module_to_filename(name, args.bmi_dir, args.bmi_suffix)}')
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
             dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
+            if args.mapper_suffix is not None:
+                _write_if_different(obj + args.mapper_suffix,
+                                    ''.join(line + '\n' for line in maplines))
 
     with open(args.provmap, 'w', encoding='utf-8') as pm:
         json.dump(provided, pm)
