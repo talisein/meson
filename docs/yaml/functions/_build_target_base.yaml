@@ -221,6 +221,34 @@ kwargs:
       `-Wno-experimental-header-units` in `cpp_args` to accept the feature's
       status and silence it.
 
+  cpp_module_interfaces:
+    type: array[str | file]
+    since: 1.12.0
+    default: []
+    description: |
+      Names which of this target's C++ sources are module *interface* units,
+      whatever their file extension. Each entry is one of the target's own
+      sources (a string or a [[files]] object); a path that names no source is
+      an error, not a silent no-op.
+
+      Meson otherwise identifies a module interface by its `.cppm`/`.ixx`
+      extension, never by reading the source, and that extension is also how
+      Clang and MSVC are told, per source, to compile a translation unit as an
+      interface unit (Clang `-x c++-module`; cl `/interface`) -- GCC infers it
+      from the source. A project that uses a plain extension such as `.cc` for
+      an `export module` therefore builds on GCC (with `cpp_modules: true`) but
+      could not build at all on Clang or MSVC. This keyword closes that gap: it
+      marks the listed sources as interface units regardless of extension, so
+      the same project is portable across the three compilers. Existing
+      `.cppm`/`.ixx` sources need no declaration.
+
+      For an internal (implementation) module partition -- `module pkg:impl;`
+      with no export -- use `cpp_internal_partitions` instead: cl compiles it
+      with `/internalPartition` and rejects an interface file extension for it.
+
+      Currently supported with GCC (>= 14), MSVC, and Clang (needs a
+      P1689-capable `clang-scan-deps`) on the Ninja backend only.
+
   include_directories:
     type: array[inc | str]
     description: |
