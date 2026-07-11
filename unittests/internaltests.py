@@ -500,6 +500,18 @@ class InternalTests(unittest.TestCase):
             msg = str(cm.exception)
             self.assertIn('exported by more than one target', msg)
             self.assertIn('dupmod', msg)
+            # A claim always appears with its contents (published by hard
+            # link): an owner file that exists but is empty is not a live
+            # claim -- the artifact of the pre-atomic write scheme that let
+            # two concurrent collates both take ownership -- and must be
+            # taken over rather than trusted.
+            owner = os.path.join(bmidir, 'dupmod.gcm.owner')
+            os.unlink(owner)
+            with open(owner, 'w', encoding='utf-8'):
+                pass
+            self.assertEqual(collate(d, bmidir, 'libb'), 0)
+            with open(owner, encoding='utf-8') as f:
+                self.assertTrue(f.read().endswith('libb-pm.json'))
             # A stale claim heals: once the owner's map no longer lists the
             # module (it moved away and the old provider re-collated), another
             # target may take the name over ...

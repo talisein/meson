@@ -233,36 +233,63 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
     gone (target removed; meson reconfigure runs `ninja -t cleandead`) or no
     longer lists the module (the module moved and the old provider
     re-collated).
+
+    The claim is published by hard-linking a fully written file, so its name
+    and contents appear atomically: collates run concurrently under ninja,
+    and a loser that could read a created-but-not-yet-written owner would
+    mistake the winner's live claim for a stale one and take it over.
     """
     owner_file = cache_bmi + '.owner'
     os.makedirs(os.path.dirname(owner_file), exist_ok=True)
-    try:
-        fd = os.open(owner_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        with open(owner_file, encoding='utf-8') as f:
-            owner = f.read()
-        if owner == provmap:
-            return
-        live = False
-        if os.path.exists(owner):
-            try:
-                with open(owner, encoding='utf-8') as f:
-                    live = name in json.load(f)
-            except (OSError, ValueError):
-                pass
-        if live:
-            raise MesonException(
-                f'Module "{name}" is exported by more than one target in this '
-                f'build ({os.path.dirname(owner)} and {os.path.dirname(provmap)}); '
-                f'both would write their BMI to {cache_bmi}. A module name may '
-                'have only one providing target per build tree. (If the module '
-                'recently moved between targets this claim may be stale; re-run '
-                'ninja once.)')
-        with open(owner_file, 'w', encoding='utf-8') as f:
-            f.write(provmap)
-        return
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+    tmp = f'{owner_file}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         f.write(provmap)
+    try:
+        while True:
+            try:
+                os.link(tmp, owner_file)
+                return
+            except FileExistsError:
+                pass
+            except OSError:
+                # Filesystem without hard links: fall back to exclusive
+                # create + write (a narrow non-atomic window, as before).
+                try:
+                    fd = os.open(owner_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    pass
+                else:
+                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                        f.write(provmap)
+                    return
+            with open(owner_file, encoding='utf-8') as f:
+                owner = f.read()
+            if owner == provmap:
+                return
+            live = False
+            if os.path.exists(owner):
+                try:
+                    with open(owner, encoding='utf-8') as f:
+                        live = name in json.load(f)
+                except (OSError, ValueError):
+                    pass
+            if live:
+                raise MesonException(
+                    f'Module "{name}" is exported by more than one target in this '
+                    f'build ({os.path.dirname(owner)} and {os.path.dirname(provmap)}); '
+                    f'both would write their BMI to {cache_bmi}. A module name may '
+                    'have only one providing target per build tree. (If the module '
+                    'recently moved between targets this claim may be stale; re-run '
+                    'ninja once.)')
+            # Stale: drop it and retry the atomic claim; a concurrent
+            # claimant may win the retry, and the next round then reads its
+            # live claim.
+            try:
+                os.unlink(owner_file)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.unlink(tmp)
 
 
 def run_p1689(argv: T.List[str]) -> int:
