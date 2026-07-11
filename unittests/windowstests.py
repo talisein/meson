@@ -639,6 +639,52 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 path = os.path.join(cache, d, name + suffix)
                 self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_modules_pch(self):
+        # PCH and modules in one target on cl. A module interface unit gets no
+        # PCH (the forced include would land before the module declaration);
+        # ordinary TUs keep it. cl's /scanDependencies force-includes the PCH
+        # header from disk, so a module target's scan needs the header's dir on
+        # the include path -- a non-module target resolves it from the baked
+        # .pch (this exercises that fix; the fixture declares no include_dirs).
+        self.build_and_check_modules('170 cpp modules pch', bmis=['modlib'])
+        # main.cpp (ordinary TU) uses the PCH (/Yu); modlib.cppm (interface)
+        # never does. Edge blocks: a build line plus its indented ARGS.
+        yu_main = yu_iface = False
+        block = []
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            ninja = f.read()
+        for line in ninja.splitlines() + ['end']:
+            if not line or not line[0].isspace():
+                bl = ' '.join(block)
+                if any(b.startswith('build ') and 'main.cpp' in b for b in block):
+                    yu_main |= '/Yu' in bl
+                if any(b.startswith('build ') and 'modlib.cppm' in b for b in block):
+                    self.assertNotIn('/Yu', bl)
+                block = [line]
+            else:
+                block.append(line)
+        self.assertTrue(yu_main, 'consumer TU should use the PCH (/Yu)')
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_stl_header_units(self):
+        # A real standard-library header as a header unit on cl: <vector>
+        # resolves to an absolute system path, built into the ifc cache and
+        # named on the consumer's command line (/headerUnit), so the default
+        # BMI-on-ARGS check is off. A define-divergent second consumer makes
+        # the build multi-class.
+        self.build_and_check_modules('171 stl header units',
+                                     ninja_args_not_contains=())
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_source_with_spaces(self):
+        # A module interface source whose file name contains a space: the BMI
+        # is named from the module name, but object-derived paths (.ddi and the
+        # BMI-only variant the divergent consumer demands) inherit the spaced
+        # basename and must survive it.
+        self.build_and_check_modules('172 module sources with spaces')
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()
         # and thus it's missing /utf-8 argument. Was that intentional? This needs
