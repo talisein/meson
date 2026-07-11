@@ -576,11 +576,11 @@ class CppModulesTestMixin:
         self.assert_variants_emit_no_objects()
 
     def check_gcc_module_mappers(self) -> None:
-        """Multi-class GCC builds resolve modules through per-TU mappers:
-        every module compile edge names its own object's mapper (a static
-        path whose scan-derived contents the collate writes), scan edges
-        carry none -- their command lines stay identical to a single-class
-        build -- and the mapper files exist on disk."""
+        """GCC builds resolve modules through per-TU mappers, whatever their
+        class topology: every module compile edge names its own object's
+        mapper (a static path whose scan-derived contents the collate
+        writes), scan edges carry none -- a scan resolves no named module --
+        and the mapper files exist on disk."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             lines = f.read().splitlines()
         rule = out = ''
