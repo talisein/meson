@@ -399,6 +399,12 @@ class InternalTests(unittest.TestCase):
             be._header_unit_class = {}
             be._target_header_unit_outputs = {}
             be._target_header_unit_consumer_args = {}
+            be._warned_unmappable_header_units = set()
+            be._dir_aliases = {}
+            # No build tree on disk, so the unmappable-header-unit check
+            # resolves nothing on the include path and stays quiet.
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = '/nonexistent'
             be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
             be.add_build = mock.MagicMock()
             cpp = mock.MagicMock()

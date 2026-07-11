@@ -808,14 +808,15 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected.
         # class_subdir is unused: GCC carries no cache dir on the command
-        # line. Per-class relocation rides the per-TU module mapper instead
-        # (get_module_mapper_args), which the backend adds to compile edges
-        # only -- a scan resolves no named modules, and header units stay in
-        # the flat default cache the mapper-less scan already finds.
+        # line. Every BMI a compile resolves, in any class, is named by the
+        # per-TU module mapper instead (get_module_mapper_args), which the
+        # backend adds to compile edges only -- a scan resolves no named
+        # modules, and header units stay in the flat default cache the
+        # mapper-less scan already finds.
         return [self._named_modules_flag(), '-Mno-modules']
 
     def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
-        # The only way to relocate GCC's BMI lookup: gcm.cache is resolved
+        # The only way to steer GCC's BMI lookup: gcm.cache is resolved
         # relative to the working directory, and there is no search-path
         # flag. The mapper file must enumerate the TU's provides and direct
         # imports (a mapping file disables the default module->CMI naming

@@ -631,6 +631,9 @@ class NinjaBackend(backends.Backend):
         # cannot name. Keyed by the unit, not the importer: the unit is what is
         # unnameable, and every target importing it fails the same way.
         self._warned_unmappable_header_units: T.Set[str] = set()
+        # Real directory -> space-free build-relative alias (None if the
+        # platform could not make one), for GCC header-unit naming.
+        self._dir_aliases: T.Dict[str, T.Optional[str]] = {}
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
@@ -1574,7 +1577,7 @@ class NinjaBackend(backends.Backend):
         provmap_file = self.get_provided_modules_file_for(target)
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
                                  'cpp_module_collate', sorted(ddis))
-        if cpp.get_id() == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+        if cpp.get_id() == 'gcc':
             # The per-TU module mappers the compile edges rebuild on. They
             # are written copy-if-different, so restat keeps an unchanged
             # mapper from recompiling its TU when a sibling module changes.
@@ -1603,10 +1606,12 @@ class NinjaBackend(backends.Backend):
         collator accepts them. For cl the declared header units are passed so
         the collator can flag an import of one this target never declared (cl
         reports header-unit requires from a cold scan; GCC cannot, so it is
-        omitted there). A multi-class GCC target's collate also writes the
-        per-TU module mappers (--mapper-suffix, in lockstep with the compile
-        edges' get_module_mapper_args paths) that relocate its BMIs into the
-        class cache subdir.
+        omitted there). A GCC target's collate also writes the per-TU module
+        mappers (--mapper-suffix, in lockstep with the compile edges'
+        get_module_mapper_args paths) its BMI lookups go through. A mapper
+        disables GCC's default module->CMI naming outright, so it must also
+        name the header units, which stay in the unkeyed cache the mapper-less
+        scan finds them in (--flat-bmi-dir); the two flags are inseparable.
         """
         depargs: T.List[str] = []
         for pm in dep_provmaps:
@@ -1619,7 +1624,7 @@ class NinjaBackend(backends.Backend):
             for p in sorted(self._module_interface_paths(target)
                             | self._internal_partition_paths(target)):
                 depargs += ['--interface-source', p]
-        if cpp.get_id() == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+        if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper',
                         '--flat-bmi-dir', cpp.get_module_cache_dir()]
         if cpp.get_id() == 'msvc':
@@ -1861,6 +1866,127 @@ class NinjaBackend(backends.Backend):
             + " The unit's BMI is built once, with the flags of the first declarer.")
 
     @staticmethod
+    def _has_space(s: str) -> bool:
+        return any(c.isspace() for c in s)
+
+    def _space_free_dir_alias(self, real_dir: str) -> T.Optional[str]:
+        """A space-free build-relative alias for a directory whose path
+        contains whitespace, or None when the platform cannot express one (the
+        caller then falls back to warn_on_unmappable_header_units).
+
+        GCC names a header unit by the *text* of the path it was resolved
+        through, and a module mapper cannot quote whitespace, so a unit under a
+        spaced path is unnameable. GCC does not resolve symlinks in that text
+        either, so routing the include path through a space-free link renames
+        the unit without moving the header.
+
+        POSIX: a symlink. Windows: None for now -- symlinks need privilege and
+        junctions need platform code.
+        """
+        try:
+            return self._dir_aliases[real_dir]
+        except KeyError:
+            pass
+        alias: T.Optional[str] = None
+        if not mesonlib.is_windows():
+            digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
+            rel = f'meson-private/imap/{digest}'
+            abs_alias = os.path.join(self.environment.get_build_dir(), rel)
+            try:
+                os.makedirs(os.path.dirname(abs_alias), exist_ok=True)
+                # Idempotent: regeneration must land on the same link, and a
+                # stale one (source dir moved) must be replaced, not kept.
+                if os.path.islink(abs_alias):
+                    if os.readlink(abs_alias) != real_dir:
+                        os.remove(abs_alias)
+                        os.symlink(real_dir, abs_alias)
+                else:
+                    os.symlink(real_dir, abs_alias)
+            except (OSError, NotImplementedError):
+                mlog.debug(f'Could not create a space-free alias for {real_dir!r}.')
+            else:
+                alias = rel
+        self._dir_aliases[real_dir] = alias
+        return alias
+
+    def _respell_dir(self, d: str) -> T.Optional[str]:
+        """A space-free spelling of a build-relative directory.
+
+        A directory under the source tree is respelled by substituting the
+        source root's alias for its prefix, keeping the tail intact. That
+        textual substitution is the whole point: a unit declared as
+        'foo/../hdr.h' and an importer in foo/ must produce the same key, which
+        they only do while they share one alias prefix. Aliasing each directory
+        separately would give the importer 'foo_alias/../hdr.h' and the unit
+        'root_alias/foo/../hdr.h' -- two names for one BMI, and neither finds
+        the other's.
+        """
+        if not self._has_space(d):
+            return d
+        root = self.build_to_src
+        if d == root or d.startswith(root + '/'):
+            alias = self._space_free_dir_alias(self.environment.get_source_dir())
+            return None if alias is None else alias + d[len(root):]
+        # Outside the source tree (an absolute include dir, or a generated
+        # source under a spaced build subdirectory): nothing traverses out of
+        # it, so it needs no prefix preserved and can be aliased whole.
+        return self._space_free_dir_alias(
+            os.path.normpath(os.path.join(self.environment.get_build_dir(), d)))
+
+    def _respell_path(self, p: str) -> T.Optional[str]:
+        # Only the directory matters: a quote-form import searches the
+        # includer's directory first, spelled as the source was spelled on the
+        # command line, so that is what lands in the key. A spaced basename is
+        # harmless -- it is never a mapper key.
+        head, tail = os.path.split(p)
+        if not head:
+            return p
+        alias = self._respell_dir(head)
+        return None if alias is None else os.path.join(alias, tail)
+
+    def _respell_include_args(self, args: T.List[str]) -> T.List[str]:
+        out: T.List[str] = []
+        it = iter(args)
+        for arg in it:
+            for flag in ('-I', '-isystem'):
+                if arg == flag:
+                    out.append(arg)
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        out.append(self._respell_dir(nxt) or nxt)
+                    break
+                if arg.startswith(flag):
+                    d = arg[len(flag):]
+                    out.append(flag + (self._respell_dir(d) or d))
+                    break
+            else:
+                out.append(arg)
+        return out
+
+    def _header_unit_spelling(self, hu: T.Union[File, str],
+                              compiler: Compiler) -> T.Tuple[str, str]:
+        """(mode, spelling) of a declared header unit as the edges spell it.
+
+        A File-declared unit carries a path, which on GCC is respelled through
+        the same alias its importers resolve through -- both sides must name
+        the unit identically or they name two different units.
+        """
+        mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+        if compiler.get_id() == 'gcc' and self._has_space(spelling):
+            spelling = self._respell_path(spelling) or spelling
+        return mode, spelling
+
+    def _target_needs_path_aliases(self, target: build.BuildTarget, compiler: Compiler) -> bool:
+        """Whether this target's include path and sources must be respelled
+        through space-free aliases: only GCC module targets that declare header
+        units. A named module's mapper key is its module name, which cannot
+        contain whitespace, so nothing else needs it.
+        """
+        return (compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc'
+                and bool(target.cpp_header_units)
+                and self.target_uses_p1689_cpp_modules(target))
+
+    @staticmethod
     def _include_dirs_of(args: T.Iterable[str]) -> T.List[str]:
         # The include search path of a compile command, in order, in both the
         # joined ('-Idir') and separated ('-I', 'dir') spellings.
@@ -1897,34 +2023,34 @@ class NinjaBackend(backends.Backend):
 
     def warn_on_unmappable_header_units(self, target: build.BuildTarget,
                                         args: T.Union['CompilerArgs', T.List[str]]) -> None:
-        """Warn when a GCC target that resolves its BMIs through a module
-        mapper declares a header unit the mapper cannot name.
+        """Warn when a GCC module mapper cannot name a declared header unit.
 
         A unit's mapper key is its resolved header path, and a mapper file's
-        key ends at the first space or tab with no quoting or escape form, so
-        a header under a path containing whitespace is unnameable and the
-        import fails at compile with 'no such module'. Reported once per unit
-        -- every target importing it fails the same way -- and only reachable
-        for a target on the mapper path: a single-class build carries no
-        mapper and resolves the same unit through GCC's default naming.
+        key ends at the first space or tab with no quoting or escape form, so a
+        header under a path containing whitespace is unnameable and the import
+        fails at compile with 'no such module'. Such a header is normally
+        reached through a space-free alias (_respell_dir), which leaves no
+        whitespace in the key at all; this fires only where that alias was
+        needed and the platform could not make one. Reported once per unit --
+        every target importing it fails the same way.
         """
         for hu in target.cpp_header_units:
-            _, spelling = self._parse_header_unit(hu, self.build_to_src)
+            _, spelling = self._header_unit_spelling(hu, target.compilers['cpp'])
             key = self._header_unit_mapper_key(args, spelling)
-            if key is None or not any(c.isspace() for c in key):
+            if key is None or not self._has_space(key):
                 continue
             if spelling in self._warned_unmappable_header_units:
                 continue
             self._warned_unmappable_header_units.add(spelling)
             mlog.warning(
                 f'Target {target.name!r} imports the C++ header unit {spelling!r}, '
-                f'which resolves to {key!r} -- a path containing whitespace. This '
-                "build compiles that target's modules through a GCC module mapper "
-                "(the build's BMI-affecting flags diverge between targets), and a "
-                'mapper cannot name a header unit whose path contains a space: the '
-                'compile will fail with "no such module". Move the header to a path '
-                'without spaces, or remove the flag divergence so the build needs no '
-                'mapper.', fatal=False)
+                f'which resolves to {key!r} -- a path containing whitespace. GCC '
+                'resolves modules through a module mapper, and a mapper cannot name '
+                'a header unit whose path contains a space: the compile will fail '
+                'with "no such module". Meson normally routes such a header through '
+                'a space-free alias, but could not create one here (creating it needs '
+                'symlink support, which Windows does not give unprivileged builds). '
+                'Move the source tree to a path without spaces.', fatal=False)
 
     def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
         cpp = target.compilers['cpp']
@@ -1932,15 +2058,15 @@ class NinjaBackend(backends.Backend):
 
     def _compute_bmi_class_registry(self) -> None:
         """Freeze the per-machine set of BMI equivalence classes before any
-        target is generated (compile args must not depend on generation
-        order). A machine with one class keeps the flat cache dir and
-        byte-identical command lines; with more, every class gets its own
-        subdirectory named by a digest of the class key. Only compilers with
-        supports_bmi_classes() -- or supports_bmi_class_header_units(), which
-        keys header units by the same registry -- participate; the rest keep
-        the divergence warning. The key is computed from
-        _generate_single_compile, which excludes get_module_compile_args, so
-        the chosen dir cannot feed back into the key.
+        target is generated (compile args must not depend on generation order).
+        A machine with one class keeps the flat cache dir; with more, every
+        class gets its own subdirectory named by a digest of the class key.
+        Only compilers with supports_bmi_classes() -- or
+        supports_bmi_class_header_units(), which keys header units by the same
+        registry -- participate; the rest keep the divergence warning. The key
+        is computed from _generate_single_compile, which excludes
+        get_module_compile_args, so the chosen dir cannot feed back into the
+        key.
         """
         per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
         for t in self.build.get_targets().values():
@@ -3785,7 +3911,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = self._generate_single_compile(target, compiler)
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
-            if cid == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+            if cid == 'gcc':
+                # Fires only where an alias was needed and could not be made:
+                # a successful respelling leaves no whitespace in the resolved
+                # path, which is exactly what the warning tests for.
                 self.warn_on_unmappable_header_units(target, args)
             outputs, consumer_args = self._provision_header_unit_edges(
                 compiler, target.cpp_header_units, args, class_key, class_subdir,
@@ -3820,7 +3949,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
         for hu in header_units:
-            mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+            mode, spelling = self._header_unit_spelling(hu, compiler)
             # One BMI per (mode, spelling) and, when classes are in play, per
             # class; within a key the first edge's args build the unit for
             # every consumer (see the provision_header_units docstring).
@@ -4230,6 +4359,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Finally add the private dir for the target to the include path. This
         # must override everything else and must be the final path added.
         commands += compiler.get_include_args(self.get_target_private_dir(target), False)
+        if self._target_needs_path_aliases(target, compiler):
+            # A header unit is named by the text of the include-path entry it
+            # was resolved through, so a spaced entry must be respelled here --
+            # the one place every consumer (compile, scan, header-unit edge and
+            # BMI variant) draws its include path from.
+            return self._respell_include_args(list(commands))
         return list(commands)
 
     # Returns a dictionary, mapping from each compiler src type (e.g. 'c', 'cpp', etc.) to a list of compiler arg strings
@@ -4408,6 +4543,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             raise AssertionError(f'BUG: broken generated source file handling for {src!r}')
         else:
             raise InvalidArguments(f'Invalid source type: {src!r}')
+        if self._target_needs_path_aliases(target, compiler):
+            # Respelling the include path is not enough: a quote-form import
+            # searches the includer's own directory first, spelled the way the
+            # source was spelled here, and that spelling becomes the unit's
+            # name. Respell before the edge is built, so the compile's $in, the
+            # scan and the recorded interface source all agree.
+            rel_src = self._respell_path(rel_src) or rel_src
         obj_basename = self.object_filename_from_source(target, compiler, src)
         rel_obj = os.path.join(self.get_target_private_dir(target), obj_basename)
         dep_file = compiler.depfile_for_object(rel_obj)
@@ -4540,16 +4682,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
                 if hu_consumer:
                     compile_commands = commands + hu_consumer
-                if self._bmi_class_subdir_for(target) is not None:
-                    # GCC's only per-class BMI relocation: a per-TU mapper,
-                    # written by the collate (whose scan-derived contents the
-                    # compile must rebuild on), named here by a static path.
-                    # [] on compilers that resolve by directory search, and
-                    # on every single-class build.
-                    mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
-                    if mapper_args:
-                        compile_commands = compile_commands + mapper_args
-                        element.add_dep(rel_obj + '.mapper')
+                mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
+                if mapper_args:
+                    compile_commands = compile_commands + mapper_args
+                    element.add_dep(rel_obj + '.mapper')
             element.add_item('ARGS', compile_commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)

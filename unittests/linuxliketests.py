@@ -809,13 +809,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The library provides a module, imported by an executable that merely
         # links it, plus partitions and an explicit-opt-in target; each test()
         # exercises a producer/consumer pair across the link. A single-class
-        # build must carry no module mapper anywhere: flat gcm.cache with
-        # byte-identical command lines is the zero-cost common case.
+        # build resolves its BMIs through per-TU mappers just as a multi-class
+        # one does -- only the directory the mappers name differs.
         self.build_and_check_modules('139 gcc cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
-                                           'kwmod', 'genmod', 'dot.mod.sub'],
-                                     ninja_not_contains=['-fmodule-mapper'])
+                                           'kwmod', 'genmod', 'dot.mod.sub'])
+        self.check_gcc_module_mappers()
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
     def test_gcc_cpp_module_interfaces(self):
@@ -1042,23 +1042,21 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # the unit quietly. (Clang builds one unit per class instead and is
         # covered by test_clang_header_unit_bmi_classes.)
         #
-        # Configure-only, and it cannot become a build test as it stands: the
-        # divergence makes this a multi-class build, so its GCC compiles carry
-        # a module mapper, and a header unit's mapper key is its resolved
-        # header path -- which here contains a space, from the fixture's own
-        # directory name. A mapper file key ends at the first whitespace and
-        # has no quoting or escape form, so the unit becomes unnameable and
-        # the import fails with 'no such module'. That is what the unmappable
-        # warning reports -- once for the unit, though all three importers
-        # fail. A single-class build (142, 173) carries no mapper and resolves
-        # the same unit through GCC's default naming, which is why those build.
+        # Configure-only: the warning describes a build that cannot succeed.
+        # The one shared unit BMI is built at prog20's c++20, and prog23's scan
+        # of it hard-errors ("language dialect differs"), so there is no
+        # build-success to assert until header units get a BMI per class.
         out = self.init(testdir)
         self.assertEqual(out.count('divergent BMI-affecting flags'), 1)
         self.assertIn("'util.h'", out)
         self.assertIn("'-std=c++23' only in 'prog23'", out)
         self.assertIn("'-std=c++20' only in ", out)
         self.assertNotIn("'prog20b'", out)
-        self.assertEqual(out.count('cannot name a header unit whose path contains a space'), 1)
+        # The unit's path contains a space (this fixture's own directory name),
+        # which a mapper key cannot hold -- but it is reached through a
+        # space-free alias, so the mapper names it fine and the unmappable
+        # warning must stay silent. Only the class divergence above is left.
+        self.assertNotIn('cannot name a header unit', out)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence_builds(self):
@@ -1112,12 +1110,12 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_module_class_topology_reconfigure(self):
         # A BMI-affecting option flip transitions the build single-class ->
         # multi-class -> single-class across reconfigures: class subdirs and
-        # BMI-only variants (and on GCC the per-TU mappers) appear and
-        # disappear over a build tree full of the other topology's artifacts.
-        # Every phase must build correctly -- the fixture's constexpr probe
-        # turns a stale or wrongly shared BMI into exit 1 -- and settle to a
-        # no-op, and the round trip must leave no residue in the generated
-        # build: the final build.ninja is byte-identical to the first.
+        # BMI-only variants appear and disappear over a build tree full of the
+        # other topology's artifacts. Every phase must build correctly -- the
+        # fixture's constexpr probe turns a stale or wrongly shared BMI into
+        # exit 1 -- and settle to a no-op, and the round trip must leave no
+        # residue in the generated build: the final build.ninja is
+        # byte-identical to the first.
         # Each reconfigure also runs ninja's restat+cleandead over the flip
         # (ninja >= 1.12), reaping the dead topology's declared outputs;
         # stale class-cache BMIs and owner claims stay on disk, inert, like
@@ -1131,8 +1129,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.bmi_variant_ids(), set())
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             single_class = f.read()
-        if gcc:
-            self.assertNotIn('-fmodule-mapper', single_class)
 
         self.setconf('-Dwithfoo=true')
         self.build(override_envvars=self.NO_CCACHE)
@@ -1224,6 +1220,31 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # No consumer imports utilmod, so its BMI variant is never demanded:
         # variant edges are only pulled in through importers' dyndeps.
         self.assertEqual(out.count('Precompiling C++ module BMI'), 0, out)
+        self.assertBuildIsNoop()
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
+    def test_gcc_module_mapper_incrementality(self):
+        # The same guard on a single-class build, which reaches the mappers
+        # only now that GCC always carries one. Editing pkg:impl must dirty
+        # its own TU, the primary interface that imports it, and the exe that
+        # imports the primary -- but not pkg:part, whose mapper the collate
+        # rewrites byte-identically. Without restat + copy-if-different every
+        # TU of the target would recompile.
+        testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
+        srcdir = self.copy_srcdir(testdir)
+        self.init(srcdir)
+        self.build(override_envvars=self.NO_CCACHE)
+        impl = os.path.join(srcdir, 'pkg-impl.cppm')
+        with open(impl, encoding='utf-8') as f:
+            content = f.read()
+        with open(impl, 'w', encoding='utf-8') as f:
+            f.write(content.replace('return 10', 'return 1010'))
+        out = self.build(override_envvars=self.NO_CCACHE)
+        # Match the compile line, not ninja's 'explain' chatter, which names
+        # pkg-part as dirty for the link while never recompiling it.
+        self.assertNotIn('Compiling C++ object libpkg.a.p/pkg-part.cppm.o', out,
+                         'an unchanged mapper recompiled its TU')
+        self.assertEqual(out.count('Compiling C++ object'), 3, out)
         self.assertBuildIsNoop()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='clang')
@@ -1348,10 +1369,52 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # links and runs. GCC maps units via the module mapper, so the default
         # check that no BMI path appears on a command line applies in full.
         self.build_and_check_modules('142 gcc header units',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent BMI-affecting flags',
+                                                         'cannot name a header unit'])
+        self.check_gcc_module_mappers()
+        # The mapper must name the units: a mapping file disables GCC's default
+        # module->CMI naming outright, so a unit left out of it would not be
+        # found even though it sits at exactly the path GCC would have derived
+        # itself. This fixture's own path contains spaces, which a mapper key
+        # cannot hold, so each unit is named through the space-free alias -- and
+        # the BMI it points at is the one the (mapper-less) unit edge wrote.
+        with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
+            mapper = f.read().splitlines()
+        for unit in ('util.h', 'angleutil.h'):
+            pat = rf'\./meson-private/imap/[0-9a-f]+/{re.escape(unit)} \S+\.gcm'
+            line = next((l for l in mapper if re.fullmatch(pat, l)), None)
+            self.assertIsNotNone(line, f'no aliased mapping for {unit} in {mapper}')
+            bmi = line.split(' ', 1)[1]
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
+                            f'mapper names {bmi}, which the unit edge did not write')
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_alias_unavailable_warns(self):
+        # Where the platform cannot express a space-free alias (no symlink
+        # support -- today, Windows), a header unit under a spaced path stays
+        # unnameable in a mapper and the compile cannot find it. Meson must say
+        # so at configure rather than emit a mapper that fails later. Block the
+        # alias directory with a regular file to make its creation fail the way
+        # such a platform would.
+        os.makedirs(os.path.join(self.builddir, 'meson-private'), exist_ok=True)
+        with open(os.path.join(self.builddir, 'meson-private', 'imap'), 'w',
+                  encoding='utf-8') as f:
+            f.write('')
+        out = self.init(os.path.join(self.unit_test_dir, '142 gcc header units'))
+        self.assertIn('cannot name a header unit whose path contains a space', out)
+        # All or nothing: with no alias, nothing is respelled -- a half-aliased
+        # target would have the unit edge and its importers naming the unit
+        # differently, which is worse than the diagnosed failure.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('meson-private/imap/', f.read())
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_rebuild_on_user_header_change(self):
+        # Also the depfile-through-the-alias check: this fixture's units are
+        # reached through a space-free symlink, so every path ninja records for
+        # them points through it. Editing the header at its real path must still
+        # dirty the unit and its importers -- ninja stats the alias, which
+        # follows to the real file's mtime.
         self.check_module_rebuild('142 gcc header units', edit_file='util.h',
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
@@ -1435,8 +1498,27 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # and BMI of the same file.
         self.new_builddir()
         self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
-                                     ninja_args_not_contains=())
+                                     ninja_args_not_contains=(),
+                                     setup_not_contains=['cannot name a header unit'])
         self.assertEqual(len(self.header_unit_digests('header.hpp')), 2)
+        if self.host_cpp_compiler().get_id() == 'gcc':
+            # This fixture's path contains spaces, so its units are named
+            # through a space-free alias -- and it is the one fixture that
+            # combines a subdirectory importer with an upward-relative spelling,
+            # which is what pins the alias down to a *prefix* substitution.
+            # foo/aliased.cpp's key must keep the '..' verbatim: the declared
+            # alias unit is spelled through the same aliased root, so the two
+            # meet only while the traversal survives. Aliasing foo/ separately,
+            # or normalizing the path, gives the importer and the unit edge two
+            # different names for one BMI and neither finds the other's.
+            self.check_gcc_module_mappers()
+            with open(os.path.join(self.builddir, 'prog.p', 'foo_aliased.cpp.o.mapper'),
+                      encoding='utf-8') as f:
+                lines = f.read().splitlines()
+            key, _, bmi = lines[0].partition(' ')
+            self.assertRegex(key, r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$')
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
+                            f'mapper names {bmi}, which the unit edge did not write')
 
         # Without the alias declaration the two compilers diverge: GCC keys
         # CMIs by the textual resolved name (no normalization), so the import
