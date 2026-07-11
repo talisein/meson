@@ -132,6 +132,17 @@ def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
+def _source_key(path: str) -> str:
+    """Canonical key for comparing a P1689 source-path against a declared
+    interface source. cl writes an absolute (and, on Windows, lowercased)
+    source-path in its scan output while the backend passes --interface-source
+    build-relative, so both are resolved to an absolute path and case-folded
+    (a no-op on case-sensitive filesystems). The collate runs with the build
+    directory as cwd, which both relative forms are relative to.
+    """
+    return os.path.normcase(os.path.abspath(path))
+
+
 def _flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 
@@ -350,7 +361,7 @@ def run_p1689(argv: T.List[str]) -> int:
     # requires from a cold scan (with a lookup-method), so this check is
     # effective for MSVC; GCC fails earlier, at the scan itself.
     declared_units = {tuple(hu.split(':', 1)) for hu in args.header_units}
-    interface_sources = {os.path.normpath(p) for p in args.interface_sources}
+    interface_sources = {_source_key(p) for p in args.interface_sources}
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -384,7 +395,7 @@ def run_p1689(argv: T.List[str]) -> int:
                 src = prov.get('source-path')
                 if src is not None \
                         and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'} \
-                        and os.path.normpath(src) not in interface_sources:
+                        and _source_key(src) not in interface_sources:
                     raise MesonException(
                         f'{src} provides the C++ module "{name}" but is not marked a '
                         'module interface: Clang only emits a module BMI for a source '

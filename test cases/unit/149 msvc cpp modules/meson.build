@@ -11,8 +11,12 @@ prog = executable('prog', 'main.cpp', link_with: modlib)
 test('prog', prog)
 
 # Module partitions: pkg:part must land in ifc.cache/pkg-part.ifc and be built
-# before the primary interface that re-exports it.
-pkglib = static_library('pkg', 'pkg.ixx', 'pkg-part.ixx')
+# before the primary interface that re-exports it. pkg-impl is an internal
+# (implementation) partition: cl needs /internalPartition (not /interface) and
+# rejects an interface extension for it, so it is a plain .cpp declared via
+# cpp_internal_partitions.
+pkglib = static_library('pkg', 'pkg.ixx', 'pkg-part.ixx', 'pkg-impl.cpp',
+  cpp_internal_partitions: ['pkg-impl.cpp'])
 pkgprog = executable('pkgprog', 'pkgmain.cpp', link_with: pkglib)
 test('pkgprog', pkgprog)
 

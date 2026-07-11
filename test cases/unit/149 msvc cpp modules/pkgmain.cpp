@@ -1,5 +1,5 @@
 import pkg;
 
 int main() {
-    return pkg_value() == 6 ? 0 : 1;
+    return pkg_value() == 16 ? 0 : 1;
 }
