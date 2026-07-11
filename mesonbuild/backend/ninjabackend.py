@@ -1479,34 +1479,34 @@ class NinjaBackend(backends.Backend):
         self.add_build(elem)
 
     @staticmethod
-    def get_clang_pcm_file_for(objfile: str) -> str:
-        # Bare -fmodule-output writes the interface's BMI at the object path
-        # with .o -> .pcm (source-keyed, so knowable at generation time).
-        return objfile.rsplit('.', 1)[0] + '.pcm'
+    def get_bmi_file_for(compiler: Compiler, objfile: str) -> str:
+        # The source-keyed BMI standing at the object path (extension swapped
+        # for the compiler's BMI suffix), so knowable at generation time: what
+        # clang's bare -fmodule-output writes next to the object, and what a
+        # BMI-only variant edge declares as its output.
+        return objfile.rsplit('.', 1)[0] + compiler.get_module_bmi_suffix()
 
     @staticmethod
-    def get_clang_pcm_stamp_for(objfile: str) -> str:
+    def get_bmi_stamp_for(compiler: Compiler, objfile: str) -> str:
         # The harvest edge's declared output. The collator derives the same
         # path from the .ddi's primary-output (run_harvest/--stamp-suffix must
         # stay in lockstep with this).
-        return objfile + '.pcm.stamp'
+        return objfile + compiler.get_module_bmi_suffix() + '.stamp'
 
     def generate_cpp_module_harvest(self, target: build.BuildTarget, compiler: Compiler,
                                     rel_obj: str, class_subdir: T.Optional[str] = None) -> None:
-        """Publish a Clang module interface's BMI into the shared cache
-        (into ``class_subdir`` of it, for per-class builds and variants).
-
-        Clang self-names BMIs after the source, not the module, so a
-        build-time step must copy obj-side <src>.pcm to
-        pcm.cache/<module-name>.pcm; the name is read from the interface's
-        already-scanned .ddi. The edge's command line is static -- the module
-        name never appears on it -- and its stamp is what consumers' dyndep
-        entries order against.
+        """Publish a source-keyed BMI into the shared cache (into
+        ``class_subdir`` of it, for per-class builds and variants) under the
+        module's own name, read from the interface's already-scanned .ddi.
+        Used by Clang's own pipeline (which self-names BMIs after the source)
+        and by BMI-only variants on any compiler. The edge's command line is
+        static -- the module name never appears on it -- and its stamp is what
+        consumers' dyndep entries order against.
         """
         self.generate_cpp_module_harvest_rule()
-        pcm = self.get_clang_pcm_file_for(rel_obj)
+        pcm = self.get_bmi_file_for(compiler, rel_obj)
         ddi = self.get_ddi_file_for(rel_obj)
-        stamp = self.get_clang_pcm_stamp_for(rel_obj)
+        stamp = self.get_bmi_stamp_for(compiler, rel_obj)
         elem = NinjaBuildElement(self.all_outputs, stamp, 'cpp_module_harvest', [pcm, ddi])
         elem.add_item('PCM', pcm)
         elem.add_item('DDI', ddi)
@@ -1579,7 +1579,7 @@ class NinjaBackend(backends.Backend):
 
         Clang BMIs reach the shared cache via harvest edges, so the dyndep orders
         consumers against the harvest stamps (--stamp-suffix, in lockstep with
-        get_clang_pcm_stamp_for), and the collator rejects a provide from a source
+        get_bmi_stamp_for), and the collator rejects a provide from a source
         Clang did not compile as an interface unit -- extension-less interfaces
         declared via cpp_module_interfaces are passed as source paths so the
         collator accepts them. For cl the declared header units are passed so
@@ -1591,7 +1591,7 @@ class NinjaBackend(backends.Backend):
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
-            depargs += ['--stamp-suffix', '.pcm.stamp']
+            depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
             for p in sorted(self._module_interface_paths(target)):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'msvc':
@@ -1622,12 +1622,13 @@ class NinjaBackend(backends.Backend):
                                    class_key: T.Tuple[str, ...]) -> BmiVariant:
         """Synthesize, once per (provider, BMI class), a BMI-only
         recompilation of the provider's module interface units under that
-        class: same scan/collate/harvest pipeline as the provider, but the
-        compiles use --precompile, emit BMIs into the class's cache subdir
-        and produce no objects. Consumers keep linking the provider's own
-        objects, so the one-provider-per-module-name rule is untouched. The
-        variant is not a target: its edges hang off consuming collates and
-        dyndeps only, so a variant nobody links is never built.
+        class: the same scan/collate/harvest pipeline, but the compiles use
+        the compiler's BMI-only mode (clang --precompile, cl /ifcOnly), emit
+        BMIs into the class's cache subdir and produce no objects. Consumers
+        keep linking the provider's own objects, so the
+        one-provider-per-module-name rule is untouched. The variant is not a
+        target: its edges hang off consuming collates and dyndeps only, so a
+        variant nobody links is never built.
 
         Every recorded interface is compiled: Meson has no module visibility,
         so by convention all interfaces are importable. If visibility is ever
@@ -1668,29 +1669,39 @@ class NinjaBackend(backends.Backend):
         if cpp.get_id() == 'clang' and '-fmodules' in args:
             # Same shape as the compile-edge dance in generate_single_compile.
             modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
+        if cpp.get_id() == 'msvc':
+            # The variant rule names its own explicit-file /ifcOutput; drop
+            # the directory pair, keep /ifcSearchDir for the class cache
+            # lookup (the variant's own imports resolve there).
+            i = modargs.index('/ifcOutput')
+            del modargs[i:i + 2]
         args += modargs
         args += hu_args
 
         self.generate_bmi_variant_compile_rule(cpp)
         rulename = self.get_compiler_rule_name('cpp', cpp.for_machine, 'BMI_VARIANT')
         recs = self._target_module_interfaces[provider.get_id()]
+        # cl and clang need each interface unit flagged explicitly, mirroring
+        # the compile-edge split in generate_single_compile.
+        iface_args = ['/interface', '/TP'] if cpp.get_id() == 'msvc' else ['-x', 'c++-module']
         ddis: T.List[str] = []
         for rec in recs:
             # The BMI is the edge's primary output, standing where the object
             # stands in the provider's own pipeline: the scan's .ddi names it
             # as primary-output, so the variant's dyndep and harvest stamp
             # derive from it exactly as they do from an object path.
-            vpcm = self.get_clang_pcm_file_for(os.path.join(private_dir, rec.obj_basename))
+            vpcm = self.get_bmi_file_for(cpp, os.path.join(private_dir, rec.obj_basename))
             header_deps = list(rec.header_deps)
             order_deps: T.List[FileOrString] = list(rec.order_deps)
             self.generate_cpp_module_scan(provider, cpp, rec.rel_src, vpcm,
-                                          args + ['-x', 'c++-module'],
+                                          args + iface_args,
                                           header_deps=header_deps, order_deps=order_deps,
                                           header_unit_override=hu_outputs)
             ddis.append(self.get_ddi_file_for(vpcm))
             elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
             elem.add_item('ARGS', args)
-            elem.add_item('DEPFILE', vpcm + '.d')
+            if cpp.get_id() == 'clang':
+                elem.add_item('DEPFILE', vpcm + '.d')
             self.add_header_deps(provider, elem, header_deps)
             elem.add_orderdep(self.order_deps_to_strings(provider, order_deps))
             elem.add_dep(hu_outputs)
@@ -1718,9 +1729,16 @@ class NinjaBackend(backends.Backend):
         depargs: T.List[str] = []
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
-        depargs += ['--stamp-suffix', '.pcm.stamp']
+        depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
         for rec in recs:
             depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
+        if cpp.get_id() == 'msvc':
+            # The provider's declared units, as in _module_collate_depargs:
+            # cl reports header-unit requires from the variant's scans too,
+            # and the collator checks them against the declared set.
+            for hu in provider.cpp_header_units:
+                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+                depargs += ['--header-unit', f'{mode}:{spelling}']
         elem.add_item('DEPARGS', depargs)
         elem.add_item('name', vid)
         self.add_build(elem)
@@ -3433,13 +3451,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.add_rule(rule)
 
     def generate_cpp_module_harvest_rule(self) -> None:
-        # Clang writes a module interface's BMI next to the object, named
-        # after the source; the harvest edge publishes it into the shared
-        # cache under the module's own name, read from the interface's .ddi at
-        # build time. Ordering rides the stamp: consumers' dyndep inputs point
-        # at it, so the cache path itself never needs to enter Ninja's graph.
-        # Registered lazily (with the first harvest edge) so builds without
-        # Clang modules see no new rule.
+        # Publishes a source-keyed BMI into the shared cache under the
+        # module's own name, read from the interface's .ddi at build time.
+        # Ordering rides the stamp: consumers' dyndep inputs point at it, so
+        # the cache path itself never needs to enter Ninja's graph. Registered
+        # lazily (with the first harvest edge) so builds without a harvesting
+        # pipeline see no new rule.
         rulename = 'cpp_module_harvest'
         if self.ninja.has_rule(rulename):
             return
@@ -3452,19 +3469,26 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_rule(rule)
 
     def generate_bmi_variant_compile_rule(self, compiler: Compiler) -> None:
-        # Compiles a module interface unit straight to a BMI, no object
-        # (clang --precompile). -x c++-module covers extension-less declared
-        # interfaces. Registered lazily with the first variant; compilers gain
-        # a command line here when their supports_bmi_classes() flips.
+        # Compiles a module interface unit straight to a BMI, never an object
+        # (clang --precompile, cl /ifcOnly). The interface-unit flags cover
+        # extension-less declared interfaces. Registered lazily with the first
+        # variant; compilers gain a command line here when their
+        # supports_bmi_classes() flips.
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'BMI_VARIANT')
         if self.ninja.has_rule(rulename):
             return
-        assert compiler.get_id() == 'clang', 'only Clang supports BMI classes today'
         command = compiler.get_exelist()
+        description = 'Precompiling C++ module BMI $out'
+        if compiler.get_id() == 'msvc':
+            args = ['$ARGS'] + NinjaCommandArg.list(
+                ['/interface', '/TP', '/showIncludes', '/ifcOnly',
+                 '/ifcOutput', '$out', '/c', '$in'], Quoting.none)
+            self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
+            return
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
         args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
         self.add_rule(NinjaRule(rulename, command, args,
-                                'Precompiling C++ module BMI $out', deps='gcc', depfile='$DEPFILE'))
+                                description, deps='gcc', depfile='$DEPFILE'))
 
     def generate_cpp_module_scan_rule(self, compiler: Compiler) -> None:
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
@@ -4340,17 +4364,22 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             element.add_item('ARGS', compile_commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
-        # A Clang module interface's compile also writes the source-keyed BMI
-        # (-fmodule-output); declare it so Ninja knows its producer, and
-        # publish it into the shared cache with a harvest edge.
-        clang_miu = False
+        # Module interface units are remembered per target so a BMI-only
+        # variant can recompile the same set under another BMI class. A Clang
+        # interface's compile also writes the source-keyed BMI
+        # (-fmodule-output): declare it so Ninja knows its producer, and
+        # publish it into the shared cache with a harvest edge. cl needs
+        # neither -- its directory /ifcOutput writes the BMI straight into the
+        # class cache and the dyndep declares it there.
+        is_miu = False
         if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
-                and compiler.get_id() == 'clang':
+                and compiler.supports_bmi_classes():
             miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            clang_miu = miu_suffix in {'cppm', 'ixx'} \
+            is_miu = miu_suffix in {'cppm', 'ixx'} \
                 or self._is_declared_module_interface(target, src)
+        clang_miu = is_miu and compiler.get_id() == 'clang'
         if clang_miu:
-            element.implicit_outfilenames.append(self.get_clang_pcm_file_for(rel_obj))
+            element.implicit_outfilenames.append(self.get_bmi_file_for(compiler, rel_obj))
         # Declared header units are implicit inputs: their BMIs must exist
         # before this compile (in gcm.cache for GCC, at the path we chose for
         # MSVC), and a source that imports one must recompile when its BMI
@@ -4363,12 +4392,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # dialect.
         self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
                                       header_deps=header_deps, order_deps=order_deps)
-        if clang_miu:
-            # Remember every source compiled as an interface unit (extension
-            # or declared), so a BMI-only variant can recompile the same set
-            # under another BMI class.
+        if is_miu:
             self._target_module_interfaces[target.get_id()].append(ModuleInterfaceSource(
                 rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps)))
+        if clang_miu:
             self.generate_cpp_module_harvest(target, compiler, rel_obj,
                                              self._bmi_class_subdir_for(target))
         assert isinstance(rel_obj, str)

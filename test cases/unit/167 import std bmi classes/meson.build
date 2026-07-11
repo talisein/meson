@@ -7,6 +7,6 @@ project('import std bmi classes', 'cpp', default_options: ['cpp_std=c++23'])
 std = dependency('std')
 prog23 = executable('prog23', 'main23.cpp', dependencies: std)
 prog26 = executable('prog26', 'main26.cpp', dependencies: std,
-                    override_options: ['cpp_std=c++26'])
+                    override_options: ['cpp_std=' + get_option('divergent_std')])
 test('prog23', prog23)
 test('prog26', prog26)

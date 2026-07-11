@@ -453,6 +453,14 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # interface; each test() exercises a producer/consumer pair.
         self.build_and_check_modules('149 msvc cpp modules',
                                      bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'])
+        # A single-class build keeps the flat ifc.cache (bmis= above asserted
+        # the flat BMI paths) and plain compile edges: module-resolution args
+        # ride /ifcSearchDir, so nothing pushes a compile into a response file.
+        self.assertEqual(self.bmi_class_dirs(), [])
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build '):
+                    self.assertNotIn('COMPILER_RSP', line)
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
     def test_msvc_cpp_module_interfaces(self):
@@ -515,6 +523,64 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         with self.assertRaises(subprocess.CalledProcessError) as cm:
             self.build()
         self.assertIn('not declared in this target', cm.exception.stdout)
+
+    # MSVC has no cpp_std=c++23/c++26, so the shared two-class fixtures (which
+    # default to c++23 parents) are driven at c++latest/c++20 instead; the
+    # class split is the same. Subproject dialects are pinned explicitly
+    # rather than left to the subproject's default_options, so the tests do
+    # not depend on how command-line options and subproject defaults interact.
+    _MSVC_TWO_CLASS_ARGS = ['-Dcpp_std=c++latest', '-Dmodlib:cpp_std=c++20']
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_bmi_classes(self):
+        # The canonical two-class fixture: subproject provider at c++20,
+        # consumers at c++latest (variant) and c++20 (reuse).
+        self.check_bmi_classes('166 bmi classes', module_name='modlib',
+                               provider_lib='libmodlib.a',
+                               consumers=('prog23.exe', 'prog20.exe'),
+                               expected_targets=('modlib', 'prog20', 'prog23'),
+                               extra_args=self._MSVC_TWO_CLASS_ARGS)
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='msvc')
+    def test_msvc_import_std_bmi_classes(self):
+        # import std at two dialects (c++20 base, c++latest divergent; cl
+        # supports import std from /std:c++20). One __meson_cxx_std target
+        # carries the only std objects -- its std.obj is real code on MSVC,
+        # so a duplicate would be a genuine ODR violation, not a near-empty
+        # initializer. compat_in_all_classes: cl writes the provider class's
+        # BMIs eagerly via directory /ifcOutput.
+        self.check_import_std_bmi_classes('167 import std bmi classes',
+                                          progs=('prog23.exe', 'prog26.exe'),
+                                          compat_progs=('prog26.exe',),
+                                          compat_in_all_classes=True,
+                                          extra_args=['-Dcpp_std=c++20',
+                                                      '-Ddivergent_std=c++latest'])
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_header_unit_bmi_classes(self):
+        # Three declarers of util.h in two dialects: the same-class pair must
+        # share one unit BMI, the divergent declarer gets its own, each
+        # consumer names only its own class's, and modlib's BMI-only variant
+        # imports the divergent class's unit, not the provider's. Every
+        # program constant-evaluates the unit's dialect probe, so a wrongly
+        # shared BMI is a failing test run, not merely a build failure.
+        self.build_and_check_modules('169 header unit bmi classes',
+                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     ninja_args_not_contains=(),
+                                     extra_args=self._MSVC_TWO_CLASS_ARGS)
+        units = self.header_unit_digests('util.h')
+        self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
+        per_prog = {p: self.header_unit_digests('util.h', edges=f'{p}.exe.p/')
+                    for p in ('prog23', 'prog20', 'prog20b')}
+        for prog, digests in per_prog.items():
+            self.assertEqual(len(digests), 1, f'{prog} must name exactly one util.h BMI, got {digests}')
+        self.assertEqual(per_prog['prog20'], per_prog['prog20b'],
+                         'same-class declarers must share one unit BMI')
+        self.assertNotEqual(per_prog['prog23'], per_prog['prog20'],
+                            'divergent classes must not share a unit BMI')
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
+                         "modlib's variant must import the divergent class's unit BMI")
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

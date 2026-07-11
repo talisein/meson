@@ -1335,10 +1335,15 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         flag = '/headerUnit:quote' if mode == 'user' else '/headerUnit:angle'
         return [flag, f'{spelling}={bmi_path}']
 
+    def supports_bmi_classes(self) -> bool:
+        # Only consulted inside the P1689 pipeline (cl >= 19.32), where
+        # /ifcSearchDir and /ifcOnly are always available. clang-cl never
+        # reaches P1689.
+        return True
+
     def supports_bmi_class_header_units(self) -> bool:
         # Same explicit-path resolution as clang (/headerUnit above), so the
-        # backend's per-class unit path works unchanged; verified on Windows
-        # in the MSVC BMI-class stage. clang-cl never reaches P1689.
+        # backend's per-class unit path works unchanged.
         return True
 
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):

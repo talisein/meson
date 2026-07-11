@@ -43,7 +43,7 @@ Token vocabulary (the API for the C++ module test series):
     Divergent BMI equivalence classes work rather than warn: Meson gives
     each class its own cache subdirectory and synthesizes BMI-only variants
     of shared module providers (``Compiler.supports_bmi_classes()``, plus
-    the ``bmionly`` probe). Currently Clang only.
+    the ``bmionly`` probe). Currently Clang, and MSVC from cl 19.32.
 """
 
 from __future__ import annotations
@@ -413,11 +413,12 @@ class CppModulesTestMixin:
 
     def link_edge(self, target: str) -> str:
         """The given output's build.ninja edge block (its 'build <target>:'
-        line plus indented continuations), or '' when absent."""
+        line plus indented continuations), or '' when absent. The space form
+        covers implicit outputs ('build prog.exe | prog.pdb: ...')."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             lines = f.read().splitlines()
         for i, line in enumerate(lines):
-            if line.startswith(f'build {target}:'):
+            if line.startswith(f'build {target}:') or line.startswith(f'build {target} '):
                 block = [line]
                 for nxt in lines[i + 1:]:
                     if not nxt.startswith((' ', '\t')):
@@ -447,10 +448,12 @@ class CppModulesTestMixin:
 
     def bmi_variant_ids(self) -> T.Set[str]:
         """The distinct BMI-only variant private dirs named in build.ninja
-        (one per provider x divergent class)."""
+        (one per provider x divergent class). Tolerates either path separator
+        and normalizes to '/' so counts are separator-independent."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             contents = f.read()
-        return set(re.findall(r'meson-private/[^/\s]*@bmi@[0-9a-f]{12}', contents))
+        return {m.replace('\\', '/')
+                for m in re.findall(r'meson-private[/\\][^/\\\s]*@bmi@[0-9a-f]{12}', contents)}
 
     def header_unit_digests(self, basename: str, *, edges: str = '') -> T.Set[str]:
         """The distinct digests of 'meson-private/header-units/<basename>.<digest>.*'
@@ -458,7 +461,7 @@ class CppModulesTestMixin:
         compilers, per BMI class. `edges` restricts the search to edge blocks
         whose 'build' line contains it (e.g. 'prog.p/' for one target's
         compiles and scans, '@bmi@' for BMI-variant edges)."""
-        pattern = re.compile(r'header-units/' + re.escape(basename) + r'\.([0-9a-f]{16})\.')
+        pattern = re.compile(r'header-units[/\\]' + re.escape(basename) + r'\.([0-9a-f]{16})\.')
         digests: T.Set[str] = set()
         wanted = False
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
@@ -476,9 +479,21 @@ class CppModulesTestMixin:
         return sorted(e for e in os.listdir(cache)
                       if os.path.isdir(os.path.join(cache, e)))
 
+    def assert_variants_emit_no_objects(self) -> None:
+        """A BMI-only variant must never produce an object file: consumers
+        link the original provider's objects, and a second copy of a module's
+        initializer or vague-linkage entities in one link is an ODR
+        violation."""
+        for root, _, files in os.walk(os.path.join(self.builddir, 'meson-private')):
+            if '@bmi@' not in root:
+                continue
+            objs = [f for f in files if f.endswith(('.o', '.obj'))]
+            self.assertEqual(objs, [], f'BMI variant dir {root} must not contain objects')
+
     def check_bmi_classes(self, testdir_name: str, *, module_name: str,
                           provider_lib: str, consumers: T.Sequence[str],
-                          expected_targets: T.Sequence[str]) -> None:
+                          expected_targets: T.Sequence[str],
+                          extra_args: T.Sequence[str] = ()) -> None:
         """The canonical two-class fixture: one module provider, one consumer
         in the provider's own BMI class, one divergent consumer. Divergence
         must build and run without the Stage-1 warning, with exactly one
@@ -487,7 +502,7 @@ class CppModulesTestMixin:
         one variant build-wide -- the compatible consumer must reuse the
         provider's BMI, not spawn a redundant variant."""
         cpp = self.host_cpp_compiler()
-        self.build_and_check_modules(testdir_name,
+        self.build_and_check_modules(testdir_name, extra_args=extra_args,
                                      setup_not_contains=['divergent BMI-affecting flags'])
         bmi = module_name.replace(':', '-') + cpp.get_module_bmi_suffix()
         cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
@@ -508,17 +523,26 @@ class CppModulesTestMixin:
             self.assertEqual(self.count_on_link_line(t, provider_lib), 1,
                              f'{t} must link the real provider exactly once')
             self.assertNotIn('@bmi@', self.link_edge(t), f'{t} must not link variant artifacts')
+        self.assert_variants_emit_no_objects()
 
     def check_import_std_bmi_classes(self, testdir_name: str, *, progs: T.Sequence[str],
-                                     compat_progs: T.Sequence[str] = ()) -> None:
+                                     compat_progs: T.Sequence[str] = (),
+                                     compat_in_all_classes: bool = False,
+                                     extra_args: T.Sequence[str] = ()) -> None:
         """Two dialects sharing dependency('std') in one build: one
         __meson_cxx_std target provides the objects for both, each class dir
-        carries its own std BMI set (std.compat only where imported), and
-        exactly one variant exists -- all through the generic variant rule,
-        with no std-specific machinery."""
+        carries its own std BMI set (std.compat only where imported, except
+        compat_in_all_classes below), and exactly one variant exists -- all
+        through the generic variant rule, with no std-specific machinery.
+
+        compat_in_all_classes: on MSVC the provider's compile writes its
+        class's BMI eagerly (directory /ifcOutput), so std.compat appears in
+        the provider's class dir whether or not anything there imports it;
+        Clang's harvest is lazily pulled by importers only.
+        """
         cpp = self.host_cpp_compiler()
         suffix = cpp.get_module_bmi_suffix()
-        self.build_and_check_modules(testdir_name,
+        self.build_and_check_modules(testdir_name, extra_args=extra_args,
                                      setup_not_contains=['divergent BMI-affecting flags'])
         self.assert_std_link_edges(progs, ())
         for t in progs:
@@ -535,7 +559,12 @@ class CppModulesTestMixin:
         if compat_progs:
             compat = [d for d in class_dirs
                       if os.path.isfile(os.path.join(cache, d, 'std.compat' + suffix))]
-            self.assertEqual(len(compat), 1,
-                             'std.compat must be published only in the class that imports it')
+            if compat_in_all_classes:
+                self.assertEqual(compat, class_dirs,
+                                 'std.compat must be published in every class dir')
+            else:
+                self.assertEqual(len(compat), 1,
+                                 'std.compat must be published only in the class that imports it')
         self.assertEqual(len(self.bmi_variant_ids()), 1,
                          'expected exactly one BMI variant of the std target')
+        self.assert_variants_emit_no_objects()
