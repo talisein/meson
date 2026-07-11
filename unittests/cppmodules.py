@@ -599,7 +599,11 @@ class CppModulesTestMixin:
                                  f'scan edge for {out} must not carry a mapper')
             elif rule.startswith('cpp_COMPILER'):
                 compile_edges += 1
-                self.assertIn(f'-fmodule-mapper={out}.mapper', s,
+                # The mapper path is spelled OS-natively in ARGS (backslashes on
+                # Windows) while the build-target 'out' uses forward slashes;
+                # compare separator-insensitively.
+                self.assertIn(f'-fmodule-mapper={out}.mapper'.replace('\\', '/'),
+                              s.replace('\\', '/'),
                               f'compile edge for {out} must resolve through its mapper')
                 mapper = os.path.join(self.builddir, out + '.mapper')
                 self.assertTrue(os.path.isfile(mapper), f'missing mapper file {mapper}')
