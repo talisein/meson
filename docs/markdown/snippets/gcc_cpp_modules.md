@@ -63,6 +63,13 @@ Common mistakes are reported at build time with a clear message instead of a
 confusing link error: a module required by no target, a module name provided by
 two sources reaching one link, and module dependency cycles.
 
+GCC cannot combine precompiled headers with modules (a `-fmodules` compile
+rejects any `.gch` as invalid), so `cpp_pch` on a module-enabled target is
+disabled with a warning and the target builds as if `b_pch=false`. On Clang
+and MSVC the two combine fine, except that a module interface unit itself
+never gets the PCH: its forced include would land before the module
+declaration, which is ill-formed.
+
 This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
 Header units are not covered. Targets that share modules but compile with
 divergent module-affecting flags (a different `cpp_std`, extra defines,
