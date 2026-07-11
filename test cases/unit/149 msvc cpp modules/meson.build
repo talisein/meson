@@ -32,3 +32,9 @@ genmod = custom_target('genmod',
 genlib = static_library('genlib', genmod)
 genprog = executable('genprog', 'genmain.cpp', link_with: genlib)
 test('genprog', genprog)
+
+# Dotted module names: '.' is a plain name character, not a partition
+# separator, so dot.mod.sub must map to ifc.cache/dot.mod.sub.ifc unchanged.
+dotlib = static_library('dotlib', 'dotted.ixx')
+dotprog = executable('dotprog', 'dotmain.cpp', link_with: dotlib)
+test('dotprog', dotprog)

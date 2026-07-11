@@ -22,6 +22,12 @@ kwlib = static_library('kwlib', 'kwmod.cppm')
 kwprog = executable('kwprog', 'kwmain.cpp', link_with: kwlib, cpp_modules: true)
 test('kwprog', kwprog)
 
+# Dotted module names: '.' is a plain name character, not a partition
+# separator, so dot.mod.sub must map to gcm.cache/dot.mod.sub.gcm unchanged.
+dotlib = static_library('dotlib', 'dotted.cppm')
+dotprog = executable('dotprog', 'dotmain.cpp', link_with: dotlib)
+test('dotprog', dotprog)
+
 # Generated module interface: the .cppm is produced at build time; its
 # declared output name enables the module machinery, and its module name is
 # discovered by the build-time scan. Consumed across a target boundary.

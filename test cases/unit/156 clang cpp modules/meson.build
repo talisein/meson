@@ -39,3 +39,9 @@ test('genprog', genprog)
 oddlib = static_library('oddlib', 'oddfile.cppm')
 oddprog = executable('oddprog', 'oddmain.cpp', link_with: oddlib)
 test('oddprog', oddprog)
+
+# Dotted module names: '.' is a plain name character, not a partition
+# separator, so dot.mod.sub must map to pcm.cache/dot.mod.sub.pcm unchanged.
+dotlib = static_library('dotlib', 'dotted.cppm')
+dotprog = executable('dotprog', 'dotmain.cpp', link_with: dotlib)
+test('dotprog', dotprog)
