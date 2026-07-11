@@ -812,7 +812,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # byte-identical command lines is the zero-cost common case.
         self.build_and_check_modules('139 gcc cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'],
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
+                                           'genmod', 'dot.mod.sub'],
                                      ninja_not_contains=['-fmodule-mapper'])
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
@@ -821,6 +822,16 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # (string and files() forms) provides its module across a link boundary.
         self.build_and_check_modules('162 cpp module interfaces',
                                      bmis=['mymod', 'filemod'])
+
+    @requires_cpp_module_caps('modules', compiler='gcc')
+    def test_gcc_cpp_modules_pch(self):
+        # GCC cannot combine PCH with modules (a -fmodules compile rejects
+        # any .gch as invalid), so cpp_pch on a module-enabled target is
+        # dropped with a warning and the build behaves as with b_pch=false.
+        self.build_and_check_modules('170 cpp modules pch',
+                                     setup_contains=['precompiled header is disabled'],
+                                     bmis=['modlib'],
+                                     ninja_not_contains=['.gch'])
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_module_rebuild_on_interface_change(self):
@@ -888,7 +899,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('156 clang cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
-                                           'genmod', 'oddname'],
+                                           'genmod', 'oddname', 'dot.mod.sub'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
         # Module ARGS must carry the ccache-defeating -fmodules -fno-modules
         # pair (inert to clang; makes ccache fall back instead of serving
@@ -926,6 +937,28 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                     self.assertIn('-fmodules', line)
                     self.assertNotIn('-fno-modules', line)
         self.assertTrue(saw_module_args, 'no module compile args found in build.ninja')
+
+    @requires_cpp_module_caps('modules', compiler='clang')
+    def test_clang_cpp_modules_pch(self):
+        # PCH and modules in one target. The .pch is a real input of scan and
+        # compile edges alike (both force-include it, and a cold scan must not
+        # race the PCH build); a module interface unit gets no PCH at all (the
+        # forced include would land before the module declaration).
+        self.build_and_check_modules('170 cpp modules pch', bmis=['modlib'])
+        pch_uses = 0
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                ls = line.strip()
+                if ls.startswith('build ') and 'MODULE_SCAN' in ls and 'main.cpp' in ls:
+                    self.assertIn('prog.hh.pch', ls)
+                if not ls.startswith('ARGS ='):
+                    continue
+                if '-x c++-module' in ls:
+                    self.assertNotIn('-include-pch', ls)
+                elif '-include-pch' in ls:
+                    pch_uses += 1
+        # main.cpp's scan and compile at least; the interface never.
+        self.assertGreaterEqual(pch_uses, 2)
 
     @requires_cpp_module_caps('modules', compiler='clang')
     def test_clang_cpp_module_rebuild_on_interface_change(self):
@@ -1033,6 +1066,18 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # against its own.
         self.build_and_check_modules('165 module bmi flag divergence',
                                      setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_source_with_spaces(self):
+        # A module interface source with a space in its file name: the BMI is
+        # named from the module name, but every object-derived path (.ddi,
+        # the BMI-only variant the divergent consumer demands, and on GCC
+        # that variant's mapper provides line) inherits the space and must
+        # survive it. GCC's mapper format splits name from path on the first
+        # space only, and module names cannot contain spaces, so a spaced
+        # path field is unambiguous.
+        self.build_and_check_modules('172 module sources with spaces')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='clang')
@@ -1234,6 +1279,28 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.check_module_rebuild('142 gcc header units', edit_file='angleutil.h',
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_stl_header_units(self):
+        # A real standard-library header unit (<vector> resolves to an
+        # absolute system path) in a two-class build: the importing TU's
+        # mapper maps its named imports per class but the unit at GCC's
+        # default mangled flat-cache path -- the absolute resolved path
+        # appended under the cache root, where units stay build-wide.
+        self.build_and_check_modules('171 stl header units')
+        self.check_gcc_module_mappers()
+        with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
+            mapper = f.read().splitlines()
+        self.assertTrue(any(re.fullmatch(r'(/\S+/vector) gcm\.cache\1\.gcm', line)
+                            for line in mapper),
+                        f'no absolute flat-cache unit mapping in {mapper}')
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='clang')
+    def test_clang_stl_header_units(self):
+        # Same fixture on clang: the unit BMI is built from the absolute
+        # resolved system header and named on consumer command lines.
+        self.build_and_check_modules('171 stl header units',
+                                     ninja_args_not_contains=())
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_header_units(self):

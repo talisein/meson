@@ -452,7 +452,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # links it, plus partitions, an explicit-opt-in target, and a generated
         # interface; each test() exercises a producer/consumer pair.
         self.build_and_check_modules('149 msvc cpp modules',
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'])
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
+                                           'genmod', 'dot.mod.sub'])
         # A single-class build keeps the flat ifc.cache (bmis= above asserted
         # the flat BMI paths) and plain compile edges: module-resolution args
         # ride /ifcSearchDir, so nothing pushes a compile into a response file.
