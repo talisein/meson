@@ -59,6 +59,16 @@ Current limitations:
     from the target's directory. Meson reports it up front as a header unit
     "not declared in this target's cpp_header_units". Use the include-path
     spelling.
+- **GCC: no whitespace in a header unit's resolved path.** When a build's
+  targets diverge in BMI-affecting flags, GCC resolves modules through a per-TU
+  module mapper, which must name each header unit by its resolved header path.
+  A mapper file's key ends at the first space or tab and has no quoting or
+  escape form, so a header whose path contains whitespace cannot be named: the
+  import fails to compile with "no such module". Meson warns about it at
+  configure time. Keep such headers on a space-free path, or keep the build's
+  BMI-affecting flags uniform — a build with a single flag set carries no
+  mapper and resolves units through GCC's default naming. Named modules are
+  unaffected, since a module name cannot contain whitespace.
 - **ccache** does not track BMI contents and would serve stale objects for
   Clang module and header-unit consumers, so Meson makes it fall back to the
   real compiler for module compiles (as it already does for GCC's

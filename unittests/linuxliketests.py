@@ -1041,12 +1041,24 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # warned about -- once: the same-class re-declarer (prog20b) shares
         # the unit quietly. (Clang builds one unit per class instead and is
         # covered by test_clang_header_unit_bmi_classes.)
+        #
+        # Configure-only, and it cannot become a build test as it stands: the
+        # divergence makes this a multi-class build, so its GCC compiles carry
+        # a module mapper, and a header unit's mapper key is its resolved
+        # header path -- which here contains a space, from the fixture's own
+        # directory name. A mapper file key ends at the first whitespace and
+        # has no quoting or escape form, so the unit becomes unnameable and
+        # the import fails with 'no such module'. That is what the unmappable
+        # warning reports -- once for the unit, though all three importers
+        # fail. A single-class build (142, 173) carries no mapper and resolves
+        # the same unit through GCC's default naming, which is why those build.
         out = self.init(testdir)
         self.assertEqual(out.count('divergent BMI-affecting flags'), 1)
         self.assertIn("'util.h'", out)
         self.assertIn("'-std=c++23' only in 'prog23'", out)
         self.assertIn("'-std=c++20' only in ", out)
         self.assertNotIn("'prog20b'", out)
+        self.assertEqual(out.count('cannot name a header unit whose path contains a space'), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence_builds(self):
@@ -1357,7 +1369,12 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # mapper maps its named imports per class but the unit at GCC's
         # default mangled flat-cache path -- the absolute resolved path
         # appended under the cache root, where units stay build-wide.
-        self.build_and_check_modules('171 stl header units')
+        # It resolves out of the compiler's own search path, so its key has
+        # no space and the mapper can name it -- unlike a unit under this
+        # source tree (see test_header_unit_divergence_warns). That is the
+        # only reason a mapped header unit builds at all here, so pin it.
+        self.build_and_check_modules('171 stl header units',
+                                     setup_not_contains=['cannot name a header unit'])
         self.check_gcc_module_mappers()
         with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
             mapper = f.read().splitlines()

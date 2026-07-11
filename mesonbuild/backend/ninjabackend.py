@@ -627,6 +627,10 @@ class NinjaBackend(backends.Backend):
         # creation.
         self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
         self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
+        # Spellings already warned about for a header unit GCC's module mapper
+        # cannot name. Keyed by the unit, not the importer: the unit is what is
+        # unnameable, and every target importing it fails the same way.
+        self._warned_unmappable_header_units: T.Set[str] = set()
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
         # stamp for GCC, the real .ifc for
@@ -1855,6 +1859,72 @@ class NinjaBackend(backends.Backend):
             'BMI-affecting flags: '
             + self._render_bmi_divergence(target.name, class_key, owner_name, owner_key)
             + " The unit's BMI is built once, with the flags of the first declarer.")
+
+    @staticmethod
+    def _include_dirs_of(args: T.Iterable[str]) -> T.List[str]:
+        # The include search path of a compile command, in order, in both the
+        # joined ('-Idir') and separated ('-I', 'dir') spellings.
+        dirs: T.List[str] = []
+        it = iter(args)
+        for arg in it:
+            for flag in ('-I', '-isystem'):
+                if arg == flag:
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        dirs.append(nxt)
+                    break
+                if arg.startswith(flag):
+                    dirs.append(arg[len(flag):])
+                    break
+        return dirs
+
+    def _header_unit_mapper_key(self, args: T.Union['CompilerArgs', T.List[str]],
+                                spelling: str) -> T.Optional[str]:
+        """The path a GCC module mapper would have to name a header unit by:
+        the header as resolved on the include path, which is what an importer
+        looks the unit up as. None when the spelling resolves nowhere on this
+        target's -I path -- a system header out of the compiler's own search
+        path, whose location we would have to probe the compiler to learn.
+        """
+        if any(c.isspace() for c in spelling):
+            # A File-spelled unit already carries its path.
+            return spelling
+        build_dir = self.environment.get_build_dir()
+        for d in self._include_dirs_of(args):
+            if os.path.isfile(os.path.join(build_dir, d, spelling)):
+                return os.path.join(d, spelling)
+        return None
+
+    def warn_on_unmappable_header_units(self, target: build.BuildTarget,
+                                        args: T.Union['CompilerArgs', T.List[str]]) -> None:
+        """Warn when a GCC target that resolves its BMIs through a module
+        mapper declares a header unit the mapper cannot name.
+
+        A unit's mapper key is its resolved header path, and a mapper file's
+        key ends at the first space or tab with no quoting or escape form, so
+        a header under a path containing whitespace is unnameable and the
+        import fails at compile with 'no such module'. Reported once per unit
+        -- every target importing it fails the same way -- and only reachable
+        for a target on the mapper path: a single-class build carries no
+        mapper and resolves the same unit through GCC's default naming.
+        """
+        for hu in target.cpp_header_units:
+            _, spelling = self._parse_header_unit(hu, self.build_to_src)
+            key = self._header_unit_mapper_key(args, spelling)
+            if key is None or not any(c.isspace() for c in key):
+                continue
+            if spelling in self._warned_unmappable_header_units:
+                continue
+            self._warned_unmappable_header_units.add(spelling)
+            mlog.warning(
+                f'Target {target.name!r} imports the C++ header unit {spelling!r}, '
+                f'which resolves to {key!r} -- a path containing whitespace. This '
+                "build compiles that target's modules through a GCC module mapper "
+                "(the build's BMI-affecting flags diverge between targets), and a "
+                'mapper cannot name a header unit whose path contains a space: the '
+                'compile will fail with "no such module". Move the header to a path '
+                'without spaces, or remove the flag divergence so the build needs no '
+                'mapper.', fatal=False)
 
     def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
         cpp = target.compilers['cpp']
@@ -3715,6 +3785,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = self._generate_single_compile(target, compiler)
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
+            if cid == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+                self.warn_on_unmappable_header_units(target, args)
             outputs, consumer_args = self._provision_header_unit_edges(
                 compiler, target.cpp_header_units, args, class_key, class_subdir,
                 target.name, target)
