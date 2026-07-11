@@ -28,4 +28,11 @@ elif mode == 'undeclared'
   # cpp_module_interfaces. Under Clang the collator must reject it; GCC infers
   # interface-ness, so this mode is Clang-only.
   static_library('liba', 'undeclared.cc', cpp_modules: true)
+elif mode == 'missingdivergent'
+  # As 'missing', but in a two-BMI-class build: the collate must still reject
+  # the unresolvable import itself, before the compiler could report its own
+  # lookup failure against a mapper that omits the module.
+  lib = static_library('provlib', 'libprov.cppm')
+  executable('p', 'importsmissing.cpp', link_with: lib,
+             override_options: ['cpp_std=c++23'])
 endif

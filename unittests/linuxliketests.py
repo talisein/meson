@@ -807,10 +807,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_gcc_cpp_modules(self):
         # The library provides a module, imported by an executable that merely
         # links it, plus partitions and an explicit-opt-in target; each test()
-        # exercises a producer/consumer pair across the link.
+        # exercises a producer/consumer pair across the link. A single-class
+        # build must carry no module mapper anywhere: flat gcm.cache with
+        # byte-identical command lines is the zero-cost common case.
         self.build_and_check_modules('139 gcc cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'])
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod', 'genmod'],
+                                     ninja_not_contains=['-fmodule-mapper'])
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
     def test_gcc_cpp_module_interfaces(self):
@@ -969,39 +972,23 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # into the modules-using C++ library, so a green run also proves interop.
         self.build_and_check_modules('155 fortran links gcc cpp module')
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
-    def test_gcc_module_cpp_std_divergence(self):
-        testdir = os.path.join(self.unit_test_dir, '145 gcc module cpp_std divergence')
-        # A module provider (c++20) consumed by a target overridden to c++23 must
-        # warn, naming both targets and the differing -std flags.
-        out = self.init(testdir)
-        self.assertIn('divergent BMI-affecting flags', out)
-        self.assertIn("'-std=c++23' only in 'prog'", out)
-        self.assertIn("'-std=c++20' only in 'modlib'", out)
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
+    def test_gcc_module_cpp_std_divergence_builds(self):
+        # A c++23 consumer of a c++20 module provider resolves through a
+        # BMI-only variant in its own dialect class and runs correctly;
+        # before BMI classes GCC silently shared the mismatched BMI here
+        # (or hard-errored, depending on version), and setup could only warn.
+        self.build_and_check_modules('145 gcc module cpp_std divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
-    def test_gcc_module_subproject_cpp_std_divergence(self):
-        testdir = os.path.join(self.unit_test_dir, '146 gcc module subproject cpp_std divergence')
-        # The divergence crosses a subproject boundary: parent c++23 consumes a
-        # subproject module library built at c++20.
-        out = self.init(testdir)
-        self.assertIn('divergent BMI-affecting flags', out)
-        self.assertIn("'-std=c++23' only in 'prog'", out)
-        self.assertIn("'-std=c++20' only in 'submodlib'", out)
-
-    @requires_cpp_module_caps('modules', compiler='gcc')
-    def test_module_pthread_divergence(self):
-        testdir = os.path.join(self.unit_test_dir, '159 module pthread divergence')
-        # dependency('threads') adds -pthread to 'prog' only, so the BMI and
-        # its importer disagree on the POSIX-thread setting. On a compiler
-        # without BMI classes (GCC, until its supports_bmi_classes() flips)
-        # that is out of contract, so setup must warn, naming both targets,
-        # the flag, and the fix.
-        out = self.init(testdir)
-        self.assertIn('divergent BMI-affecting flags', out)
-        self.assertIn("'-pthread' only in 'prog'", out)
-        self.assertIn("'modlib'", out)
-        self.assertIn("add dependency('threads') to 'modlib'", out)
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
+    def test_gcc_module_subproject_cpp_std_divergence_builds(self):
+        # The same divergence across a subproject boundary: parent c++23
+        # consumes a subproject module library built at c++20.
+        self.build_and_check_modules('146 gcc module subproject cpp_std divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_bmi_divergence_ignores_bmi_irrelevant_flags(self):
@@ -1011,18 +998,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('165 module bmi flag divergence',
                                      extra_args=['-Dwithfoo=false'],
                                      setup_not_contains=['divergent BMI-affecting flags'])
-
-    @requires_cpp_module_caps('modules', compiler='gcc')
-    def test_module_define_divergence_warns(self):
-        # A -D divergence must split the BMI class and be named in the warning
-        # (on a compiler without BMI classes); the simultaneous optimization
-        # divergence is allowlisted and must not.
-        testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
-        out = self.init(testdir)
-        self.assertIn('divergent BMI-affecting flags', out)
-        self.assertIn("'-DFOO' only in 'modlib'", out)
-        self.assertIn("'prog'", out)
-        self.assertNotIn("'-O", out)
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_header_unit_divergence_warns(self):
@@ -1039,19 +1014,23 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertIn("'-std=c++20' only in ", out)
         self.assertNotIn("'prog20b'", out)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='clang')
-    def test_clang_pthread_divergence_builds(self):
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_pthread_divergence_builds(self):
         # What Stage 1 could only warn about must now work: prog's -pthread
         # class resolves modlib through a BMI-only variant and the program
-        # builds, runs, and rebuilds no-op.
+        # builds, runs (each side constant-evaluates the BMI's _REENTRANT
+        # view against its own), and rebuilds no-op.
         self.build_and_check_modules('159 module pthread divergence',
                                      setup_not_contains=['divergent BMI-affecting flags'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='clang')
-    def test_clang_define_divergence_builds(self):
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_define_divergence_builds(self):
         # A -D divergence splits the class; with BMI classes it builds and
-        # runs through a variant instead of warning.
+        # runs through a variant instead of warning. GCC would otherwise
+        # share the -DFOO BMI silently, which the fixture turns into a wrong
+        # exit code: the importer constant-evaluates the BMI's FOO view
+        # against its own.
         self.build_and_check_modules('165 module bmi flag divergence',
                                      setup_not_contains=['divergent BMI-affecting flags'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
@@ -1065,6 +1044,17 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                consumers=('prog23', 'prog20'),
                                expected_targets=('modlib', 'prog20', 'prog23'))
 
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
+    def test_gcc_bmi_classes(self):
+        # The shared two-class fixture under GCC, where the class cache
+        # rides the per-TU module mapper; also assert the mapper shape --
+        # compile edges name their own object's mapper, scans none.
+        self.check_bmi_classes('166 bmi classes', module_name='modlib',
+                               provider_lib='libmodlib.a',
+                               consumers=('prog23', 'prog20'),
+                               expected_targets=('modlib', 'prog20', 'prog23'))
+        self.check_gcc_module_mappers()
+
     @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='clang')
     def test_clang_import_std_bmi_classes(self):
         cpp = self.host_cpp_compiler()
@@ -1073,6 +1063,41 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.check_import_std_bmi_classes('167 import std bmi classes',
                                           progs=('prog23', 'prog26'),
                                           compat_progs=('prog26',))
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='gcc')
+    def test_gcc_import_std_bmi_classes(self):
+        # Two dialects sharing dependency('std') under GCC. std.compat lands
+        # in every class dir: GCC interface compiles write their BMI eagerly
+        # through the mapper, and a variant compiles all recorded interfaces.
+        self.check_import_std_bmi_classes('167 import std bmi classes',
+                                          progs=('prog23', 'prog26'),
+                                          compat_progs=('prog26',),
+                                          compat_in_all_classes=True)
+        self.check_gcc_module_mappers()
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
+    def test_gcc_bmi_class_mapper_incrementality(self):
+        # Editing one interface of a multi-class provider must recompile
+        # only that TU (and its BMI variant): the collate reruns and
+        # rewrites the dyndep, but the sibling TUs' mappers are
+        # copy-if-different implicit inputs, so an unchanged mapping must
+        # not dirty its compile. A mapper rewritten unconditionally would
+        # recompile every TU of the target here.
+        testdir = os.path.join(self.unit_test_dir, '166 bmi classes')
+        srcdir = self.copy_srcdir(testdir)
+        self.init(srcdir)
+        self.build(override_envvars=self.NO_CCACHE)
+        util = os.path.join(srcdir, 'subprojects', 'modlib', 'util.cppm')
+        with open(util, encoding='utf-8') as f:
+            content = f.read()
+        with open(util, 'w', encoding='utf-8') as f:
+            f.write(content.replace('return 7', 'return 1007'))
+        out = self.build(override_envvars=self.NO_CCACHE)
+        self.assertEqual(out.count('Compiling C++ object'), 1, out)
+        # No consumer imports utilmod, so its BMI variant is never demanded:
+        # variant edges are only pulled in through importers' dyndeps.
+        self.assertEqual(out.count('Precompiling C++ module BMI'), 0, out)
+        self.assertBuildIsNoop()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='clang')
     def test_clang_header_unit_bmi_classes(self):
@@ -1102,20 +1127,21 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_bmi_classes_deferred(self):
-        # GCC resolves header units by gcm.cache directory lookup, so
-        # per-class units wait on the module mapper stage: the two-class
-        # fixture must keep the one shared unit edge plus the divergence
-        # warning. Configure-only -- GCC hard-errors the divergent import at
-        # build. prog23 also imports modlib across the class split, so the
-        # named-module warning fires alongside the header-unit one.
+        # GCC header units stay single-class even under the module mapper (a
+        # unit's CMI name is its resolved header path, known only at compile
+        # time, so the unit build edge cannot be given a per-class mapping):
+        # the two-class fixture keeps the one shared unit edge plus the
+        # divergence warning. Configure-only -- GCC hard-errors the divergent
+        # unit import at build. prog23's import of modlib across the class
+        # split is handled by a BMI-only variant and warns no more.
         testdir = os.path.join(self.unit_test_dir, '169 header unit bmi classes')
         out = self.init(testdir)
         self.assertEqual(out.count('import the same C++ header unit'), 1)
-        self.assertEqual(out.count('divergent BMI-affecting flags'), 2)
+        self.assertEqual(out.count('divergent BMI-affecting flags'), 1)
         self.assertNotIn("'prog20b'", out)
         self.assertEqual(len(self.header_unit_digests('util.h')), 1,
                          'GCC must keep one shared unit BMI per spelling')
-        self.assertEqual(self.bmi_variant_ids(), set())
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_generated_header(self):
@@ -1263,6 +1289,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             'duplicate': 'provided by two sources in this target',
             'crosslink': 'provided by more than one target reaching this link',
             'duptargets': 'exported by more than one target in this build',
+            # In a two-class build the collate still rejects an unresolvable
+            # import itself, before the compiler could report its own lookup
+            # failure against a mapper that omits the module.
+            'missingdivergent': 'provided by no target in this build',
         }
         for mode, needle in cases.items():
             with self.subTest(mode=mode):

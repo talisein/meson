@@ -43,7 +43,8 @@ Token vocabulary (the API for the C++ module test series):
     Divergent BMI equivalence classes work rather than warn: Meson gives
     each class its own cache subdirectory and synthesizes BMI-only variants
     of shared module providers (``Compiler.supports_bmi_classes()``, plus
-    the ``bmionly`` probe). Currently Clang, and MSVC from cl 19.32.
+    the ``bmionly`` probe). Clang, MSVC from cl 19.32, and GCC (from 14,
+    the P1689 floor; the class cache rides the per-TU module mapper there).
 """
 
 from __future__ import annotations
@@ -511,6 +512,11 @@ class CppModulesTestMixin:
         for d in class_dirs:
             self.assertTrue(os.path.isfile(os.path.join(cache, d, bmi)),
                             f'missing {bmi} in class dir {d}')
+            # The collator's module-name claim is keyed by the BMI path, so
+            # per-class dirs make claims per-class: both classes of one
+            # module coexist without the duplicate-provider error.
+            self.assertTrue(os.path.isfile(os.path.join(cache, d, bmi + '.owner')),
+                            f'missing per-class owner claim in {d}')
         self.assertFalse(os.path.exists(os.path.join(cache, bmi)),
                          'flat BMI must not exist in a multi-class build')
         targets = sorted(t['name'] for t in self.introspect('--targets'))
@@ -568,3 +574,33 @@ class CppModulesTestMixin:
         self.assertEqual(len(self.bmi_variant_ids()), 1,
                          'expected exactly one BMI variant of the std target')
         self.assert_variants_emit_no_objects()
+
+    def check_gcc_module_mappers(self) -> None:
+        """Multi-class GCC builds resolve modules through per-TU mappers:
+        every module compile edge names its own object's mapper (a static
+        path whose scan-derived contents the collate writes), scan edges
+        carry none -- their command lines stay identical to a single-class
+        build -- and the mapper files exist on disk."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        rule = out = ''
+        compile_edges = 0
+        for line in lines:
+            if line.startswith('build '):
+                head, _, tail = line.partition(': ')
+                out = head[len('build '):].split(' ')[0]
+                rule = tail.split(' ')[0]
+                continue
+            s = line.strip()
+            if not s.startswith('ARGS ='):
+                continue
+            if 'MODULE_SCAN' in rule:
+                self.assertNotIn('-fmodule-mapper', s,
+                                 f'scan edge for {out} must not carry a mapper')
+            elif rule.startswith('cpp_COMPILER'):
+                compile_edges += 1
+                self.assertIn(f'-fmodule-mapper={out}.mapper', s,
+                              f'compile edge for {out} must resolve through its mapper')
+                mapper = os.path.join(self.builddir, out + '.mapper')
+                self.assertTrue(os.path.isfile(mapper), f'missing mapper file {mapper}')
+        self.assertGreater(compile_edges, 0, 'no module compile edges found')
