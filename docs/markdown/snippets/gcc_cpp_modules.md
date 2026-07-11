@@ -64,11 +64,13 @@ confusing link error: a module required by no target, a module name provided by
 two sources reaching one link, and module dependency cycles.
 
 This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
-Header units are not covered. All translation units in a build that shares
-modules must use the same module-affecting flags (e.g. `cpp_std`). `-pthread`
-counts: `dependency('threads')` adds it only to its own consumers, so a
-threads-using target sharing modules with a target built without the flag is
-out of contract (GCC accepts the mix silently; Clang rejects it outright).
-Meson warns at setup when module-sharing targets diverge on it; the fix is
-`dependency('threads')` on the target missing the flag (or `-pthread`
-build-wide via `-Dcpp_args=-pthread`).
+Header units are not covered. Targets that share modules but compile with
+divergent module-affecting flags (a different `cpp_std`, extra defines,
+`-pthread` from `dependency('threads')`, ...) build correctly, as on Clang and
+MSVC: each flag class gets its own subdirectory of `gcm.cache` — reached
+through a per-translation-unit module mapper, since GCC has no module search
+path flag — and Meson recompiles a shared provider's interfaces per class as
+BMIs only, so every consumer still links the provider's objects exactly once.
+A single-class build keeps the flat `gcm.cache` and mapper-less command
+lines. Header units remain shared build-wide: a flag-divergent import of a
+shared header unit still warns at setup.
