@@ -544,6 +544,150 @@ class InternalTests(unittest.TestCase):
                                                 '--interface-source', '../src/fmt.cc'])), 0)
             self.assertEqual(run_p1689(args(d, [])), 0)
 
+    def test_depaccumulate_p1689_mapper_emission(self):
+        # With --mapper-suffix the collate writes one GCC module mapper per
+        # TU (at the CWD-relative primary-output, like the compiler's own
+        # BMI paths), naming exactly its provides and direct imports:
+        # provides and named-module requires at the class-cache path,
+        # header-unit requires at the compiler's default flat-cache path
+        # (--flat-bmi-dir; a mapper disables GCC's default mapping, so the
+        # collate must reproduce it). A TU with no module traffic gets an
+        # empty mapper, and no mapper is written at all without the flag.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+
+        def collate(extra: T.List[str]) -> int:
+            return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                              '--bmi-dir', 'gcm.cache/deadbeefcafe',
+                              '--bmi-suffix', '.gcm',
+                              '--dep-provmap', 'dep-pm.json', *extra,
+                              'a.cppm.o.ddi', 'main.cpp.o.ddi', 'plain.cpp.o.ddi'])
+
+        def read(name: str) -> str:
+            with open(name, encoding='utf-8') as f:
+                return f.read()
+
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                with open('a.cppm.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{
+                        'primary-output': 'a.cppm.o',
+                        'provides': [{'logical-name': 'A'}],
+                        'requires': [{'logical-name': 'B'},
+                                     {'logical-name': './util.h'}]}]}, f)
+                with open('main.cpp.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'main.cpp.o',
+                                          'requires': [{'logical-name': 'A'}]}]}, f)
+                with open('plain.cpp.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'plain.cpp.o'}]}, f)
+                with open('dep-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({'B': 'gcm.cache/deadbeefcafe/B.gcm'}, f)
+
+                self.assertEqual(collate([]), 0)
+                for obj in ('a.cppm.o', 'main.cpp.o', 'plain.cpp.o'):
+                    self.assertFalse(os.path.exists(obj + '.mapper'))
+
+                self.assertEqual(collate(['--mapper-suffix', '.mapper',
+                                          '--flat-bmi-dir', 'gcm.cache']), 0)
+                self.assertEqual(read('a.cppm.o.mapper'),
+                                 'A gcm.cache/deadbeefcafe/A.gcm\n'
+                                 'B gcm.cache/deadbeefcafe/B.gcm\n'
+                                 './util.h gcm.cache/,/util.h.gcm\n')
+                self.assertEqual(read('main.cpp.o.mapper'),
+                                 'A gcm.cache/deadbeefcafe/A.gcm\n')
+                self.assertEqual(read('plain.cpp.o.mapper'), '')
+            finally:
+                os.chdir(olddir)
+
+    def test_depaccumulate_p1689_mapper_stamp_mode(self):
+        # A BMI-only variant collate (--stamp-suffix) must map a TU's export
+        # to the edge's declared output (the primary-output the harvest then
+        # publishes), while requires still map to the readable class-cache
+        # BMI -- the provmap value there is an ordering stamp, not a BMI.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                os.mkdir('variant')
+                with open('a.gcm.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{
+                        'primary-output': 'variant/a.gcm',
+                        'provides': [{'logical-name': 'A',
+                                      'source-path': '../src/a.cppm'}],
+                        'requires': [{'logical-name': 'B'}]}]}, f)
+                with open('dep-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({'B': 'other.p/b.cppm.o.gcm.stamp'}, f)
+                self.assertEqual(run_p1689(
+                    ['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                     '--bmi-dir', 'gcm.cache/deadbeefcafe', '--bmi-suffix', '.gcm',
+                     '--dep-provmap', 'dep-pm.json',
+                     '--stamp-suffix', '.gcm.stamp',
+                     '--interface-source', '../src/a.cppm',
+                     '--mapper-suffix', '.mapper',
+                     '--flat-bmi-dir', 'gcm.cache', 'a.gcm.ddi']), 0)
+                with open('variant/a.gcm.mapper', encoding='utf-8') as f:
+                    self.assertEqual(f.read(),
+                                     'A variant/a.gcm\n'
+                                     'B gcm.cache/deadbeefcafe/B.gcm\n')
+                with open('out.dd', encoding='utf-8') as f:
+                    dd = f.read()
+                # Ordering rides the dep's harvest stamp; no BMI output is
+                # declared (the variant edge declares it statically).
+                self.assertIn('other.p/b.cppm.o.gcm.stamp', dd)
+                self.assertNotIn('deadbeefcafe/A.gcm', dd)
+            finally:
+                os.chdir(olddir)
+
+    def test_depaccumulate_p1689_mapper_copy_if_different(self):
+        # Mapper files are implicit inputs of compile edges: a re-collate that
+        # does not change a TU's mapping must leave the file untouched
+        # (mtime included), or every object in the target would recompile
+        # whenever any module in it changes.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+
+        def collate(requires: T.List[str]) -> int:
+            with open('m.cpp.o.ddi', 'w', encoding='utf-8') as f:
+                json.dump({'rules': [{
+                    'primary-output': 'm.cpp.o',
+                    'provides': [{'logical-name': 'M'}],
+                    'requires': [{'logical-name': r} for r in requires]}]}, f)
+            return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                              '--bmi-dir', 'gcm.cache/deadbeefcafe',
+                              '--bmi-suffix', '.gcm',
+                              '--mapper-suffix', '.mapper',
+                              '--flat-bmi-dir', 'gcm.cache', 'm.cpp.o.ddi'])
+
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                self.assertEqual(collate([]), 0)
+                before = os.stat('m.cpp.o.mapper').st_mtime_ns
+                self.assertEqual(collate([]), 0)
+                self.assertEqual(os.stat('m.cpp.o.mapper').st_mtime_ns, before,
+                                 'unchanged mapper content must keep its mtime')
+                self.assertEqual(collate(['./util.h']), 0)
+                with open('m.cpp.o.mapper', encoding='utf-8') as f:
+                    self.assertIn('./util.h gcm.cache/,/util.h.gcm', f.read())
+            finally:
+                os.chdir(olddir)
+
+    def test_depaccumulate_flat_cmi_path(self):
+        # GCC's default header-unit CMI naming under the flat cache: '.' and
+        # '..' path components become ',' and ',,'; an absolute resolved path
+        # is appended as-is under the cache root.
+        from mesonbuild.scripts.depaccumulate import _flat_cmi_path
+        cases = {
+            './util.h': 'gcm.cache/,/util.h.gcm',
+            './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',
+            '../srcx/hdr.h': 'gcm.cache/,,/srcx/hdr.h.gcm',
+            '/usr/include/c++/16/vector': 'gcm.cache/usr/include/c++/16/vector.gcm',
+        }
+        for name, want in cases.items():
+            self.assertEqual(_flat_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
+
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit
         # cl tags a header-unit require with lookup-method include-quote/angle
