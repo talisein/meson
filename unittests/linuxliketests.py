@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2016-2022 The Meson development team
 
+import json
 import stat
 import subprocess
 import re
@@ -812,8 +813,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # byte-identical command lines is the zero-cost common case.
         self.build_and_check_modules('139 gcc cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
-                                           'genmod', 'dot.mod.sub'],
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
+                                           'kwmod', 'genmod', 'dot.mod.sub'],
                                      ninja_not_contains=['-fmodule-mapper'])
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
@@ -898,8 +899,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # no BMI-only variant.
         self.build_and_check_modules('156 clang cpp modules',
                                      setup_not_contains=['divergent BMI-affecting flags'],
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
-                                           'genmod', 'oddname', 'dot.mod.sub'],
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
+                                           'kwmod', 'genmod', 'oddname', 'dot.mod.sub'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
         # Module ARGS must carry the ccache-defeating -fmodules -fno-modules
         # pair (inert to clang; makes ccache fall back instead of serving
@@ -1067,6 +1068,33 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('165 module bmi flag divergence',
                                      setup_not_contains=['divergent BMI-affecting flags'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
+
+    @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_internal_partitions(self):
+        # An internal (implementation) partition: `module pkg:impl;` has no
+        # export yet provides an importable BMI, consumed by the primary
+        # interface; :impl itself imports :part (partition-to-partition
+        # requires). The divergent consumer's BMI-only variant must
+        # recompile the internal partition too -- the constexpr both
+        # consumers compare against their own flags lives in :impl, behind
+        # two imports.
+        self.build_and_check_modules('174 module internal partitions')
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        # The scan reports the partition as a non-interface provide; the
+        # pipeline must build its BMI all the same.
+        with open(os.path.join(self.builddir, 'libpkg.a.p', 'pkg-impl.cppm.o.ddi'),
+                  encoding='utf-8') as f:
+            provides = json.load(f)['rules'][0]['provides']
+        self.assertEqual([(p['logical-name'], p['is-interface']) for p in provides],
+                         [('pkg:impl', False)])
+        # Both classes hold the full partition set.
+        cpp = self.host_cpp_compiler()
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        suffix = cpp.get_module_bmi_suffix()
+        for d in self.bmi_class_dirs():
+            for name in ('pkg', 'pkg-part', 'pkg-impl'):
+                path = os.path.join(cache, d, name + suffix)
+                self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_class_topology_reconfigure(self):
