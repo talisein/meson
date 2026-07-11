@@ -3813,7 +3813,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         """
         # copy common arguments directly
         for arg in ('build_by_default', 'build_rpath', 'build_subdir', 'c_pch',
-                    'cpp_modules', 'cpp_header_units', 'cpp_module_interfaces', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
+                    'cpp_modules', 'cpp_header_units', 'cpp_module_interfaces', 'cpp_internal_partitions', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
                     'dependencies', 'gnu_symbol_visibility', 'install',
                     'install_mode', 'install_rpath',
                     'implicit_include_directories', 'link_args', 'link_early_args',
@@ -4194,6 +4194,7 @@ class Interpreter(InterpreterBase, HoldableObject):
 
         self._check_cpp_header_units_supported(name, target)
         self._check_cpp_module_interfaces(name, target)
+        self._check_cpp_internal_partitions(name, target)
 
         self.add_target(name, target)
         self.project_args_frozen = True
@@ -4228,6 +4229,23 @@ class Interpreter(InterpreterBase, HoldableObject):
             if f not in sources:
                 raise InvalidArguments(
                     f'Target {name!r} lists {entry!s} in cpp_module_interfaces, but '
+                    "it is not one of the target's sources.")
+
+    def _check_cpp_internal_partitions(self, name: str, target: build.BuildTarget) -> None:
+        # An internal (implementation) partition entry must name one of the
+        # target's own sources, like cpp_module_interfaces. MSVC additionally
+        # rejects an interface file extension for an internal partition (a .ixx
+        # is a module-interface extension and is incompatible with
+        # /internalPartition), so the source should carry a plain implementation
+        # extension (.cpp); use a .cpp there for a portable meson.build.
+        if not target.cpp_internal_partitions:
+            return
+        sources = set(target.sources)
+        for entry in target.cpp_internal_partitions:
+            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
+            if f not in sources:
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in cpp_internal_partitions, but '
                     "it is not one of the target's sources.")
 
     def add_stdlib_info(self, target: build.BuildTarget) -> None:

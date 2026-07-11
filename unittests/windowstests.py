@@ -4,6 +4,7 @@
 import subprocess
 import re
 import os
+import json
 import shutil
 from unittest import mock, SkipTest, skipUnless, skipIf
 from glob import glob
@@ -452,8 +453,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # links it, plus partitions, an explicit-opt-in target, and a generated
         # interface; each test() exercises a producer/consumer pair.
         self.build_and_check_modules('149 msvc cpp modules',
-                                     bmis=['modlib', 'pkg', 'pkg:part', 'kwmod',
-                                           'genmod', 'dot.mod.sub'])
+                                     bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
+                                           'kwmod', 'genmod', 'dot.mod.sub'])
         # A single-class build keeps the flat ifc.cache (bmis= above asserted
         # the flat BMI paths) and plain compile edges: module-resolution args
         # ride /ifcSearchDir, so nothing pushes a compile into a response file.
@@ -582,6 +583,61 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
+
+    @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_internal_partitions(self):
+        # An internal (implementation) partition on MSVC: `module pkg:impl;` has
+        # no export yet provides an importable BMI. cl rejects an interface file
+        # extension for it (C7622) and needs /internalPartition, not /interface,
+        # so it is a plain .cpp declared via cpp_internal_partitions; :impl also
+        # imports :part (partition-to-partition requires). The divergent
+        # consumer's BMI-only variant must recompile the internal partition too
+        # -- the constexpr both consumers compare against their own flags lives
+        # in :impl, behind two imports.
+        self.build_and_check_modules('175 msvc module internal partitions')
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        # The scan reports the partition as a non-interface provide; the
+        # pipeline must build its BMI all the same.
+        with open(os.path.join(self.builddir, 'libpkg.a.p', 'pkg-impl.cpp.obj.ddi'),
+                  encoding='utf-8') as f:
+            provides = json.load(f)['rules'][0]['provides']
+        self.assertEqual([(p['logical-name'], p['is-interface']) for p in provides],
+                         [('pkg:impl', False)])
+        # cl flags the internal partition /internalPartition rather than
+        # /interface (compiling it as an interface is C7621/C7622, so the build
+        # above already proves the split; '/interface' is not a substring of
+        # '/internalPartition'). Every edge that names pkg-impl.cpp -- compile,
+        # scan and BMI-only variant -- must carry /internalPartition and never
+        # /interface, so scan and compile keep dialect parity across the split.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            ninja = f.read()
+        self.assertIn('/internalPartition', ninja)
+        saw_internal_partition = False
+        block = []
+        for line in ninja.splitlines() + ['end']:
+            if not line or not line[0].isspace():
+                if any(b.startswith('build ') and 'pkg-impl.cpp' in b for b in block):
+                    args = ' '.join(block)
+                    # No pkg-impl edge (compile, scan, variant) may flag it an
+                    # interface; the collate/harvest edges name it too but carry
+                    # no interface-kind flag. '/interface' is not a substring of
+                    # '/internalPartition' or '--interface-source'.
+                    self.assertNotIn('/interface', args)
+                    saw_internal_partition |= '/internalPartition' in args
+                block = [line]
+            else:
+                block.append(line)
+        self.assertTrue(saw_internal_partition,
+                        'no pkg-impl.cpp edge carries /internalPartition')
+        # Both classes hold the full partition set (the divergent variant
+        # recompiled every unit, including the internal partition).
+        cpp = self.host_cpp_compiler()
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        suffix = cpp.get_module_bmi_suffix()
+        for d in self.bmi_class_dirs():
+            for name in ('pkg', 'pkg-part', 'pkg-impl'):
+                path = os.path.join(cache, d, name + suffix)
+                self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

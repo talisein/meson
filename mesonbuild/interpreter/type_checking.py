@@ -796,6 +796,8 @@ _BUILD_TARGET_KWS: T.List[KwargInfo] = [
               default=[], listify=True, since='1.12.0'),
     KwargInfo('cpp_module_interfaces', ContainerTypeInfo(list, (str, File)),
               default=[], listify=True, since='1.12.0'),
+    KwargInfo('cpp_internal_partitions', ContainerTypeInfo(list, (str, File)),
+              default=[], listify=True, since='1.12.0'),
     KwargInfo('d_debug', ContainerTypeInfo(list, (str, int)), default=[], listify=True),
     D_MODULE_VERSIONS_KW,
     KwargInfo('d_unittest', bool, default=False),

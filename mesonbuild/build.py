@@ -87,6 +87,7 @@ if T.TYPE_CHECKING:
         cpp_modules: bool
         cpp_header_units: T.List[T.Union[str, File]]
         cpp_module_interfaces: T.List[T.Union[str, File]]
+        cpp_internal_partitions: T.List[T.Union[str, File]]
         d_debug: T.List[T.Union[str, int]]
         d_import_dirs: T.List[IncludeDirs]
         d_module_versions: T.List[T.Union[str, int]]
@@ -923,6 +924,7 @@ class BuildTarget(Target):
         self.cpp_modules = kwargs.get('cpp_modules', False)
         self.cpp_header_units = kwargs.get('cpp_header_units', [])
         self.cpp_module_interfaces = kwargs.get('cpp_module_interfaces', [])
+        self.cpp_internal_partitions = kwargs.get('cpp_internal_partitions', [])
         self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')
         self.rust_dependency_map = kwargs.get('rust_dependency_map', {})
 
@@ -1761,8 +1763,9 @@ class BuildTarget(Target):
         # Whether the target carries a module-interface source, marking it a
         # module provider. Decided without reading contents: by the cppm/ixx
         # extension (also on generated outputs) or an explicit cpp_module_interfaces
-        # declaration. The module *names* come later, from the build-time scan.
-        if self.cpp_module_interfaces:
+        # / cpp_internal_partitions declaration. The module *names* come later,
+        # from the build-time scan.
+        if self.cpp_module_interfaces or self.cpp_internal_partitions:
             return True
         for s in self.get_sources():
             suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()

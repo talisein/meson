@@ -580,6 +580,9 @@ class ModuleInterfaceSource:
     obj_basename: str
     header_deps: T.Tuple[FileOrString, ...]
     order_deps: T.Tuple[FileOrString, ...]
+    # An internal (implementation) partition: cl flags it /internalPartition
+    # rather than /interface, in the variant recompile as on the compile edge.
+    is_internal_partition: bool = False
 
 
 @dataclass
@@ -1606,7 +1609,11 @@ class NinjaBackend(backends.Backend):
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
-            for p in sorted(self._module_interface_paths(target)):
+            # Declared interfaces and internal partitions are both compiled as
+            # interface units (Clang emits a BMI only for those), so pass both
+            # as source paths the collator's interface check accepts.
+            for p in sorted(self._module_interface_paths(target)
+                            | self._internal_partition_paths(target)):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'gcc' and self._bmi_class_subdir_for(target) is not None:
             depargs += ['--mapper-suffix', '.mapper',
@@ -1697,18 +1704,14 @@ class NinjaBackend(backends.Backend):
         self.generate_bmi_variant_compile_rule(cpp)
         rulename = self.get_compiler_rule_name('cpp', cpp.for_machine, 'BMI_VARIANT')
         recs = self._target_module_interfaces[provider.get_id()]
-        # cl and clang need each interface unit flagged explicitly, mirroring
-        # the compile-edge split in generate_single_compile. GCC infers
-        # interface-ness from the source, but its pre-15 driver does not know
-        # the module extensions and needs the language spelled out.
-        if cpp.get_id() == 'msvc':
-            iface_args = ['/interface', '/TP']
-        elif cpp.get_id() == 'clang':
-            iface_args = ['-x', 'c++-module']
-        else:
-            iface_args = ['-x', 'c++'] if mesonlib.version_compare(cpp.version, '<15') else []
         ddis: T.List[str] = []
         for rec in recs:
+            # cl and clang need each unit flagged explicitly, mirroring the
+            # compile-edge split in generate_single_compile (an internal
+            # partition takes /internalPartition, not /interface). GCC infers
+            # the kind from the source. Computed per rec because a target may
+            # mix interfaces and internal partitions.
+            iface_args = self._module_unit_iface_args(cpp, rec.is_internal_partition)
             # The BMI is the edge's primary output, standing where the object
             # stands in the provider's own pipeline: the scan's .ddi names it
             # as primary-output, so the variant's dyndep and harvest stamp
@@ -1722,7 +1725,11 @@ class NinjaBackend(backends.Backend):
                                           header_unit_override=hu_outputs)
             ddis.append(self.get_ddi_file_for(vpcm))
             elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
-            elem.add_item('ARGS', args)
+            # cl's BMI_VARIANT rule no longer bakes /interface: the per-unit
+            # interface/internalPartition flag rides ARGS, as on the compile
+            # edge. clang/gcc carry their unit flag in the rule itself.
+            compile_iface = iface_args if cpp.get_id() == 'msvc' else []
+            elem.add_item('ARGS', args + compile_iface)
             if cpp.get_id() in {'clang', 'gcc'}:
                 elem.add_item('DEPFILE', vpcm + '.d')
             if cpp.get_id() == 'gcc':
@@ -3492,8 +3499,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         command = compiler.get_exelist()
         description = 'Precompiling C++ module BMI $out'
         if compiler.get_id() == 'msvc':
+            # The per-unit /interface or /internalPartition flag rides $ARGS
+            # (added by the variant edge), so the shared rule can serve both an
+            # interface and an internal-partition recompile.
             args = ['$ARGS'] + NinjaCommandArg.list(
-                ['/interface', '/TP', '/showIncludes', '/ifcOnly',
+                ['/showIncludes', '/ifcOnly',
                  '/ifcOutput', '$out', '/c', '$in'], Quoting.none)
             self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
             return
@@ -3624,6 +3634,40 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return False
         key = src.rel_to_builddir(self.build_to_src) if isinstance(src, File) else src
         return os.path.normpath(key) in self._module_interface_paths(target)
+
+    def _internal_partition_paths(self, target: build.BuildTarget) -> T.Set[str]:
+        # Normalized build-root-relative paths of the sources this target
+        # declares as internal (implementation) partitions (cpp_internal_partitions),
+        # the same comparable key as _module_interface_paths. An internal
+        # partition is a BMI-producing module unit like an interface, but MSVC
+        # compiles it with /internalPartition instead of /interface (and rejects
+        # an interface file extension for it).
+        paths: T.Set[str] = set()
+        for entry in target.cpp_internal_partitions:
+            f = entry if isinstance(entry, File) else \
+                File.from_source_file(self.source_dir, target.get_subdir(), entry)
+            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
+        return paths
+
+    def _is_declared_internal_partition(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
+        # Whether src is one of target's declared cpp_internal_partitions sources.
+        if not target.cpp_internal_partitions:
+            return False
+        key = src.rel_to_builddir(self.build_to_src) if isinstance(src, File) else src
+        return os.path.normpath(key) in self._internal_partition_paths(target)
+
+    def _module_unit_iface_args(self, cpp: Compiler, is_internal_partition: bool) -> T.List[str]:
+        # Per-unit flag telling cl/clang this TU is a module unit, mirroring the
+        # compile-edge split in generate_single_compile. cl needs
+        # /internalPartition for an internal partition (not /interface); clang's
+        # -x c++-module covers both kinds; GCC infers the kind from the source
+        # but its pre-15 driver does not know the module extensions and needs
+        # the language spelled out.
+        if cpp.get_id() == 'msvc':
+            return ['/internalPartition', '/TP'] if is_internal_partition else ['/interface', '/TP']
+        if cpp.get_id() == 'clang':
+            return ['-x', 'c++-module']
+        return ['-x', 'c++'] if mesonlib.version_compare(cpp.version, '<15') else []
 
     def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
         """Emit build edges for this target's declared header units and return
@@ -4175,10 +4219,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         # Module interface units are detected by extension (or the explicit
         # kwarg), never by reading the source; several decisions below hang
-        # off this.
+        # off this. A declared internal partition is a BMI-producing module
+        # unit too (so it is scanned, registered for BMI-class variants, and
+        # compiled as a module unit), but MSVC flags it /internalPartition
+        # rather than /interface.
         src_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
+        is_internal_partition = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+            and self._is_declared_internal_partition(target, src)
         is_module_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
-            and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src))
+            and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src)
+                 or is_internal_partition)
 
         # Include PCH header as first thing as it must be the first one or it will be
         # ignored by gcc https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100462
@@ -4218,7 +4268,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # downstream "module not found".
             if is_module_interface:
                 if compiler.get_id() == 'msvc':
-                    commands += ['/interface', '/TP']
+                    # An internal partition is not an interface: cl rejects
+                    # /interface (and an interface file extension) for it and
+                    # wants /internalPartition. The flag rides `commands`, which
+                    # the scan edge reuses, so scan and compile keep dialect
+                    # parity. gcc infers the kind and clang's -x c++-module
+                    # covers both, so only cl needs the split.
+                    commands += ['/internalPartition', '/TP'] if is_internal_partition \
+                        else ['/interface', '/TP']
                 elif compiler.get_id() == 'clang':
                     # -x c++-module parses the TU as an interface unit (.ixx
                     # needs it; uniform for .cppm too); bare -fmodule-output
@@ -4436,7 +4493,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                       pch_dep=pch_dep)
         if is_miu:
             self._target_module_interfaces[target.get_id()].append(ModuleInterfaceSource(
-                rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps)))
+                rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps),
+                is_internal_partition=is_internal_partition))
         if clang_miu:
             self.generate_cpp_module_harvest(target, compiler, rel_obj,
                                              self._bmi_class_subdir_for(target))
