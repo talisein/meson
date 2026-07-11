@@ -321,24 +321,35 @@ class InternalTests(unittest.TestCase):
         self.assertTrue(should('19.32.31114'))   # newer
         self.assertFalse(should('19.32.31114', vs_ok=False))  # old dev prompt
 
-    def test_scripts_touch(self):
-        # The GCC header-unit stamp is created by `meson --internal touch`
-        # because cmd.exe has no touch; the helper must create a missing file
-        # and bump an existing one's mtime so ninja sees the edge as rebuilt.
-        from mesonbuild.scripts.touch import run
+    def test_meson_exe_stamp(self):
+        # `meson --internal exe --stamp` runs the wrapped command and, on
+        # success, unconditionally refreshes the stamp (creates a missing one,
+        # bumps an existing one's mtime) so a consumer ordered after it rebuilds.
+        # It leaves the stamp alone when the command fails. This is how the GCC
+        # header-unit edge stamps its output without a shell '&&'.
+        import sys
+        from mesonbuild.scripts.meson_exe import run
         with tempfile.TemporaryDirectory() as d:
             stamp = os.path.join(d, 'x.stamp')
-            self.assertEqual(run([stamp]), 0)
+            ok = [sys.executable, '-c', 'pass']
+            self.assertEqual(run(['--stamp', stamp, '--'] + ok), 0)
             self.assertTrue(os.path.exists(stamp))
             old = os.stat(stamp).st_mtime - 100
             os.utime(stamp, (old, old))
-            self.assertEqual(run([stamp]), 0)
+            self.assertEqual(run(['--stamp', stamp, '--'] + ok), 0)
             self.assertGreater(os.stat(stamp).st_mtime, old)
+            # A failed command must not stamp: remove the stamp, run a failing
+            # command, and confirm it was not recreated.
+            os.remove(stamp)
+            fail = [sys.executable, '-c', 'import sys; sys.exit(1)']
+            self.assertNotEqual(run(['--stamp', stamp, '--'] + fail), 0)
+            self.assertFalse(os.path.exists(stamp))
 
     def test_gcc_header_unit_rule_portable_stamp(self):
         # The GCC header-unit edge only produces a stamp (the BMI lands in an
-        # untracked gcm.cache path), created via `meson --internal touch`, not
-        # the `touch` binary which cmd.exe lacks.
+        # untracked gcm.cache path). The compile runs through the exe wrapper,
+        # which refreshes the stamp in the same process: a '&&'-chained stamp
+        # step would not run under Ninja on Windows, which has no shell.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         be.ninja = mock.MagicMock()
@@ -359,11 +370,11 @@ class InternalTests(unittest.TestCase):
 
         self.assertEqual(len(captured), 1)
         # Normalize quoting: ninja quotes every token on Windows ("--internal"
-        # "touch") but leaves plain tokens bare on Unix, so match on the tokens
+        # "exe") but leaves plain tokens bare on Unix, so match on the tokens
         # rather than a platform-specific quoting of them.
         command_str = captured[0].command_str.replace('"', '')
-        self.assertIn('--internal touch', command_str)
-        self.assertNotIn('&& touch', command_str)
+        self.assertIn('--internal exe --stamp', command_str)
+        self.assertNotIn('&&', command_str)
 
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both

@@ -167,14 +167,20 @@ def _write_if_different(path: str, content: str) -> None:
     Mapper files are implicit inputs of compile edges; an unconditional
     rewrite would recompile every object in the target whenever any module
     in it changes.
+
+    newline='' keeps the newlines exactly as written: GCC's module-mapper
+    parser reads a mapper key up to the newline and does not strip a carriage
+    return, so a CRLF (which text mode would emit on Windows) breaks the lookup
+    with "failed reading mapper". Reading the same way makes a mapper left over
+    from an earlier CRLF-writing Meson compare unequal, so it is rewritten.
     """
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8', newline='') as f:
             if f.read() == content:
                 return
     except OSError:
         pass
-    with open(path, 'w', encoding='utf-8') as f:
+    with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(content)
 
 

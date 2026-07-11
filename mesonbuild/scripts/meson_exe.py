@@ -18,6 +18,7 @@ def buildparser() -> argparse.ArgumentParser:
     parser.add_argument('--unpickle')
     parser.add_argument('--capture')
     parser.add_argument('--feed')
+    parser.add_argument('--stamp')
     return parser
 
 def run_exe(exe: ExecutableSerialisation, extra_env: T.Optional[T.Dict[str, str]] = None) -> int:
@@ -104,7 +105,7 @@ def run(args: T.List[str]) -> int:
     if not options.unpickle and not cmd_args:
         parser.error('either --unpickle or executable and arguments are required')
     if options.unpickle:
-        if cmd_args or options.capture or options.feed:
+        if cmd_args or options.capture or options.feed or options.stamp:
             parser.error('no other arguments can be used with --unpickle')
         with open(options.unpickle, 'rb') as f:
             exe = pickle.load(f)
@@ -112,7 +113,17 @@ def run(args: T.List[str]) -> int:
     else:
         exe = ExecutableSerialisation(cmd_args, capture=options.capture, feed=options.feed)
 
-    return run_exe(exe)
+    returncode = run_exe(exe)
+    if returncode == 0 and options.stamp:
+        # Unconditionally refresh a stamp file after the wrapped command
+        # succeeds. Ninja on Windows runs a rule's command without a shell, so a
+        # compile cannot be followed by a separate stamp step through '&&'; the
+        # wrapper does both in one process. The touch is unconditional (not
+        # copy-if-different) so a consumer ordered after the stamp rebuilds
+        # whenever the wrapped command reran.
+        from pathlib import Path
+        Path(options.stamp).touch()
+    return returncode
 
 if __name__ == '__main__':
     sys.exit(run(sys.argv[1:]))

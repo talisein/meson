@@ -3790,14 +3790,15 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         # GCC writes the BMI to a mangled gcm.cache path we don't track, so the
         # edge's output is only a stamp and consumers find the BMI by directory
-        # lookup. The stamp goes through `meson --internal touch` because
-        # cmd.exe has no touch. -fmodule-only skips the object; $HULANG is
-        # c++-user-header or c++-system-header.
+        # lookup. The compile runs through the exe wrapper so that same process
+        # refreshes the stamp: Ninja on Windows runs a command without a shell,
+        # so a '&&'-chained stamp step would not run. -fmodule-only skips the
+        # object; $HULANG is c++-user-header or c++-system-header.
         modargs = NinjaCommandArg.list(compiler.get_module_compile_args(), Quoting.none)
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
-        touch = self.environment.get_build_command() + ['--internal', 'touch', '$out']
-        args = ['$ARGS'] + modargs + depargs + ['-fmodule-only', '-x', '$HULANG', '-c', '$SPELLING',
-                                                '&&'] + touch
+        command = self.environment.get_build_command() + ['--internal', 'exe', '--stamp', '$out', '--']
+        args = compiler.get_exelist() + ['$ARGS'] + modargs + depargs + \
+            ['-fmodule-only', '-x', '$HULANG', '-c', '$SPELLING']
         self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
 
     @staticmethod
