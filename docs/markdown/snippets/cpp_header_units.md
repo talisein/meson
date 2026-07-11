@@ -59,17 +59,21 @@ Current limitations:
     from the target's directory. Meson reports it up front as a header unit
     "not declared in this target's cpp_header_units". Use the include-path
     spelling.
-- **GCC: a header unit under a path with spaces needs symlink support.** GCC
+- **GCC: a header unit under a path with spaces needs a space-free link.** GCC
   resolves modules through a per-TU module mapper, which names each header unit
   by its resolved header path. A mapper key ends at the first space or tab and
   has no quoting or escape form, so a header whose path contains whitespace
-  cannot be named directly; Meson routes it through a space-free symlink in the
-  build directory instead, and the unit builds normally. Where that link cannot
-  be created — Windows, which does not grant unprivileged builds symlink
-  permission — the unit stays unnameable and the import fails to compile with
-  "no such module". Meson warns about it at configure time; move the source tree
-  to a path without spaces. Named modules are unaffected everywhere, since a
-  module name cannot contain whitespace.
+  cannot be named directly; Meson routes it through a space-free link in the
+  build directory instead, and the unit builds normally. The link is a symlink
+  on POSIX, and on Windows a directory symlink where the build has that
+  privilege (an elevated shell, or Developer Mode enabled) or otherwise an NTFS
+  junction, which any user can create on a local NTFS volume. Only where none of
+  these can be made — a non-NTFS build volume such as FAT/exFAT, or a build
+  without symlink privilege on a filesystem that also cannot hold a junction —
+  does the unit stay unnameable; the import then fails to compile with "no such
+  module", and Meson warns about it at configure time. In that case move the
+  source tree to a path without spaces, or enable Developer Mode. Named modules
+  are unaffected everywhere, since a module name cannot contain whitespace.
 - **ccache** does not track BMI contents and would serve stale objects for
   Clang module and header-unit consumers, so Meson makes it fall back to the
   real compiler for module compiles (as it already does for GCC's

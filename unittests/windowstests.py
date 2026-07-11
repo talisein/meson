@@ -6,6 +6,7 @@ import re
 import os
 import json
 import shutil
+import tempfile
 from unittest import mock, SkipTest, skipUnless, skipIf
 from glob import glob
 
@@ -722,6 +723,98 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                provider_lib='libmodlib.a',
                                consumers=('prog_md.exe', 'prog_mt.exe'),
                                expected_targets=('modlib', 'prog_md', 'prog_mt'))
+
+    def test_gcc_header_unit_space_free_alias(self):
+        # The space-free alias that lets a GCC header unit under a spaced path
+        # be named in a module mapper (a mapper key cannot contain whitespace):
+        # on Windows a directory symlink where the build is privileged, else an
+        # NTFS junction. Either must be traversable and idempotent. This is pure
+        # path machinery, independent of any compiler.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        import mesonbuild.backend.ninjabackend as nb
+        with tempfile.TemporaryDirectory() as d:
+            build = os.path.join(d, 'build')
+            real = os.path.join(d, 'sp ace src')
+            os.makedirs(build)
+            os.makedirs(real)
+            with open(os.path.join(real, 'hdr.h'), 'w', encoding='utf-8') as f:
+                f.write('#pragma once\n')
+            be = NinjaBackend.__new__(NinjaBackend)
+            be._dir_aliases = {}
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = build
+
+            rel = be._space_free_dir_alias(real)
+            if rel is None:
+                raise SkipTest('platform can make neither a symlink nor a junction here')
+            self.assertRegex(rel, r'^meson-private/imap/[0-9a-f]+$')
+            abs_alias = os.path.join(build, rel)
+            # Traversable: the aliased path reaches the real file.
+            with open(os.path.join(abs_alias, 'hdr.h'), encoding='utf-8') as f:
+                self.assertIn('pragma once', f.read())
+            # It is a link/junction, not a copied tree.
+            self.assertIsNotNone(be._read_dir_link(abs_alias))
+            # Idempotent across a fresh backend, exercising the on-disk readback
+            # (a junction's readlink carries a '\\?\' prefix that must compare
+            # equal to the plain target, so it is not recreated every time).
+            be._dir_aliases = {}
+            self.assertEqual(be._space_free_dir_alias(real), rel)
+
+            # Force the junction fallback: an unprivileged build cannot make a
+            # symlink, but a junction still names the unit on local NTFS.
+            real2 = os.path.join(d, 'sp ace two')
+            os.makedirs(real2)
+            with open(os.path.join(real2, 'hdr.h'), 'w', encoding='utf-8') as f:
+                f.write('#pragma once\n')
+            be._dir_aliases = {}
+            with mock.patch.object(nb.os, 'symlink', side_effect=OSError):
+                rel2 = be._space_free_dir_alias(real2)
+            if rel2 is not None:
+                with open(os.path.join(build, rel2, 'hdr.h'), encoding='utf-8') as f:
+                    self.assertIn('pragma once', f.read())
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_units(self):
+        # A user header unit, a system header unit and a named module in one
+        # target build, link and run on Windows. This fixture's own path
+        # contains spaces, which a mapper key cannot hold, so each unit is named
+        # through the space-free alias, and the BMI the mapper points at is the
+        # one the unit edge wrote.
+        self.build_and_check_modules('142 gcc header units',
+                                     setup_not_contains=['divergent BMI-affecting flags',
+                                                         'cannot name a header unit'])
+        self.check_gcc_module_mappers()
+        import glob
+        mappers = glob.glob(os.path.join(self.builddir, '*', 'main.cpp.*.mapper'))
+        self.assertEqual(len(mappers), 1, f'expected one main.cpp mapper, got {mappers}')
+        with open(mappers[0], encoding='utf-8') as f:
+            mapper = f.read().splitlines()
+        for unit in ('util.h', 'angleutil.h'):
+            pat = rf'\./meson-private/imap/[0-9a-f]+/{re.escape(unit)} \S+\.gcm'
+            line = next((l for l in mapper if re.fullmatch(pat, l)), None)
+            self.assertIsNotNone(line, f'no aliased mapping for {unit} in {mapper}')
+            bmi = line.split(' ', 1)[1]
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
+                            f'mapper names {bmi}, which the unit edge did not write')
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_alias_unavailable_warns(self):
+        # Where no space-free alias can be made (a non-NTFS build volume, or a
+        # build without symlink privilege or junction support), a header unit
+        # under a spaced path stays unnameable and Meson says so at configure
+        # rather than emitting a mapper that fails at compile. Block the alias
+        # directory with a regular file to force that platform's behavior.
+        os.makedirs(os.path.join(self.builddir, 'meson-private'), exist_ok=True)
+        with open(os.path.join(self.builddir, 'meson-private', 'imap'), 'w',
+                  encoding='utf-8') as f:
+            f.write('')
+        out = self.init(os.path.join(self.unit_test_dir, '142 gcc header units'))
+        self.assertIn('cannot name a header unit whose path contains a space', out)
+        # All or nothing: with no alias, nothing is respelled -- a half-aliased
+        # target would name the unit one way on its edge and another on its
+        # importers, worse than the diagnosed failure.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('meson-private/imap/', f.read())
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

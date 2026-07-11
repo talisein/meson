@@ -1869,6 +1869,72 @@ class NinjaBackend(backends.Backend):
     def _has_space(s: str) -> bool:
         return any(c.isspace() for c in s)
 
+    @staticmethod
+    def _read_dir_link(abs_alias: str) -> T.Optional[str]:
+        """The target a directory link points at, or None if it is not a link.
+
+        os.readlink reads a POSIX symlink and, on Python >= 3.8, a Windows
+        directory symlink or junction; it raises OSError on a real directory or
+        a missing path. A junction's target comes back with a '\\\\?\\'
+        extended-length prefix, which is stripped so the value compares equal to
+        the plain target it was made from.
+        """
+        try:
+            target = os.readlink(abs_alias)
+        except OSError:
+            return None
+        prefix = '\\\\?\\'
+        if mesonlib.is_windows() and target.startswith(prefix):
+            target = target[len(prefix):]
+        return target
+
+    @staticmethod
+    def _same_dir(a: str, b: str) -> bool:
+        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+    @staticmethod
+    def _remove_dir_link(abs_alias: str) -> None:
+        # A Windows directory symlink and a junction are both reparse-point
+        # directories, removed with rmdir; a POSIX symlink is removed with
+        # unlink.
+        if mesonlib.is_windows():
+            os.rmdir(abs_alias)
+        else:
+            os.unlink(abs_alias)
+
+    @staticmethod
+    def _make_dir_link(target: str, link: str) -> bool:
+        """Create a directory link at *link* pointing at *target*. Never raises;
+        returns whether a link now exists.
+
+        POSIX makes a symlink. Windows tries a directory symlink first -- it
+        needs privilege or Developer Mode but is the only form that reaches a
+        target on a network share -- then falls back to an NTFS junction, which
+        any user can make on a local volume. A platform that can do neither
+        (FAT/exFAT, or a junction target off the local volume) leaves the header
+        unit unnameable, and warn_on_unmappable_header_units reports it.
+        """
+        if not mesonlib.is_windows():
+            try:
+                os.symlink(target, link)
+                return True
+            except (OSError, NotImplementedError):
+                return False
+        try:
+            os.symlink(target, link, target_is_directory=True)
+            return True
+        except OSError:
+            pass
+        try:
+            from _winapi import CreateJunction
+        except ImportError:
+            return False
+        try:
+            CreateJunction(target, link)
+            return True
+        except OSError:
+            return False
+
     def _space_free_dir_alias(self, real_dir: str) -> T.Optional[str]:
         """A space-free build-relative alias for a directory whose path
         contains whitespace, or None when the platform cannot express one (the
@@ -1876,36 +1942,36 @@ class NinjaBackend(backends.Backend):
 
         GCC names a header unit by the *text* of the path it was resolved
         through, and a module mapper cannot quote whitespace, so a unit under a
-        spaced path is unnameable. GCC does not resolve symlinks in that text
+        spaced path is unnameable. GCC does not resolve the link in that text
         either, so routing the include path through a space-free link renames
         the unit without moving the header.
 
-        POSIX: a symlink. Windows: None for now -- symlinks need privilege and
-        junctions need platform code.
+        The link is a symlink on POSIX; on Windows a directory symlink where the
+        build has the privilege for it, else an NTFS junction (see
+        _make_dir_link).
         """
         try:
             return self._dir_aliases[real_dir]
         except KeyError:
             pass
         alias: T.Optional[str] = None
-        if not mesonlib.is_windows():
-            digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
-            rel = f'meson-private/imap/{digest}'
-            abs_alias = os.path.join(self.environment.get_build_dir(), rel)
-            try:
-                os.makedirs(os.path.dirname(abs_alias), exist_ok=True)
-                # Idempotent: regeneration must land on the same link, and a
-                # stale one (source dir moved) must be replaced, not kept.
-                if os.path.islink(abs_alias):
-                    if os.readlink(abs_alias) != real_dir:
-                        os.remove(abs_alias)
-                        os.symlink(real_dir, abs_alias)
-                else:
-                    os.symlink(real_dir, abs_alias)
-            except (OSError, NotImplementedError):
-                mlog.debug(f'Could not create a space-free alias for {real_dir!r}.')
-            else:
+        digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
+        rel = f'meson-private/imap/{digest}'
+        abs_alias = os.path.join(self.environment.get_build_dir(), rel)
+        try:
+            os.makedirs(os.path.dirname(abs_alias), exist_ok=True)
+            # Idempotent: regeneration must land on the same link, and a stale
+            # one (source dir moved) must be replaced, not kept.
+            existing = self._read_dir_link(abs_alias)
+            if existing is not None and self._same_dir(existing, real_dir):
                 alias = rel
+            else:
+                if existing is not None:
+                    self._remove_dir_link(abs_alias)
+                if self._make_dir_link(real_dir, abs_alias):
+                    alias = rel
+        except OSError:
+            mlog.debug(f'Could not create a space-free alias for {real_dir!r}.')
         self._dir_aliases[real_dir] = alias
         return alias
 
