@@ -1581,6 +1581,14 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def supports_pch_with_cpp_modules(self) -> bool:
+        """Whether a precompiled header can be used in a module-enabled
+        target. False where the two mechanisms are mutually exclusive (GCC:
+        a .gch is rejected as invalid by any -fmodules compile, and -fmodules
+        turns PCH generation into a header-unit CMI instead of a .gch).
+        """
+        return True
+
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
         """(prefix flags, argument-consuming flags) known not to affect a C++ module BMI.
 

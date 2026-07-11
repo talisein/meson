@@ -1432,7 +1432,8 @@ class NinjaBackend(backends.Backend):
                                  commands: T.Union['CompilerArgs', T.List[str]],
                                  header_deps: T.Optional[T.List[FileOrString]] = None,
                                  order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None,
-                                 header_unit_override: T.Optional[T.List[str]] = None) -> None:
+                                 header_unit_override: T.Optional[T.List[str]] = None,
+                                 pch_dep: T.Optional[T.List[str]] = None) -> None:
         if not self.target_uses_p1689_cpp_modules_edge(target, compiler):
             return
         if compiler.get_id() == 'clang':
@@ -1466,8 +1467,11 @@ class NinjaBackend(backends.Backend):
         # configure_file / custom_target output the source #includes) and other
         # order-only inputs, plus the declared header units -- otherwise the
         # scanner errors on a missing generated header, or fails cold on a
-        # header-unit import and yields an empty .ddi.
+        # header-unit import and yields an empty .ddi. The PCH is a real
+        # input for the same reason: the scan args force-include it, and its
+        # macros can gate imports.
         self.add_header_deps(target, elem, header_deps or [])
+        elem.add_dep(pch_dep or [])
         elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
         if compiler.get_id() == 'clang':
             # Real inputs, not order-only: the scan command names the pcms, so
@@ -4169,9 +4173,23 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         compiler = get_compiler_for_source(target.compilers.values(), src)
         commands = target.get_single_compile_base_args(compiler)
 
+        # Module interface units are detected by extension (or the explicit
+        # kwarg), never by reading the source; several decisions below hang
+        # off this.
+        src_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
+        is_module_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+            and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src))
+
         # Include PCH header as first thing as it must be the first one or it will be
         # ignored by gcc https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100462
-        use_pch = self.target_uses_pch(target)
+        # A module interface unit gets no PCH at all (the forced include would
+        # land before the module declaration, which is ill-formed), and some
+        # compilers cannot combine PCH with modules in any TU of the target
+        # (generate_pch skips the PCH edge and warns).
+        use_pch = self.target_uses_pch(target) and not is_module_interface
+        if use_pch and self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+                and not compiler.supports_pch_with_cpp_modules():
+            use_pch = False
         if use_pch and 'mw' not in compiler.id:
             commands += self.get_pch_include_args(compiler, target)
 
@@ -4198,8 +4216,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # interface-extension check in depaccumulate.run_p1689): a scanned
             # provide from a source outside this set is an error there, not a
             # downstream "module not found".
-            suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            if suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src):
+            if is_module_interface:
                 if compiler.get_id() == 'msvc':
                     commands += ['/interface', '/TP']
                 elif compiler.get_id() == 'clang':
@@ -4256,7 +4273,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         commands += self.get_compile_debugfile_args(compiler, target, rel_obj)
 
         # PCH handling. We only support PCH for C and C++
-        if compiler.language in {'c', 'cpp'} and target.has_pch() and self.target_uses_pch(target):
+        if compiler.language in {'c', 'cpp'} and target.has_pch() and use_pch:
             pchlist = target.pch[compiler.language]
         else:
             pchlist = None
@@ -4400,12 +4417,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # publish it into the shared cache with a harvest edge. cl needs
         # neither -- its directory /ifcOutput writes the BMI straight into the
         # class cache and the dyndep declares it there.
-        is_miu = False
-        if self.target_uses_p1689_cpp_modules_edge(target, compiler) \
-                and compiler.supports_bmi_classes():
-            miu_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-            is_miu = miu_suffix in {'cppm', 'ixx'} \
-                or self._is_declared_module_interface(target, src)
+        is_miu = is_module_interface and compiler.supports_bmi_classes()
         clang_miu = is_miu and compiler.get_id() == 'clang'
         if clang_miu:
             element.implicit_outfilenames.append(self.get_bmi_file_for(compiler, rel_obj))
@@ -4420,7 +4432,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # reusing the exact compile args so scan and compile see the same
         # dialect.
         self.generate_cpp_module_scan(target, compiler, rel_src, rel_obj, commands,
-                                      header_deps=header_deps, order_deps=order_deps)
+                                      header_deps=header_deps, order_deps=order_deps,
+                                      pch_dep=pch_dep)
         if is_miu:
             self._target_module_interfaces[target.get_id()].append(ModuleInterfaceSource(
                 rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps)))
@@ -4591,6 +4604,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             if lang not in target.compilers:
                 continue
             compiler: Compiler = target.compilers[lang]
+            if lang == 'cpp' and not compiler.supports_pch_with_cpp_modules() \
+                    and self.target_uses_p1689_cpp_modules_edge(target, compiler):
+                mlog.warning(f'Target "{target.name}" uses both C++ modules and a C++ '
+                             f'precompiled header, which {compiler.id} cannot combine; '
+                             'the precompiled header is disabled for this target.')
+                continue
             if compiler.get_argument_syntax() == 'msvc':
                 (commands, dep, dst, objs, src) = self.generate_msvc_pch_command(target, compiler, pch)
                 extradep = os.path.join(self.build_to_src, target.get_subdir(), pch[0])

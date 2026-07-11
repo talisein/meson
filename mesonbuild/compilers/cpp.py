@@ -830,6 +830,13 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # older than that.
         return True
 
+    def supports_pch_with_cpp_modules(self) -> bool:
+        # Mutually exclusive: any -fmodules compile rejects a .gch built
+        # without -fmodules as invalid, and building the .gch with -fmodules
+        # is impossible (-x c++-header then emits a header-unit CMI and no
+        # .gch at all). GCC's position is that header units subsume PCH.
+        return False
+
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative GCC strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
