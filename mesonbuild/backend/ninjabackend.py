@@ -4242,6 +4242,20 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             use_pch = False
         if use_pch and 'mw' not in compiler.id:
             commands += self.get_pch_include_args(compiler, target)
+            pch = target.pch.get(compiler.get_language())
+            if pch and compiler.get_id() == 'msvc' \
+                    and self.target_uses_p1689_cpp_modules_edge(target, compiler):
+                # cl's /scanDependencies force-includes the PCH header (/FI) from
+                # disk -- it does not resolve the forced include against the
+                # baked .pch the way a compile does -- so a module target's scan
+                # needs the header's own directory on the include path (Meson
+                # requires the PCH header to live in a subdir, off the target's
+                # implicit source include). A non-module compile resolves the
+                # forced include from the .pch and never needs this; mirrors the
+                # pch-header-dir include the PCH build edge already adds.
+                pch_header_dir = os.path.dirname(
+                    os.path.join(self.build_to_src, target.get_subdir(), pch[0]))
+                commands += compiler.get_include_args(pch_header_dir, False)
 
         commands += self._generate_single_compile_target_args(target, compiler)
 
