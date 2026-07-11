@@ -50,16 +50,16 @@ executable('prog', 'main.cpp', dependencies: std,
 
 Diagnostics (a module required by no target, a duplicate module name reaching
 one link, and module dependency cycles) are reported at build time exactly as
-for GCC and MSVC. All translation units sharing modules must use the same
-module-affecting flags; Clang additionally enforces this itself (a `cpp_std`
-mismatch against a BMI is a hard compiler error). Watch `-pthread` in
-particular: `dependency('threads')` adds it only to its own consumers, so a
-threads-using target cannot share modules with targets built without the
-flag, in either direction. Meson warns at setup when module-sharing targets
-diverge on it; the fix is `dependency('threads')` on the target missing the
-flag (or `-pthread` build-wide via `-Dcpp_args=-pthread`). The std module
-itself is immune by default: `dependency('std')` folds the threads
-dependency in and propagates it to every consumer.
+for GCC and MSVC. A BMI bakes in the flags of its own compile, and Clang
+refuses a mismatched import with a hard error (a `cpp_std` mismatch, or
+`-pthread` present on one side only — `dependency('threads')` adds it only to
+its own consumers). Targets that share modules but compile with divergent
+module-affecting flags nonetheless build correctly: each flag class gets its
+own subdirectory of `pcm.cache`, and Meson recompiles a shared provider's
+interfaces per class as BMIs only — every consumer still links the provider's
+objects exactly once. The std module needs no special handling for any of
+this; `dependency('std')` folds the threads dependency in and propagates it
+to every consumer.
 
 ccache does not track BMI contents and would serve stale objects for module
 consumers, so Meson makes it fall back to the real compiler for module

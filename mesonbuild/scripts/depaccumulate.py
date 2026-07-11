@@ -250,16 +250,17 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--dep-provmap', action='append', default=[],
                         help='Provided-module map of a dependency target. Repeatable.')
     parser.add_argument('--stamp-suffix', default=None,
-                        help='Clang: BMIs reach the shared cache via harvest edges, so '
+                        help='BMIs reach the shared cache via harvest edges (Clang\'s '
+                             'own pipeline, and BMI-only variants on any compiler): '
                              'map a provided module to its harvest stamp '
                              '(<primary-output> + this suffix) instead of the cache BMI '
                              'path, and declare no implicit outputs on object edges.')
     parser.add_argument('--interface-source', action='append', default=[],
                         dest='interface_sources',
-                        help='Clang: a source declared a module interface via '
-                             'cpp_module_interfaces, so it is compiled as an interface '
-                             'unit despite lacking a module extension. Its provides pass '
-                             'the interface-extension check. Repeatable.')
+                        help='A source compiled as an interface unit despite lacking a '
+                             'module extension (declared via cpp_module_interfaces, or '
+                             'any recorded interface of a BMI-only variant). Its '
+                             'provides pass the interface-extension check. Repeatable.')
     parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
                         help='A declared header unit as "<mode>:<spelling>". Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
@@ -400,14 +401,15 @@ def run_p1689(argv: T.List[str]) -> int:
 
 
 def run_harvest(argv: T.List[str]) -> int:
-    """Publish a Clang module interface's BMI into the shared cache.
+    """Publish a module interface's source-keyed BMI into the shared cache.
 
-    Clang's bare -fmodule-output names the BMI after the source, next to the
-    object; this copies it to <bmi-dir>/<module-name><bmi-suffix> -- the path
-    -fprebuilt-module-path consumers look up -- with the module name read from
-    the interface's P1689 scan at build time, so it never appears on a command
-    line. The stamp is the edge's declared output; consumers' dyndep entries
-    order against it (run_p1689 --stamp-suffix).
+    Copies a BMI the compile wrote at a source-keyed path (Clang's bare
+    -fmodule-output, or a BMI-only variant's declared output on any compiler)
+    to <bmi-dir>/<module-name><bmi-suffix> -- the path consumers' directory
+    lookup finds -- with the module name read from the interface's P1689 scan
+    at build time, so it never appears on a command line. The stamp is the
+    edge's declared output; consumers' dyndep entries order against it
+    (run_p1689 --stamp-suffix).
     """
     parser = argparse.ArgumentParser(prog='depaccumulate --harvest')
     parser.add_argument('--pcm', required=True,

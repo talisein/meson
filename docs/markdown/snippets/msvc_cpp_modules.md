@@ -47,5 +47,8 @@ module partitions and `import std;` need the P1689 scan and therefore VS 2022
 
 Diagnostics (a module required by no target, a duplicate module name reaching one
 link, and module dependency cycles) are reported at build time for MSVC exactly
-as for GCC. All translation units sharing modules must use the same
-module-affecting flags.
+as for GCC. Targets that share modules but compile with divergent
+module-affecting flags (a different `cpp_std`, extra defines, ...) build
+correctly: each flag class gets its own subdirectory of `ifc.cache`, and
+Meson recompiles a shared provider's interfaces per class as BMIs only —
+every consumer still links the provider's objects exactly once.
