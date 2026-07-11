@@ -526,6 +526,31 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             self.build()
         self.assertIn('not declared in this target', cm.exception.stdout)
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
+    def test_msvc_header_unit_aliasing(self):
+        # The same header imported from TUs in different directories. With the
+        # include-path spelling every importer resolves the one declared unit:
+        # exactly one unit edge serves them all.
+        testdir = '173 header unit aliasing'
+        self.build_and_check_modules(testdir, ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
+        # cl matches a header unit by the *literal* import spelling it scans,
+        # not a normalized or resolved path, so an importer-relative
+        # "../header.hpp" matches no target-level declaration. Unlike GCC there
+        # is no alias escape hatch: the GCC-style resolved-path spelling
+        # (foo/../header.hpp, mode 'aliased') still mismatches the scanned
+        # "../header.hpp", and the bare spelling itself cl cannot open as a
+        # file. Both fail at Meson's collator with a legible message; only the
+        # include-path spelling (plain) is portable.
+        for mode in ('aliased', 'undeclared'):
+            with self.subTest(mode=mode):
+                self.new_builddir()
+                self.init(os.path.join(self.unit_test_dir, testdir),
+                          extra_args=[f'-Dmode={mode}'])
+                with self.assertRaises(subprocess.CalledProcessError) as cm:
+                    self.build()
+                self.assertIn('not declared in this target', cm.exception.stdout)
+
     # MSVC has no cpp_std=c++23/c++26, so the shared two-class fixtures (which
     # default to c++23 parents) are driven at c++latest/c++20 instead; the
     # class split is the same. Subproject dialects are pinned explicitly
