@@ -685,6 +685,19 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('172 module sources with spaces')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_runtime_bmi_classes(self):
+        # The MSVC runtime library (/MD vs /MT) is BMI-affecting and not
+        # allowlisted, so a consumer that overrides b_vscrt lands in its own
+        # BMI class: prog_mt resolves modlib against a BMI-only variant compiled
+        # /MT and links the provider's runtime-neutral object, while prog_md
+        # shares the provider's own /MD BMI. Same two-class contract as a
+        # cpp_std split, driven by a runtime flag on real cl.
+        self.check_bmi_classes('176 msvc runtime bmi classes', module_name='modlib',
+                               provider_lib='libmodlib.a',
+                               consumers=('prog_md.exe', 'prog_mt.exe'),
+                               expected_targets=('modlib', 'prog_md', 'prog_mt'))
+
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()
         # and thus it's missing /utf-8 argument. Was that intentional? This needs
