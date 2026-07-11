@@ -1548,6 +1548,14 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
 
+    def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
+        """Flags making a compile edge resolve C++ modules through the given
+        per-TU mapper file (a collate output enumerating the TU's provides
+        and direct imports). [] for compilers that resolve BMIs by directory
+        search and need no mapper.
+        """
+        return []
+
     def get_module_scanner_exelist(self) -> T.List[str]:
         # Only for compilers whose P1689 scanner is a separate tool (Clang's
         # clang-scan-deps); GCC and MSVC scan with the compiler binary itself.
@@ -1634,9 +1642,11 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """Whether header units are built once per BMI equivalence class
         rather than once build-wide. True only where
         get_header_unit_consumer_args names the unit's BMI by explicit path,
-        which is all the resolution a per-class BMI needs; a directory-lookup
-        compiler (GCC) cannot relocate the search per class and keeps the
-        single shared unit plus the divergence warning.
+        which is all the resolution a per-class BMI needs. GCC stays False
+        even with the module mapper: a unit's CMI name is its resolved header
+        path, known only when the compiler runs, so the unit build edge
+        cannot be given a generate-time per-class mapping. Its units stay
+        deduped build-wide in the flat cache, with the divergence warning.
         """
         return False
 

@@ -807,12 +807,28 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected.
-        # class_subdir is unused: GCC carries no cache dir on the command line;
-        # the stage that flips GCC's supports_bmi_classes() will consume it
-        # via the module mapper -- which is also what per-class header units
-        # (supports_bmi_class_header_units) wait on, since GCC resolves them
-        # by gcm.cache lookup with no explicit-path flag either.
+        # class_subdir is unused: GCC carries no cache dir on the command
+        # line. Per-class relocation rides the per-TU module mapper instead
+        # (get_module_mapper_args), which the backend adds to compile edges
+        # only -- a scan resolves no named modules, and header units stay in
+        # the flat default cache the mapper-less scan already finds.
         return [self._named_modules_flag(), '-Mno-modules']
+
+    def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
+        # The only way to relocate GCC's BMI lookup: gcm.cache is resolved
+        # relative to the working directory, and there is no search-path
+        # flag. The mapper file must enumerate the TU's provides and direct
+        # imports (a mapping file disables the default module->CMI naming
+        # and has no wildcard form), so its contents are scan-derived and
+        # written by the collate; only this static path is on the command
+        # line.
+        return [f'-fmodule-mapper={mapper_path}']
+
+    def supports_bmi_classes(self) -> bool:
+        # Divergent classes work through the per-TU module mapper. Only
+        # consulted on the P1689 path (GCC >= 14); -fmodule-mapper is far
+        # older than that.
+        return True
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative GCC strip list. Defines are deliberately

@@ -618,11 +618,10 @@ class NinjaBackend(backends.Backend):
         # - https://github.com/mesonbuild/meson/issues/9479#issuecomment-953485040
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
-        # Consumer/provider target-id pairs already warned about for divergent
-        # BMI-affecting flags, so each divergence is reported once. Header
-        # units get the same treatment keyed by (unit key, consumer id), with
-        # the class that built each unit recorded at edge creation.
-        self._warned_module_divergence: T.Set[T.Tuple[str, str]] = set()
+        # (unit key, consumer id) pairs already warned about for divergent
+        # BMI-affecting flags on a shared header unit, so each divergence is
+        # reported once; the class that built each unit is recorded at edge
+        # creation.
         self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
         self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
         # Header units: global dedup of unit build edges, keyed by
@@ -1547,9 +1546,11 @@ class NinjaBackend(backends.Backend):
             self.warn_on_clang_modules_ccache(cpp)
 
         ddis: T.List[str] = []
+        mappers: T.List[str] = []
         for src, lang in self.select_sources_to_scan(compiled_sources):
             if lang == 'cpp':
                 ddis.append(self.get_ddi_file_for(source2object[src]))
+                mappers.append(source2object[src] + '.mapper')
 
         dep_provmaps: T.List[str] = []
         for t in target.get_all_linked_targets():
@@ -1562,6 +1563,12 @@ class NinjaBackend(backends.Backend):
         provmap_file = self.get_provided_modules_file_for(target)
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
                                  'cpp_module_collate', sorted(ddis))
+        if cpp.get_id() == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+            # The per-TU module mappers the compile edges rebuild on. They
+            # are written copy-if-different, so restat keeps an unchanged
+            # mapper from recompiling its TU when a sibling module changes.
+            elem.implicit_outfilenames.extend(sorted(mappers))
+            elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
         elem.add_item('DYNDEP', dyndep_file)
@@ -1585,7 +1592,10 @@ class NinjaBackend(backends.Backend):
         collator accepts them. For cl the declared header units are passed so
         the collator can flag an import of one this target never declared (cl
         reports header-unit requires from a cold scan; GCC cannot, so it is
-        omitted there).
+        omitted there). A multi-class GCC target's collate also writes the
+        per-TU module mappers (--mapper-suffix, in lockstep with the compile
+        edges' get_module_mapper_args paths) that relocate its BMIs into the
+        class cache subdir.
         """
         depargs: T.List[str] = []
         for pm in dep_provmaps:
@@ -1594,6 +1604,9 @@ class NinjaBackend(backends.Backend):
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
             for p in sorted(self._module_interface_paths(target)):
                 depargs += ['--interface-source', p]
+        if cpp.get_id() == 'gcc' and self._bmi_class_subdir_for(target) is not None:
+            depargs += ['--mapper-suffix', '.mapper',
+                        '--flat-bmi-dir', cpp.get_module_cache_dir()]
         if cpp.get_id() == 'msvc':
             for hu in target.cpp_header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
@@ -1603,13 +1616,10 @@ class NinjaBackend(backends.Backend):
     def _module_provmap_for(self, consumer: build.BuildTarget,
                             provider: build.BuildTarget) -> str:
         """The provided-modules map `consumer` resolves `provider`'s modules
-        from: the provider's own when their BMI classes agree, a BMI-only
-        variant in the consumer's class when the compiler supports classes,
-        else the provider's own plus the divergence warning.
+        from: the provider's own when their BMI classes agree, else a
+        BMI-only variant in the consumer's class. Every compiler on the
+        P1689 path supports classes.
         """
-        if not consumer.compilers['cpp'].supports_bmi_classes():
-            self.warn_on_module_flag_divergence(consumer, provider)
-            return self.get_provided_modules_file_for(provider)
         return self._provmap_for_class(provider, self._bmi_class_key_of(consumer))
 
     def _provmap_for_class(self, provider: build.BuildTarget,
@@ -1657,13 +1667,15 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
-        # An interface's `import <hdr>;` must resolve this class's unit BMI,
-        # not the provider's: provision the units under the variant's class
-        # (reusing a class-mate target's edges when they exist), built from
-        # the same pre-module args as a target's own units. `args` keeps
-        # growing below, so the unit edges get their own copy.
+        # An interface's `import <hdr>;` must resolve this class's unit BMI
+        # where the compiler builds units per class, reusing a class-mate
+        # target's edges when they exist; on GCC units are deduped build-wide
+        # (the subdir lookup yields None) and the variant shares the flat
+        # ones. Built from the same pre-module args as a target's own units.
+        # `args` keeps growing below, so the unit edges get their own copy.
         hu_outputs, hu_args = self._provision_header_unit_edges(
-            cpp, provider.cpp_header_units, args.copy(), class_key, info.subdir,
+            cpp, provider.cpp_header_units, args.copy(), class_key,
+            self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
             vid, None)
         modargs = cpp.get_module_compile_args(info.subdir)
         if cpp.get_id() == 'clang' and '-fmodules' in args:
@@ -1682,8 +1694,15 @@ class NinjaBackend(backends.Backend):
         rulename = self.get_compiler_rule_name('cpp', cpp.for_machine, 'BMI_VARIANT')
         recs = self._target_module_interfaces[provider.get_id()]
         # cl and clang need each interface unit flagged explicitly, mirroring
-        # the compile-edge split in generate_single_compile.
-        iface_args = ['/interface', '/TP'] if cpp.get_id() == 'msvc' else ['-x', 'c++-module']
+        # the compile-edge split in generate_single_compile. GCC infers
+        # interface-ness from the source, but its pre-15 driver does not know
+        # the module extensions and needs the language spelled out.
+        if cpp.get_id() == 'msvc':
+            iface_args = ['/interface', '/TP']
+        elif cpp.get_id() == 'clang':
+            iface_args = ['-x', 'c++-module']
+        else:
+            iface_args = ['-x', 'c++'] if mesonlib.version_compare(cpp.version, '<15') else []
         ddis: T.List[str] = []
         for rec in recs:
             # The BMI is the edge's primary output, standing where the object
@@ -1700,8 +1719,13 @@ class NinjaBackend(backends.Backend):
             ddis.append(self.get_ddi_file_for(vpcm))
             elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
             elem.add_item('ARGS', args)
-            if cpp.get_id() == 'clang':
+            if cpp.get_id() in {'clang', 'gcc'}:
                 elem.add_item('DEPFILE', vpcm + '.d')
+            if cpp.get_id() == 'gcc':
+                # The variant's collate writes this mapper; it sends the
+                # export to $out and the imports to the class cache.
+                elem.add_item('MAPPER', vpcm + '.mapper')
+                elem.add_dep(vpcm + '.mapper')
             self.add_header_deps(provider, elem, header_deps)
             elem.add_orderdep(self.order_deps_to_strings(provider, order_deps))
             elem.add_dep(hu_outputs)
@@ -1720,6 +1744,11 @@ class NinjaBackend(backends.Backend):
                                and t.provides_cpp_modules()})
         elem = NinjaBuildElement(self.all_outputs, [variant.dyndep, variant.provmap],
                                  'cpp_module_collate', sorted(ddis))
+        if cpp.get_id() == 'gcc':
+            # As on a target collate: the variant compiles rebuild on these.
+            elem.implicit_outfilenames.extend(
+                d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
+            elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
         elem.add_item('DYNDEP', variant.dyndep)
@@ -1730,6 +1759,9 @@ class NinjaBackend(backends.Backend):
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
+        if cpp.get_id() == 'gcc':
+            depargs += ['--mapper-suffix', '.mapper',
+                        '--flat-bmi-dir', cpp.get_module_cache_dir()]
         for rec in recs:
             depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
         if cpp.get_id() == 'msvc':
@@ -1766,37 +1798,14 @@ class NinjaBackend(backends.Backend):
                 'compiler for them; module-enabled sources will not benefit from ccache.',
                 once=True, fatal=False)
 
-    def warn_on_module_flag_divergence(self, consumer: build.BuildTarget,
-                                       provider: build.BuildTarget) -> None:
-        """Warn when targets that share C++ modules compile in different BMI
-        equivalence classes (Compiler.get_bmi_class_key), once per (consumer,
-        provider) pair, naming the differing flags. A BMI bakes in the flags of
-        its own compile: Clang refuses a mismatched import with a
-        configuration-mismatch hard error, GCC accepts it silently and can
-        miscompile. -pthread gets tailored advice because dependency('threads')
-        injects it per target; the synthesized std target's POSIX-thread
-        setting is chosen by the dependency spelling (kept in lockstep with
-        _cpp_std_module_dependency).
-        """
-        pair = (consumer.get_id(), provider.get_id())
-        if pair in self._warned_module_divergence:
-            return
-        consumer_key, provider_key = self._bmi_class_key_of(consumer), self._bmi_class_key_of(provider)
-        if consumer_key == provider_key:
-            return
-        self._warned_module_divergence.add(pair)
-
-        mlog.warning(
-            f'Targets {consumer.name!r} and {provider.name!r} share C++ modules '
-            'but compile with divergent BMI-affecting flags: '
-            + self._render_bmi_divergence(consumer.name, consumer_key,
-                                          provider.name, provider_key))
-
     @staticmethod
     def _render_bmi_divergence(name_a: str, key_a: T.Tuple[str, ...],
                                name_b: str, key_b: T.Tuple[str, ...]) -> str:
         """The "<flags> only in <target>" clauses plus the tailored -pthread
-        advice, shared by the module and header-unit divergence warnings."""
+        advice, for the header-unit divergence warning. -pthread gets its own
+        fix because dependency('threads') injects it per target; the
+        synthesized std target's POSIX-thread setting follows the dependency
+        spelling (in lockstep with _cpp_std_module_dependency)."""
         adiff = sorted((Counter(key_a) - Counter(key_b)).keys())
         bdiff = sorted((Counter(key_b) - Counter(key_a)).keys())
         parts = [', '.join(repr(f) for f in diff) + f' only in {n!r}'
@@ -3470,10 +3479,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
     def generate_bmi_variant_compile_rule(self, compiler: Compiler) -> None:
         # Compiles a module interface unit straight to a BMI, never an object
-        # (clang --precompile, cl /ifcOnly). The interface-unit flags cover
-        # extension-less declared interfaces. Registered lazily with the first
-        # variant; compilers gain a command line here when their
-        # supports_bmi_classes() flips.
+        # (clang --precompile, cl /ifcOnly, gcc -fmodule-only). The
+        # interface-unit flags cover extension-less declared interfaces.
+        # Registered lazily with the first variant.
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'BMI_VARIANT')
         if self.ninja.has_rule(rulename):
             return
@@ -3486,7 +3494,17 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
             return
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
-        args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
+        if compiler.get_id() == 'gcc':
+            # GCC has no BMI output flag: the per-edge $MAPPER (written by
+            # the variant's collate) maps the module name to $out, and
+            # -fmodule-only skips the object. The pre-15 driver needs the
+            # language spelled out for module extensions, as on compile
+            # edges.
+            lang = ['-x', 'c++'] if mesonlib.version_compare(compiler.version, '<15') else []
+            args = ['$ARGS'] + depargs + NinjaCommandArg.list(
+                ['-fmodule-mapper=$MAPPER', '-fmodule-only'] + lang + ['-c', '$in'], Quoting.none)
+        else:
+            args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
         self.add_rule(NinjaRule(rulename, command, args,
                                 description, deps='gcc', depfile='$DEPFILE'))
 
@@ -3626,10 +3644,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         copies are purely additive) and every consumer's explicit-path flags
         name its own class's. On a single-class machine the key carries no
         class part, keeping paths and edges byte-identical to a pre-class
-        build. GCC resolves units by gcm.cache directory lookup with no
-        per-class relocation (that waits on the module mapper stage), so its
-        units stay deduped build-wide: the first declarer's flags build the
-        one BMI and a declarer in a divergent class only gets
+        build. GCC units stay deduped build-wide even under the module
+        mapper: a unit's CMI name is its resolved header path, known only
+        when the compiler runs, so the unit build edge cannot be handed a
+        generate-time per-class mapping. The first declarer's flags build the
+        one flat-cache BMI and a declarer in a divergent class only gets
         warn_on_header_unit_divergence.
         """
         cid = compiler.get_id()
@@ -4361,6 +4380,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
                 if hu_consumer:
                     compile_commands = commands + hu_consumer
+                if self._bmi_class_subdir_for(target) is not None:
+                    # GCC's only per-class BMI relocation: a per-TU mapper,
+                    # written by the collate (whose scan-derived contents the
+                    # compile must rebuild on), named here by a static path.
+                    # [] on compilers that resolve by directory search, and
+                    # on every single-class build.
+                    mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
+                    if mapper_args:
+                        compile_commands = compile_commands + mapper_args
+                        element.add_dep(rel_obj + '.mapper')
             element.add_item('ARGS', compile_commands)
 
         self.add_dependency_scanner_entries_to_element(target, compiler, element, src)
