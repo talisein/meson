@@ -38,6 +38,17 @@ Current limitations:
   their prerequisites (absorbed textually) are fine.
 - Every header unit a source imports must be declared on its target; the
   declaration does not propagate through dependencies.
+- **Spelling discipline on GCC.** GCC keys a unit's BMI by the *textual*
+  resolved name without normalizing it, so an importer-relative spelling
+  that traverses directories (`import "../hdr.h";` from a subdirectory
+  source) resolves to a name of its own and misses the declared unit's BMI
+  (the scan fails with GCC's "imports must be built before being imported").
+  Prefer one include-path spelling from every importer — that shares a
+  single BMI regardless of the importing file's directory. If an aliased
+  spelling is unavoidable, declare it as its own unit spelled the way the
+  importer resolves it (`cpp_header_units: ['hdr.h', 'sub/../hdr.h']`),
+  which builds a second BMI of the same header. Clang normalizes the
+  resolved file and matches the declared unit from any spelling.
 - **ccache** does not track BMI contents and would serve stale objects for
   Clang module and header-unit consumers, so Meson makes it fall back to the
   real compiler for module compiles (as it already does for GCC's

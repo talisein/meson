@@ -1333,6 +1333,41 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                     self.assertNotIn('-fmodule-file', stripped)
             self.assertTrue(saw_hu_flag, 'no consumer carried a header-unit -fmodule-file flag')
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler=('gcc', 'clang'))
+    def test_header_unit_aliasing(self):
+        # The same header imported from TUs in different directories. With
+        # the include-path spelling, every importer resolves the same logical
+        # name and the one declared unit serves all of them: exactly one
+        # unit edge.
+        testdir = '173 header unit aliasing'
+        self.build_and_check_modules(testdir, ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
+
+        # An importer-relative spelling ("../header.hpp") resolves to its own
+        # logical name; declared as its own alias unit it gets its own edge
+        # and BMI of the same file.
+        self.new_builddir()
+        self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
+                                     ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('header.hpp')), 2)
+
+        # Without the alias declaration the two compilers diverge: GCC keys
+        # CMIs by the textual resolved name (no normalization), so the import
+        # misses the declared unit's CMI and the scan fails with GCC's own
+        # message; Clang normalizes the resolved file and matches it.
+        self.new_builddir()
+        if self.host_cpp_compiler().get_id() == 'gcc':
+            self.init(os.path.join(self.unit_test_dir, testdir),
+                      extra_args=['-Dmode=undeclared'])
+            with self.assertRaises(subprocess.CalledProcessError) as cm:
+                self.build()
+            self.assertIn('imports must be built before being imported',
+                          cm.exception.stdout)
+        else:
+            self.build_and_check_modules(testdir, extra_args=['-Dmode=undeclared'],
+                                         ninja_args_not_contains=())
+            self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
+
     @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_header_unit_rebuild_on_user_header_change(self):
         self.check_module_rebuild('158 clang header units', edit_file='util.h',

@@ -1,0 +1,2 @@
+option('mode', type: 'combo', choices: ['plain', 'aliased', 'undeclared'],
+       value: 'plain')
