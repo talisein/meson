@@ -1069,6 +1069,48 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_class_topology_reconfigure(self):
+        # A BMI-affecting option flip transitions the build single-class ->
+        # multi-class -> single-class across reconfigures: class subdirs and
+        # BMI-only variants (and on GCC the per-TU mappers) appear and
+        # disappear over a build tree full of the other topology's artifacts.
+        # Every phase must build correctly -- the fixture's constexpr probe
+        # turns a stale or wrongly shared BMI into exit 1 -- and settle to a
+        # no-op, and the round trip must leave no residue in the generated
+        # build: the final build.ninja is byte-identical to the first.
+        # Each reconfigure also runs ninja's restat+cleandead over the flip
+        # (ninja >= 1.12), reaping the dead topology's declared outputs;
+        # stale class-cache BMIs and owner claims stay on disk, inert, like
+        # the harvest cache in general.
+        gcc = self.host_cpp_compiler().get_id() == 'gcc'
+        testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
+        self.init(testdir, extra_args=['-Dwithfoo=false'])
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        self.assertEqual(self.bmi_variant_ids(), set())
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            single_class = f.read()
+        if gcc:
+            self.assertNotIn('-fmodule-mapper', single_class)
+
+        self.setconf('-Dwithfoo=true')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        if gcc:
+            with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+                self.assertIn('-fmodule-mapper', f.read())
+
+        self.setconf('-Dwithfoo=false')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), single_class)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_source_with_spaces(self):
         # A module interface source with a space in its file name: the BMI is
         # named from the module name, but every object-derived path (.ddi,
