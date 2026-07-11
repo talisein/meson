@@ -382,19 +382,21 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(parse(f, 'bld2src'), ('user', f.rel_to_builddir('bld2src')))
 
     def test_header_unit_dedup_shared_by_spelling(self):
-        # A header unit is deduped globally by (mode, spelling) for both
-        # compilers: the same spelling declared by another target reuses the one
-        # BMI, even if that target's compile args differ. Header-unit flags are
-        # assumed uniform build-wide (diverging them is undefined), so the first
-        # edge builds the unit for every consumer. GCC could not do otherwise --
-        # it writes one flag-independent gcm.cache path per header.
+        # On a single-class machine (an empty BMI class registry) a header
+        # unit is deduped globally by (mode, spelling) for both compilers: the
+        # same spelling declared by another target reuses the one BMI, even if
+        # that target's compile args differ, so the first edge builds the unit
+        # for every consumer. Per-class dedup on a multi-class machine is
+        # covered by the bmi_classes fixture tests.
         from mesonbuild.backend.ninjabackend import NinjaBackend
 
         def outputs_for(cid, suffix):
             be = NinjaBackend.__new__(NinjaBackend)
             be.build_to_src = '..'
             be.all_outputs = set()
+            be._bmi_classes = {}
             be._header_units = {}
+            be._header_unit_class = {}
             be._target_header_unit_outputs = {}
             be._target_header_unit_consumer_args = {}
             be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
