@@ -13,8 +13,9 @@ prog = executable('prog', 'main.cpp', link_with: modlib)
 test('prog', prog)
 
 # Module partitions: pkg:part must land in pcm.cache/pkg-part.pcm and be built
-# before the primary interface that re-exports it.
-pkglib = static_library('pkg', 'pkg.cppm', 'pkg-part.cppm')
+# before the primary interface that re-exports it; pkg:impl is an internal
+# partition (no export, is-interface: false) the primary merely imports.
+pkglib = static_library('pkg', 'pkg.cppm', 'pkg-part.cppm', 'pkg-impl.cppm')
 pkgprog = executable('pkgprog', 'pkgmain.cpp', link_with: pkglib)
 test('pkgprog', pkgprog)
 

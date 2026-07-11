@@ -1,7 +1,8 @@
 ## C++20 named modules with Clang
 
-C++20 named modules (and module partitions) now build with Clang on the Ninja
-backend, through the same pipeline used for GCC and MSVC. Sources are scanned
+C++20 named modules (and module partitions, internal implementation
+partitions included) now build with Clang on the Ninja backend,
+through the same pipeline used for GCC and MSVC. Sources are scanned
 with `clang-scan-deps` (P1689) and ordered through Ninja `dyndep`; compiled
 module interfaces (`.pcm`) live in a single shared `pcm.cache` at the build
 root and are found by name through `-fprebuilt-module-path`. No

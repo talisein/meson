@@ -1,7 +1,8 @@
 ## C++20 named modules with GCC
 
-Meson can now build C++20 named modules (and module partitions) with GCC on the
-Ninja backend. Sources are scanned with GCC's P1689 dependency scanner and
+Meson can now build C++20 named modules (and module partitions,
+internal implementation partitions included) with GCC on the Ninja
+backend. Sources are scanned with GCC's P1689 dependency scanner and
 ordered through Ninja `dyndep`; compiled module interfaces live in a single shared
 `gcm.cache` at the build root, found by name like headers. No `-fmodule-file=`
 mappings or module names appear on any compile command line.
