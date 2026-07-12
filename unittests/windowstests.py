@@ -787,6 +787,170 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
+    def _private_bmi_names(self, private_dir):
+        """The bare module names (basename minus BMI suffix) cl actually
+        wrote into the given private BMI directory, read from disk -- a flag
+        naming the directory does not prove cl wrote there."""
+        suffix = self.host_cpp_compiler().get_module_bmi_suffix()
+        return {os.path.basename(p)[:-len(suffix)]
+                for p in glob(os.path.join(self.builddir, private_dir, f'*{suffix}'))}
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_private_executable_modules(self):
+        # Nothing can ever link an executable, so its modules are private to
+        # it: two executables exporting the same module name must not
+        # collide over the shared ifc.cache directory. cl writes BMIs by
+        # /ifcOutput directory, so this must be confirmed on disk, not just
+        # from the command line.
+        self.build_and_check_modules('185 private executable modules')
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 2)
+        for d in dirs:
+            self.assertEqual(self._private_bmi_names(d), {'tests'},
+                             f'{d}: expected exactly one private tests BMI')
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_private_executable_imports_dependency(self):
+        # An executable's own private module and a linked library's public
+        # module must both resolve in the same target: the private dir and
+        # the shared cache both ride /ifcSearchDir on one command line, while
+        # /ifcOutput must pick only the private one for this target's own
+        # interface.
+        self.build_and_check_modules('186 private executable imports dependency',
+                                     bmis=['libmod'])
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 1)
+        private_dir = next(iter(dirs))
+        self.assertEqual(self._private_bmi_names(private_dir), {'tests'})
+        # libmod's public module must never leak into the private dir.
+        self.assertNotIn('libmod', self._private_bmi_names(private_dir))
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces(self):
+        # A library mixing a public interface (api) with two private ones
+        # (detail; hidden with its own independently-private internal
+        # partition): api's implementation unit imports both its own private
+        # modules and a linked dependency's public module in one TU, so that
+        # compile carries two /ifcSearchDir entries (private dir, then the
+        # shared cache) while /ifcOutput for each interface source must pick
+        # the right one of the two, per compile.
+        self.build_and_check_modules('187 cpp private module interfaces',
+                                     bmis=['api', 'pub'])
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 1)
+        private_dir = next(iter(dirs))
+        self.assertEqual(self._private_bmi_names(private_dir),
+                         {'detail', 'hidden', 'hidden-impl'},
+                         'mylib private interfaces did not all land in the private dir')
+        # Neither private module ever reaches the shared cache: only the
+        # public ones (api, pub) may live there.
+        for name in ('detail', 'hidden', 'hidden-impl'):
+            self.assertFalse(os.path.isfile(self.bmi_path(name)),
+                             f'{name} must not be in the shared BMI cache')
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_direct_import(self):
+        # A target outside the providing library imports its private module
+        # directly: rejected with a diagnostic naming both the module and the
+        # target that provides it privately, not the generic "no target"
+        # error a reader would otherwise go hunting for a missing dependency
+        # over.
+        testdir = os.path.join(self.unit_test_dir, '188 cpp private module interfaces diagnostics')
+        self.init(testdir, extra_args=['-Dmode=direct-import'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'requires module "detail", which target \'mylib\' provides privately '
+            "(it is listed in that target's cpp_private_module_interfaces). A "
+            'private module can only be imported inside the target that provides it.',
+            cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_missing_not_swallowed(self):
+        # A module nowhere in the build still gets the untouched generic
+        # error, even in a project that has private modules elsewhere: the
+        # private-module branch must not swallow the genuine "missing" case.
+        testdir = os.path.join(self.unit_test_dir, '188 cpp private module interfaces diagnostics')
+        self.init(testdir, extra_args=['-Dmode=missing'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('provided by no target in this build', cm.exception.stdout)
+        self.assertNotIn('provides privately', cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_cycle(self):
+        # A dependency cycle entirely among a target's own private modules
+        # must still be caught, exactly as for public ones.
+        testdir = os.path.join(self.unit_test_dir, '188 cpp private module interfaces diagnostics')
+        self.init(testdir, extra_args=['-Dmode=cycle'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('C++ module dependency cycle', cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_both_kwargs_error(self):
+        # Listing a source in both cpp_module_interfaces and
+        # cpp_private_module_interfaces is a configure-time error: being
+        # private already implies being an interface, so the combination is
+        # ambiguous rather than meaningful.
+        testdir = os.path.join(self.unit_test_dir, '188 cpp private module interfaces diagnostics')
+        out = self.init(testdir, extra_args=['-Dmode=both-kwargs'], allow_fail=True)
+        self.assertIn('in both cpp_module_interfaces and cpp_private_module_interfaces', out)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_name_collision(self):
+        # Two libraries each privately export a module literally named
+        # "detail", each linked into its own separate executable: privacy
+        # removes the whole-build-tree name claim, so this builds even
+        # though nothing here would pass the public-module uniqueness check.
+        self.build_and_check_modules('189 two libraries private module name collision')
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 2)
+        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
+        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
+                         'a private module must never take a global name claim')
+        # Each private dir independently holds its own same-named detail BMI.
+        for d in dirs:
+            self.assertEqual(self._private_bmi_names(d), {'detail'},
+                             f'{d}: expected its own private detail BMI')
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_name_collision_in_one_link(self):
+        # Both libraries' private "detail" modules reaching the SAME link is
+        # still a hard error, and must stay one: a module's exported entities
+        # are mangled from its bare module name alone, so two same-named
+        # private modules linked together would silently collide at the
+        # symbol level with no link error at all. Privacy must not remove
+        # this check, only the whole-build-tree one.
+        testdir = os.path.join(self.unit_test_dir, '189 two libraries private module name collision')
+        self.init(testdir, extra_args=['-Dmode=collision'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'Module "detail" is privately provided by more than one target reaching this link',
+            cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_cpp_private_module_interfaces_variant_exclusion(self):
+        # A private module (priv) alongside a public one (pubmod) that
+        # crosses a BMI class boundary: the synthesized BMI-only variant must
+        # recompile only the public interface, never the private one. MSVC
+        # has no cpp_std=c++23, so the divergent consumer is driven at
+        # c++latest instead (see the fixture's divergent_std option).
+        self.build_and_check_modules('190 private module bmi class exclusion',
+                                     extra_args=['-Ddivergent_std=c++latest'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            contents = f.read()
+        variant_lines = [line for line in contents.splitlines() if '@bmi@' in line]
+        self.assertTrue(variant_lines)
+        # 'priv' alone would also match the unrelated 'meson-private' prefix
+        # every private BMI dir (and every variant's own private_dir) uses;
+        # the private *interface* is named 'priv.cppm' (source) or
+        # 'priv.cpp.obj' (its output).
+        self.assertFalse(any('priv.' in line for line in variant_lines),
+                         'a BMI-only variant must never compile a private interface')
+
     def test_gcc_header_unit_space_free_alias(self):
         # The space-free alias that lets a GCC header unit under a spaced path
         # be named in a module mapper (a mapper key cannot contain whitespace):

@@ -1,0 +1,3 @@
+# The divergent consumer's dialect. MSVC has no cpp_std=c++23/c++26, so the
+# Windows driver runs this fixture at -Ddivergent_std=c++latest.
+option('divergent_std', type: 'string', value: 'c++23')
