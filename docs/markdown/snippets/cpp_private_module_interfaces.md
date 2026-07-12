@@ -26,7 +26,8 @@ may not be listed in both `cpp_module_interfaces` and
 `cpp_private_module_interfaces` — being private already implies being an
 interface. A partition does not automatically inherit privacy from its
 primary module; list the partition's own source here too if it should be
-private as well.
+private as well. Meson enforces this: leaving a private primary's partition
+undeclared is a build-time error, not a silently-accepted gap.
 
 Declaring this on an `executable()` is accepted but redundant: nothing can
 ever link an executable, so all of its modules are already private.
