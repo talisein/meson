@@ -298,7 +298,13 @@ def run_p1689(argv: T.List[str]) -> int:
     its dependency targets, emitting a Ninja dyndep that orders each object
     against the BMIs it requires/provides, plus this target's own map. The BMI
     directory and suffix (--bmi-dir/--bmi-suffix) come from the compiler so the
-    logical-name -> BMI mapping matches the compiler's own.
+    logical-name -> BMI mapping matches the compiler's own. --dep-bmi-dir names
+    a second directory a *required* module not provided by this target is
+    found in, when it differs from --bmi-dir (a module-providing executable's
+    own BMIs are private, in a directory of their own, but a linked
+    dependency's public module still lives in the shared class cache).
+    Defaults to --bmi-dir, matching every target that has no private directory
+    of its own.
 
     With --mapper-suffix it also writes a GCC module mapper per translation
     unit (<primary-output><suffix>, an implicit input of the compile edge)
@@ -315,6 +321,12 @@ def run_p1689(argv: T.List[str]) -> int:
                         help="Output provided-module map for this target.")
     parser.add_argument('--bmi-dir', required=True,
                         help='Directory the compiler names BMIs in (e.g. gcm.cache).')
+    parser.add_argument('--dep-bmi-dir', default=None,
+                        help='Directory a required module not provided by this target '
+                             'is named in, when it differs from --bmi-dir (e.g. a '
+                             "module-providing executable's own --bmi-dir is private, "
+                             "but a linked dependency's public module is still in the "
+                             'shared class cache). Defaults to --bmi-dir.')
     parser.add_argument('--bmi-suffix', required=True,
                         help='BMI file suffix including the dot (e.g. .gcm).')
     parser.add_argument('--dep-provmap', action='append', default=[],
@@ -486,8 +498,15 @@ def run_p1689(argv: T.List[str]) -> int:
                         f'target in this build.{hint}')
                 # The compiler must be pointed at the class-cache BMI itself;
                 # `modfile` is the ordering handle, which under --stamp-suffix
-                # is a harvest stamp rather than a readable BMI.
-                maplines.append(f'{name} {module_to_filename(name, args.bmi_dir, args.bmi_suffix)}')
+                # is a harvest stamp rather than a readable BMI. A name this
+                # target provides itself is named at --bmi-dir, same as in the
+                # provides loop above; anything from a linked dependency is
+                # named at --dep-bmi-dir, which differs from --bmi-dir only for
+                # a target whose own BMIs are private (a module-providing
+                # executable) but which still imports a dependency's public
+                # module.
+                req_dir = args.bmi_dir if name in provided else (args.dep_bmi_dir or args.bmi_dir)
+                maplines.append(f'{name} {module_to_filename(name, req_dir, args.bmi_suffix)}')
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)

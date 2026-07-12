@@ -457,6 +457,15 @@ class CppModulesTestMixin:
         return {m.replace('\\', '/')
                 for m in re.findall(r'meson-private[/\\][^/\\\s]*@bmi@[0-9a-f]{12}', contents)}
 
+    def private_bmi_dirs(self) -> T.Set[str]:
+        """The distinct module-providing-executable private BMI dirs named in
+        build.ninja (one per such executable). Tolerates either path
+        separator and normalizes to '/' so counts are separator-independent."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            contents = f.read()
+        return {m.replace('\\', '/')
+                for m in re.findall(r'meson-private[/\\][^/\\\s]*@bmi-private', contents)}
+
     def header_unit_digests(self, basename: str, *, edges: str = '') -> T.Set[str]:
         """The distinct digests of 'meson-private/header-units/<basename>.<digest>.*'
         paths in build.ninja, one per (mode, spelling) and, on per-class
