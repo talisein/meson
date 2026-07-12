@@ -1520,14 +1520,14 @@ class NinjaBackend(backends.Backend):
         return objfile + compiler.get_module_bmi_suffix() + '.stamp'
 
     def generate_cpp_module_harvest(self, target: build.BuildTarget, compiler: Compiler,
-                                    rel_obj: str, class_subdir: T.Optional[str] = None) -> None:
-        """Publish a source-keyed BMI into the shared cache (into
-        ``class_subdir`` of it, for per-class builds and variants) under the
-        module's own name, read from the interface's already-scanned .ddi.
-        Used by Clang's own pipeline (which self-names BMIs after the source)
-        and by BMI-only variants on any compiler. The edge's command line is
-        static -- the module name never appears on it -- and its stamp is what
-        consumers' dyndep entries order against.
+                                    rel_obj: str, bmi_dir: str) -> None:
+        """Publish a source-keyed BMI into ``bmi_dir`` (the shared class cache,
+        or a target's private directory) under the module's own name, read
+        from the interface's already-scanned .ddi. Used by Clang's own
+        pipeline (which self-names BMIs after the source) and by BMI-only
+        variants on any compiler. The edge's command line is static -- the
+        module name never appears on it -- and its stamp is what consumers'
+        dyndep entries order against.
         """
         self.generate_cpp_module_harvest_rule()
         pcm = self.get_bmi_file_for(compiler, rel_obj)
@@ -1536,7 +1536,7 @@ class NinjaBackend(backends.Backend):
         elem = NinjaBuildElement(self.all_outputs, stamp, 'cpp_module_harvest', [pcm, ddi])
         elem.add_item('PCM', pcm)
         elem.add_item('DDI', ddi)
-        elem.add_item('BMIDIR', compiler.get_module_cache_dir(class_subdir))
+        elem.add_item('BMIDIR', bmi_dir)
         elem.add_item('BMISUFFIX', compiler.get_module_bmi_suffix())
         self.add_build(elem)
 
@@ -1563,11 +1563,19 @@ class NinjaBackend(backends.Backend):
                     'machine in a cross build: a single module cache at the build '
                     'root is shared, and BMIs are not interchangeable between the '
                     'build-machine and host-machine compilers.')
+        private = self._module_private_bmi_dir_for(target)
+        if private is not None:
+            # Unconditional across compilers, mirroring _get_or_create_bmi_variant's
+            # own private_dir creation: unlike the shared class cache, there is no
+            # existing evidence GCC auto-creates this new top-level path shape.
+            os.makedirs(os.path.join(self.environment.get_build_dir(), private), exist_ok=True)
         if cpp.get_id() in {'msvc', 'clang'}:
             # cl does not create /ifcOutput itself, and clang consumers name
-            # pcm.cache before the first harvest populates it.
+            # pcm.cache before the first harvest populates it. Created even when
+            # this target has its own private dir: that dir's search path still
+            # needs the shared class cache for its dependencies' public modules.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
-                                     cpp.get_module_cache_dir(self._bmi_class_subdir_for(target))),
+                                     self._module_shared_bmi_dir_for(target)),
                         exist_ok=True)
         if cpp.get_id() == 'clang':
             self.warn_on_clang_modules_ccache(cpp)
@@ -1601,7 +1609,7 @@ class NinjaBackend(backends.Backend):
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
         # BMIs are named from logical-names, in lockstep with module_name_to_filename.
-        elem.add_item('BMIDIR', cpp.get_module_cache_dir(self._bmi_class_subdir_for(target)))
+        elem.add_item('BMIDIR', self._module_bmi_dir_for(target))
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
         elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps))
         elem.add_item('name', target.name)
@@ -1640,8 +1648,13 @@ class NinjaBackend(backends.Backend):
                             | self._internal_partition_paths(target)):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'gcc':
-            depargs += ['--mapper-suffix', '.mapper',
-                        '--flat-bmi-dir', cpp.get_module_cache_dir()]
+            depargs += ['--mapper-suffix', '.mapper']
+            if self._module_private_bmi_dir_for(target) is not None:
+                # This target's own provides are named in its private dir, but a
+                # dependency's public module (from a linked target) still lives in
+                # the shared class cache: the mapper needs both directories.
+                depargs += ['--dep-bmi-dir', self._module_shared_bmi_dir_for(target)]
+            depargs += ['--flat-bmi-dir', cpp.get_module_cache_dir()]
             self.provision_header_units(target, cpp)
             depargs += self._header_unit_bmi_args(
                 cpp, self._target_header_unit_bmis.get(target.get_id(), []))
@@ -1781,7 +1794,7 @@ class NinjaBackend(backends.Backend):
             elem.add_item('dyndep', variant.dyndep)
             elem.add_orderdep(variant.dyndep)
             self.add_build(elem)
-            self.generate_cpp_module_harvest(provider, cpp, vpcm, info.subdir)
+            self.generate_cpp_module_harvest(provider, cpp, vpcm, cpp.get_module_cache_dir(info.subdir))
 
         # The variant's own imports must resolve in its class too: a linked
         # provider in the same class keeps its original provmap, a divergent
@@ -2257,6 +2270,32 @@ class NinjaBackend(backends.Backend):
             return None
         info = self._bmi_classes.get((target.for_machine, self._bmi_class_key_of(target)))
         return info.subdir if info else None
+
+    def _module_shared_bmi_dir_for(self, target: build.BuildTarget) -> str:
+        """The class-cache directory a target's dependencies' public modules are
+        found in -- also this target's own BMI directory, unless it is a
+        module-providing executable (see _module_private_bmi_dir_for).
+        """
+        cpp = target.compilers['cpp']
+        return cpp.get_module_cache_dir(self._bmi_class_subdir_for(target))
+
+    def _module_private_bmi_dir_for(self, target: build.BuildTarget) -> T.Optional[str]:
+        """An executable is a link sink -- nothing can import its modules -- so
+        one that provides its own gets a directory to itself, outside the shared
+        cache and unkeyed by BMI class (a private module has exactly one
+        consumer, the target itself, so exactly one class). Excludes an
+        executable built with export_dynamic: true, which -- uniquely among
+        executables -- other targets actually can link against
+        (is_linkable_target()), breaking the link-sink premise this rests on.
+        """
+        if (isinstance(target, build.Executable) and target.provides_cpp_modules()
+                and not target.is_linkwithable):
+            return os.path.join('meson-private', f'{target.get_id()}@bmi-private')
+        return None
+
+    def _module_bmi_dir_for(self, target: build.BuildTarget) -> str:
+        """The directory this target's own module BMIs are found and written to."""
+        return self._module_private_bmi_dir_for(target) or self._module_shared_bmi_dir_for(target)
 
     def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
                                       class_key: T.Tuple[str, ...]) -> T.Optional[str]:
@@ -4786,7 +4825,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # BMI path never appear on the command line -- ordering is carried by
         # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
-            modargs = compiler.get_module_compile_args(self._bmi_class_subdir_for(target))
+            modargs = compiler.get_module_compile_args(
+                self._bmi_class_subdir_for(target), self._module_private_bmi_dir_for(target))
             if compiler.get_id() == 'clang' and '-fmodules' in commands:
                 # The user turned on implicit Clang modules themselves (via
                 # cpp_args, add_project_arguments, ...; all those channels are
@@ -5034,7 +5074,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 is_internal_partition=is_internal_partition))
         if clang_miu:
             self.generate_cpp_module_harvest(target, compiler, rel_obj,
-                                             self._bmi_class_subdir_for(target))
+                                             self._module_bmi_dir_for(target))
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))

@@ -1571,13 +1571,19 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         # name BMIs from logical-names without scanning compiler output.
         return f'{self.get_module_cache_dir(class_subdir)}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
 
-    def get_module_compile_args(self, class_subdir: T.Optional[str] = None) -> T.List[str]:
+    def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
+                                private_dir: T.Optional[str] = None) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.
 
         ``class_subdir`` selects a per-BMI-equivalence-class subdirectory of
         the module cache; None means the single shared cache dir (the only
-        case for compilers without supports_bmi_classes()). Returns [] for
-        compilers/targets that do not use the module pipeline.
+        case for compilers without supports_bmi_classes()). ``private_dir``,
+        set only for a module-providing executable (nothing can ever link an
+        executable, so its modules are private to it), is a directory outside
+        the shared cache: the target's own BMIs are found and written there
+        instead, while the shared class cache stays additionally searchable
+        for its dependencies' public modules. Returns [] for compilers/targets
+        that do not use the module pipeline.
         """
         return []
 

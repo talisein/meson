@@ -586,6 +586,54 @@ class InternalTests(unittest.TestCase):
             with self.assertRaises(MesonException):
                 collate(d, bmidir, 'liba')
 
+    def test_depaccumulate_p1689_dep_bmi_dir(self):
+        # A module-providing executable's --bmi-dir is private (its own
+        # module never resolves in the shared cache), but it may still link a
+        # dependency and import that dependency's public module -- which must
+        # resolve at --dep-bmi-dir, the shared class cache, not the private
+        # --bmi-dir. Without --dep-bmi-dir the old single-directory behaviour
+        # is preserved exactly (every existing caller never passes it).
+        from mesonbuild.scripts.depaccumulate import run_p1689
+
+        def collate(extra: T.List[str]) -> int:
+            return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                              '--bmi-dir', 'private', '--bmi-suffix', '.gcm',
+                              '--mapper-suffix', '.mapper',
+                              '--dep-provmap', 'dep-pm.json', *extra,
+                              'test1.cppm.o.ddi', 'main1.cpp.o.ddi'])
+
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                with open('test1.cppm.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'test1.cppm.o',
+                                          'provides': [{'logical-name': 'tests'}]}]}, f)
+                with open('main1.cpp.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'main1.cpp.o',
+                                          'requires': [{'logical-name': 'tests'},
+                                                       {'logical-name': 'libmod'}]}]}, f)
+                with open('dep-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({'libmod': 'shared/libmod.gcm'}, f)
+
+                # Without --dep-bmi-dir: both names resolve at --bmi-dir, as before.
+                self.assertEqual(collate([]), 0)
+                with open('main1.cpp.o.mapper', encoding='utf-8') as f:
+                    self.assertEqual(f.read(),
+                                     'tests private/tests.gcm\n'
+                                     'libmod private/libmod.gcm\n')
+
+                # With --dep-bmi-dir: the own-provided name still resolves at
+                # --bmi-dir, but the dependency-provided name resolves at
+                # --dep-bmi-dir instead.
+                self.assertEqual(collate(['--dep-bmi-dir', 'shared']), 0)
+                with open('main1.cpp.o.mapper', encoding='utf-8') as f:
+                    self.assertEqual(f.read(),
+                                     'tests private/tests.gcm\n'
+                                     'libmod shared/libmod.gcm\n')
+            finally:
+                os.chdir(olddir)
+
     def test_depaccumulate_p1689_clang_interface_extension(self):
         # Clang publishes a module BMI only for sources the backend compiled
         # as interface units, decided by extension alone; a provider whose

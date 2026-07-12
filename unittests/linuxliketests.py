@@ -1172,6 +1172,23 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('172 module sources with spaces')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_private_executable_modules(self):
+        # Nothing can ever link an executable, so its modules are private to
+        # it: two executables exporting the same module name must not
+        # collide over one shared-cache address.
+        self.build_and_check_modules('185 private executable modules')
+        self.assertEqual(len(self.private_bmi_dirs()), 2)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_private_executable_imports_dependency(self):
+        # An executable's own private module and a linked library's public
+        # module must both resolve in the same target -- the primary
+        # scenario a private BMI directory has to support, not an edge case.
+        self.build_and_check_modules('186 private executable imports dependency',
+                                     bmis=['libmod'])
+        self.assertEqual(len(self.private_bmi_dirs()), 1)
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='clang')
     def test_clang_bmi_classes(self):
         # The canonical two-class fixture: subproject provider at c++20,
