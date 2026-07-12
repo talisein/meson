@@ -501,7 +501,7 @@ class CppModulesTestMixin:
                     os.path.join(self.builddir, f'{target}.*.p', f'{obj}.*.mapper')]
         matches = [m for pat in patterns for m in glob.glob(pat)]
         self.assertEqual(len(matches), 1,
-                          f'{" or ".join(patterns)}: expected one mapper, got {matches}')
+                         f'{" or ".join(patterns)}: expected one mapper, got {matches}')
         path = matches[0]
         with open(path, encoding='utf-8') as f:
             lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
