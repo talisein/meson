@@ -11,8 +11,9 @@ mylib = static_library('mylib', 'pubmod.cppm', 'priv.cppm', 'pubmod_impl.cpp',
 prog = executable('prog', 'main.cpp', link_with: mylib)
 test('prog', prog)
 
-# Divergent-class consumer: forces a BMI-only variant of pubmod under c++23.
-# The variant must recompile only pubmod's public interface, never priv.
+# Divergent-class consumer: forces a BMI-only variant of pubmod under a
+# diverging dialect. The variant must recompile only pubmod's public
+# interface, never priv.
 prog23 = executable('prog23', 'main.cpp', link_with: mylib,
-                    override_options: ['cpp_std=c++23'])
+                    override_options: ['cpp_std=' + get_option('divergent_std')])
 test('prog23', prog23)
