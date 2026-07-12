@@ -1382,15 +1382,26 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # below have not been audited against the cl docs the way GCC/Clang
         # were (see mesonbuild/compilers/compilers.py's get_bmi_irrelevant_args
         # docstring).
+        #
+        # cl spells several of its argument-taking flags with a suffix and
+        # still takes the argument as a separate token (/headerUnit:quote
+        # NAME=IFC, /headerName:angle vector, /external:I DIR), so each such
+        # spelling is enumerated as consuming, not just the bare flag. The
+        # F-family (/Fd, /Fp, ...) stays a prefix: its argument is attached
+        # and optional, and a consuming entry would swallow the next flag
+        # after a bare /Fd. 'external' likewise stays a prefix for the
+        # /external:W0, /external:anglebrackets, /external:env:V family, whose
+        # members take no detached argument.
         return (frozenset({'E', 'EP', 'TP', 'nologo', 'internalPartition',
                            'interface', 'help', 'exportHeader', 'C', '?'}),
-                frozenset({'errorReport', 'W', 'w', 'sourceDependencies',
-                           'scanDependencies', 'PD', 'MP', 'ifcOutput',
-                           'headerName', 'Fp', 'Fm', 'Fe', 'Fd', 'FC',
+                frozenset({'errorReport', 'W', 'w', 'PD', 'MP',
+                           'Fp', 'Fm', 'Fe', 'Fd', 'FC',
                            'doc', 'diagnostics', 'cgthreads', 'analyze',
                            'external', 'fsanitize'}),
-                frozenset({'Fo', 'I', 'reference', 'headerUnit', 'isystem',
-                           'ifcSearchDir'}),
+                frozenset({'Fo', 'I', 'reference', 'isystem', 'ifcSearchDir',
+                           'ifcOutput', 'sourceDependencies', 'scanDependencies',
+                           'headerUnit', 'headerUnit:quote', 'headerUnit:angle',
+                           'headerName:quote', 'headerName:angle', 'external:I'}),
                 frozenset())
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:

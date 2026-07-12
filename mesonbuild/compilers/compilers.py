@@ -1606,26 +1606,26 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """(exact flags, prefix flags, argument-consuming flags, protected
         prefixes) known not to affect a C++ module BMI.
 
-        Spelled without the leading '-', '--' or '/'. An exact flag strips only
-        an argument that equals it exactly -- use this for a bare flag with no
-        legitimate suffix or attached-argument spelling (e.g. MSVC's 'nologo').
-        A prefix flag additionally drops any argument merely *starting* with
-        it -- reserve this for a flag with a genuine suffix family (e.g.
-        MSVC's 'W' for /W0../W4/Wall, GCC's 'O' for -O0../-O3/-Os/-Oz): a
-        prefix too short for the family it is meant to cover will silently
-        swallow an unrelated, BMI-affecting flag that happens to share it
-        (this bit Meson once -- MSVC's bare 'E', meant only for /E, also
-        matched /EHsc and /EHs-c-, merging BMIs built under different
-        exception-handling models). A consuming flag drops the following
-        argument when the flag itself matches exactly, and -- for its
-        attached-argument spelling (e.g. /Fooutput.obj) -- also participates
-        in prefix matching. This is a best-effort list (after xmake's strip
-        lists): a missing entry only splits a BMI equivalence class too
-        eagerly, so the cost of getting it wrong that way is a redundant BMI,
-        never a shared incompatible one -- an entry that is too broad (prefix
-        where it should be exact) is the unsafe direction, since it can merge
-        genuinely different compiles. Empty by default: with no knowledge,
-        every flag difference splits the class.
+        Spelled without the leading '-', '--' or '/'. An exact flag takes no
+        argument and strips only an argument that equals it exactly -- use
+        this for a bare flag with no legitimate suffix or attached-argument
+        spelling (e.g. MSVC's 'nologo'). A prefix flag additionally drops any
+        argument merely *starting* with it -- reserve this for a flag with a
+        genuine suffix family (e.g. MSVC's 'W' for /W0../W4/Wall, GCC's 'O'
+        for -O0../-O3/-Os/-Oz): a prefix too short for the family it is meant
+        to cover will silently swallow an unrelated, BMI-affecting flag that
+        happens to share it (this bit Meson once -- MSVC's bare 'E', meant
+        only for /E, also matched /EHsc and /EHs-c-, merging BMIs built under
+        different exception-handling models). A consuming flag takes an
+        argument: it drops the following token when the flag matches exactly,
+        and -- for its attached-argument spelling (e.g. /Fooutput.obj) -- also
+        participates in prefix matching. This is a best-effort list (after
+        xmake's strip lists): a missing entry only splits a BMI equivalence
+        class too eagerly, so the cost of getting it wrong that way is a
+        redundant BMI, never a shared incompatible one -- an entry that is too
+        broad (prefix where it should be exact) is the unsafe direction, since
+        it can merge genuinely different compiles. Empty by default: with no
+        knowledge, every flag difference splits the class.
 
         A protected prefix is the escape hatch for exactly that unsafe
         direction: it is checked before the other three and always keeps a
@@ -1641,41 +1641,88 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         Clang's bare 'W' (for -Wall et al.) also spells -Wa,/-Wp,/-Wl, (opaque,
         comma-delimited content forwarded to another tool stage -- -Wp, in
         particular can carry a real -D).
+
+        A flag whose argument can be *detached* (a separate token) must be
+        enumerated in the consuming set under every spelling that takes one,
+        suffixed spellings included: cl's /headerUnit, /headerUnit:quote and
+        /headerUnit:angle each take a following NAME=BMI token, so all three
+        are consuming entries. That extends to a member of a prefix family:
+        'external' is a prefix (for /external:W0, /external:anglebrackets,
+        ...), but /external:I takes a following directory, so 'external:I' is
+        additionally a consuming entry too. Enumerate only spellings whose
+        argument is *mandatory* -- a flag whose argument is optional (cl's
+        /Fd, legal bare) would, as a consuming entry, swallow whatever flag
+        follows it. None of this is load-bearing for correctness: a missing
+        spelling makes split_bmi_args fall back to keeping the flag and its
+        detached argument together in the *relevant* half, which splits the
+        class too eagerly but never emits a flag without its argument.
         """
         return frozenset(), frozenset(), frozenset(), frozenset()
 
     def split_bmi_args(self, args: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
         """Partition a compile command into (BMI-relevant, BMI-irrelevant)
         flags per get_bmi_irrelevant_args, original order preserved in each
-        half; a consuming flag carries its argument into the irrelevant half.
-        Unrecognized flags are relevant, so an unknown divergence splits the
-        class rather than sharing a potentially incompatible BMI. A
+        half. Unrecognized flags are relevant, so an unknown divergence splits
+        the class rather than sharing a potentially incompatible BMI. A
         protected-prefix match wins over all three other categories.
+
+        A flag and a detached argument of its own always land in the same half,
+        adjacent and in order: the halves are re-concatenated to replay a
+        compile (BMI-variant provider edges), so a flag separated from its
+        argument would reach the compiler as a bare, meaningless token. A
+        consuming flag carries its argument into the irrelevant half. Where a
+        flag is stripped by *prefix* match, though, the two spellings that
+        match are indistinguishable: an attached argument (/Fooutput.obj,
+        -Idir) that needs no following token, and an unenumerated suffixed
+        spelling that still takes a detached one (/headerUnit:quote NAME=BMI).
+        A following token with no flag lead of its own is therefore assumed to
+        be a detached argument, and the pair is kept *relevant* -- splitting
+        the class too eagerly, the safe direction, rather than stripping an
+        argument whose flag may be genuinely BMI-relevant. Enumerating the
+        spelling as consuming (see get_bmi_irrelevant_args) is what turns that
+        fallback into a clean strip.
         """
         exact, prefixes, consuming, protected = self.get_bmi_irrelevant_args()
         strippable_prefixes = prefixes | consuming
         leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
+
+        def lead_of(arg: str) -> T.Optional[str]:
+            return next((lead for lead in leads if arg.startswith(lead)), None)
+
         relevant: T.List[str] = []
         irrelevant: T.List[str] = []
-        it = iter(args)
-        for arg in it:
-            body = next((arg[len(lead):] for lead in leads if arg.startswith(lead)), None)
-            if body is None:
+        argv = list(args)
+        i = 0
+        while i < len(argv):
+            arg = argv[i]
+            following = argv[i + 1] if i + 1 < len(argv) else None
+            i += 1
+            lead = lead_of(arg)
+            if lead is None:
                 relevant.append(arg)
                 continue
+            body = arg[len(lead):]
             if any(body.startswith(p) for p in protected):
                 relevant.append(arg)
                 continue
             if body in consuming:
                 irrelevant.append(arg)
-                consumed = next(it, None)
-                if consumed is not None:
-                    irrelevant.append(consumed)
+                if following is not None:
+                    irrelevant.append(following)
+                    i += 1
                 continue
-            if body in exact or any(body.startswith(s) for s in strippable_prefixes):
+            if body in exact:
                 irrelevant.append(arg)
-            else:
-                relevant.append(arg)
+                continue
+            if any(body.startswith(s) for s in strippable_prefixes):
+                if following is not None and lead_of(following) is None:
+                    relevant.append(arg)
+                    relevant.append(following)
+                    i += 1
+                else:
+                    irrelevant.append(arg)
+                continue
+            relevant.append(arg)
         return relevant, irrelevant
 
     def get_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:

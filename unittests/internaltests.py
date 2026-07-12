@@ -290,6 +290,78 @@ class InternalTests(unittest.TestCase):
         self.assertEqual(msvc.get_bmi_class_key(mbase + ['/TP']),
                          msvc.get_bmi_class_key(mbase))
 
+        # A suffix-spelled flag whose argument is a separate token strips as a
+        # unit: neither the flag nor its argument reaches the key, so two
+        # targets differing only in a prebuilt header unit or an external
+        # include dir share a BMI class. The regression this locks: the bare
+        # argument alone landing in the key (splitting the class on it, and --
+        # worse -- being replayed without its flag).
+        for pair in (['/headerUnit:quote', 'a.h=a.ifc'],
+                     ['/headerUnit:angle', 'vector=vector.ifc'],
+                     ['/headerUnit', 'a.h=a.ifc'],
+                     ['/headerName:angle', 'vector'],
+                     ['/external:I', 'C:/sdk/include'],
+                     ['/sourceDependencies', 'dep.json'],
+                     ['/ifcOutput', 'out/']):
+            key = msvc.get_bmi_class_key(mbase + pair)
+            self.assertEqual(key, msvc.get_bmi_class_key(mbase), pair)
+            self.assertNotIn(pair[1], key)
+
+    def test_split_bmi_args_keeps_detached_arguments_paired(self):
+        # A flag and an argument of its own passed as a separate token must
+        # land in the same half, adjacent and in order: the halves are
+        # re-concatenated to replay a compile (the BMI-variant provider edge),
+        # so a flag parted from its argument reaches the compiler as a bare,
+        # meaningless token -- for cl, a nonexistent input file.
+        from mesonbuild.compilers.cpp import GnuCPPCompiler, VisualStudioCPPCompiler
+
+        gcc = GnuCPPCompiler.__new__(GnuCPPCompiler)
+        msvc = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
+
+        def assert_paired(comp, args, expect_irrelevant: bool):
+            relevant, irrelevant = comp.split_bmi_args(args)
+            half = irrelevant if expect_irrelevant else relevant
+            other = relevant if expect_irrelevant else irrelevant
+            self.assertEqual(half, args, args)
+            self.assertEqual(other, [], args)
+            # And the replay concatenation keeps them adjacent, in order.
+            replay = irrelevant + relevant
+            self.assertEqual(replay[replay.index(args[0]) + 1], args[1], args)
+
+        # cl's suffixed spellings take their argument as a separate token and
+        # are enumerated as consuming, so the pair strips cleanly.
+        for pair in (['/headerUnit:quote', 'a.h=a.ifc'],
+                     ['/headerUnit:angle', 'vector=vector.ifc'],
+                     ['/headerUnit', 'a.h=a.ifc'],
+                     ['/headerName:quote', 'my.h'],
+                     ['/headerName:angle', 'vector'],
+                     ['/external:I', 'C:/sdk/include'],
+                     ['/sourceDependencies', 'dep.json'],
+                     ['/scanDependencies', 'scan.json'],
+                     ['/ifcOutput', 'out/']):
+            assert_paired(msvc, pair, expect_irrelevant=True)
+
+        # An unenumerated suffixed spelling cannot be told apart from an
+        # attached-argument one by shape, so a following token with no flag
+        # lead is assumed to be its detached argument and the pair is kept
+        # relevant: the class splits too eagerly (safe) rather than the flag
+        # being emitted without its argument (broken).
+        assert_paired(msvc, ['/headerUnit:future', 'a.h=a.ifc'], expect_irrelevant=False)
+        assert_paired(msvc, ['/analyze:plugin', 'checks.dll'], expect_irrelevant=False)
+        assert_paired(msvc, ['/Fd', 'out.pdb'], expect_irrelevant=False)
+
+        # Attached spellings are unchanged: one token, nothing consumed.
+        self.assertEqual(msvc.split_bmi_args(['/Foout.obj']), ([], ['/Foout.obj']))
+        self.assertEqual(msvc.split_bmi_args(['/Foout.obj', '/W4']),
+                         ([], ['/Foout.obj', '/W4']))
+        self.assertEqual(msvc.split_bmi_args(['/external:W0', '/DFOO']),
+                         (['/DFOO'], ['/external:W0']))
+        self.assertEqual(gcc.split_bmi_args(['-Idir', '-Wall']), ([], ['-Idir', '-Wall']))
+
+        # Exact-consuming flags still consume unconditionally.
+        assert_paired(gcc, ['-isystem', '/x'], expect_irrelevant=True)
+        assert_paired(msvc, ['/reference', 'm=x.ifc'], expect_irrelevant=True)
+
     def test_cpp_std_supports_modules(self):
         # C++ modules need C++20+. The helper must accept c++20 and later in all
         # spellings (c++/gnu++/vc++, draft aliases, latest) and reject older
