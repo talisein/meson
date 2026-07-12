@@ -493,16 +493,28 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return [f'-fprebuilt-module-path={self.get_module_cache_dir(class_subdir)}',
                 '-fmodules', '-fno-modules']
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative Clang strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable). A user-passed -fmodules is intentionally NOT stripped:
         # implicit Clang header modules genuinely change the compile.
+        #
+        # Protected against the four family prefixes above (checked against
+        # `clang --help-hidden`): -Wa,/-Wp,/-Wl, forward opaque, comma-
+        # delimited content to another tool stage (-Wp, can carry a real -D)
+        # and must not be swallowed by the bare 'W' meant for -Wall et al.;
+        # -ObjC/-ObjC++ select a different source language, not an
+        # optimization level, despite sharing 'O'; --gcc-toolchain= picks an
+        # entirely different GCC install (headers/libs/macros), despite
+        # sharing 'g' with -g/-gdwarf/...; -working-directory changes how
+        # relative #includes resolve, despite sharing 'w' with -w.
         return (frozenset(),
                 frozenset({'g', 'O', 'W', 'w', 'Q', 'fmodule-file', 'fPIC',
                            'fpic', 'fPIE', 'fpie', 'fsanitize', 'embed-dir'}),
-                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
+                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}),
+                frozenset({'Wa,', 'Wp,', 'Wl,', 'ObjC', 'gcc-toolchain',
+                           'working-directory'}))
 
     def get_header_unit_consumer_args(self, mode: str, spelling: str, bmi_path: str) -> T.List[str]:
         # Clang has no directory lookup for header units (-fprebuilt-module-path
@@ -846,16 +858,26 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # .gch at all). GCC's position is that header units subsume PCH.
         return False
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative GCC strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable); -Mno-modules shapes only the depfile, never the BMI.
+        #
+        # Protected against the two family prefixes above (checked against
+        # `man gcc`): -Wa,/-Wp,/-Wl, forward opaque, comma-delimited content
+        # to another tool stage (-Wp, can carry a real -D) and must not be
+        # swallowed by the bare 'W' meant for -Wall et al.; -ObjC/-ObjC++
+        # select a different source language, not an optimization level,
+        # despite sharing 'O'; -wrapper forwards an opaque, comma-separated
+        # program+args list (same shape as -Wa,/-Wp,/-Wl,), despite sharing
+        # 'w' with -w.
         return (frozenset(),
                 frozenset({'O', 'W', 'w', 'Q', 'fmodule-mapper', 'fmodules-ts',
                            'fmodules', 'fPIC', 'fpic', 'fPIE', 'fpie',
                            'fsanitize', 'embed-dir', 'Mno-modules'}),
-                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
+                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}),
+                frozenset({'Wa,', 'Wp,', 'Wl,', 'ObjC', 'wrapper'}))
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         # A P1689 scan runs before any BMI exists, so it must not compile:
@@ -1304,7 +1326,7 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         cache = self.get_module_cache_dir(class_subdir)
         return ['/ifcSearchDir', cache, '/ifcOutput', f'{cache}/']
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative MSVC strip list. Defines are deliberately
         # absent (a -D difference must split the BMI class) and so is /O
         # (conservative: optimization divergence splits here). 'isystem' is
@@ -1317,7 +1339,11 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # is unconditionally True for this compiler). 'E' therefore lives in
         # the exact set below, not prefix: as a prefix it used to also match
         # /EHsc and /EHs-c-, silently merging BMIs built under different
-        # exception-handling models.
+        # exception-handling models. No protected prefixes here: cl has no
+        # GCC-style comma-forwarding convention, and the family prefixes
+        # below have not been audited against the cl docs the way GCC/Clang
+        # were (see mesonbuild/compilers/compilers.py's get_bmi_irrelevant_args
+        # docstring).
         return (frozenset({'E', 'EP', 'TP', 'nologo', 'internalPartition',
                            'interface', 'help', 'exportHeader', 'C', '?'}),
                 frozenset({'errorReport', 'W', 'w', 'sourceDependencies',
@@ -1326,7 +1352,8 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
                            'doc', 'diagnostics', 'cgthreads', 'analyze',
                            'external', 'fsanitize'}),
                 frozenset({'Fo', 'I', 'reference', 'headerUnit', 'isystem',
-                           'ifcSearchDir'}))
+                           'ifcSearchDir'}),
+                frozenset())
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
         # P1689 scan. No /c: cl only scans and writes no object. /Fo sets

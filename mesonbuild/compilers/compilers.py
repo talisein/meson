@@ -1589,9 +1589,9 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return True
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
-        """(exact flags, prefix flags, argument-consuming flags) known not to
-        affect a C++ module BMI.
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
+        """(exact flags, prefix flags, argument-consuming flags, protected
+        prefixes) known not to affect a C++ module BMI.
 
         Spelled without the leading '-', '--' or '/'. An exact flag strips only
         an argument that equals it exactly -- use this for a bare flag with no
@@ -1613,17 +1613,33 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         where it should be exact) is the unsafe direction, since it can merge
         genuinely different compiles. Empty by default: with no knowledge,
         every flag difference splits the class.
+
+        A protected prefix is the escape hatch for exactly that unsafe
+        direction: it is checked before the other three and always keeps a
+        flag relevant, even one that would otherwise match this same
+        compiler's own exact/prefix/consuming entries. Use it when a broad
+        prefix is still the right call for the family it targets (there is
+        no bounded list of legal GCC/Clang -Wxxx warning names to enumerate
+        exactly) but the same leading letters also happen to name one or
+        two specific, unrelated, BMI-affecting flags -- e.g. GCC/Clang's
+        bare 'O' (for -O0../-O3) also spells -ObjC (a language-mode flag,
+        not an optimization level); Clang's bare 'w' (for -w) also spells
+        -working-directory (changes relative #include resolution); GCC/
+        Clang's bare 'W' (for -Wall et al.) also spells -Wa,/-Wp,/-Wl, (opaque,
+        comma-delimited content forwarded to another tool stage -- -Wp, in
+        particular can carry a real -D).
         """
-        return frozenset(), frozenset(), frozenset()
+        return frozenset(), frozenset(), frozenset(), frozenset()
 
     def split_bmi_args(self, args: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
         """Partition a compile command into (BMI-relevant, BMI-irrelevant)
         flags per get_bmi_irrelevant_args, original order preserved in each
         half; a consuming flag carries its argument into the irrelevant half.
         Unrecognized flags are relevant, so an unknown divergence splits the
-        class rather than sharing a potentially incompatible BMI.
+        class rather than sharing a potentially incompatible BMI. A
+        protected-prefix match wins over all three other categories.
         """
-        exact, prefixes, consuming = self.get_bmi_irrelevant_args()
+        exact, prefixes, consuming, protected = self.get_bmi_irrelevant_args()
         strippable_prefixes = prefixes | consuming
         leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
         relevant: T.List[str] = []
@@ -1632,6 +1648,9 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         for arg in it:
             body = next((arg[len(lead):] for lead in leads if arg.startswith(lead)), None)
             if body is None:
+                relevant.append(arg)
+                continue
+            if any(body.startswith(p) for p in protected):
                 relevant.append(arg)
                 continue
             if body in consuming:

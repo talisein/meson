@@ -1149,6 +1149,18 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             self.assertEqual(f.read(), single_class)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_eh_rtti_divergence_builds(self):
+        # cpp_eh and cpp_rtti each independently survive the class key (neither
+        # is in Clang's or GCC's get_bmi_irrelevant_args): prog_eh and prog_rtti
+        # must each resolve modlib through their own BMI-only variant, and every
+        # program's constexpr probe must see its own compile's view, not the
+        # provider's.
+        self.build_and_check_modules('183 module eh rtti divergence',
+                                     setup_not_contains=['divergent dialects'])
+        self.assertEqual(len(self.bmi_class_dirs()), 3)
+        self.assertEqual(len(self.bmi_variant_ids()), 2)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_source_with_spaces(self):
         # A module interface source with a space in its file name: the BMI is
         # named from the module name, but every object-derived path (.ddi,
@@ -1306,6 +1318,40 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
         if self.host_cpp_compiler().get_id() == 'gcc':
             self.check_gcc_module_mappers()
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_header_unit_eh_rtti_divergence_warns(self):
+        # GCC's dialect check on a header unit's CMI isn't limited to cpp_std
+        # (test_header_unit_divergence_warns): it covers cpp_eh and cpp_rtti
+        # too, unlike a -D divergence (test_header_unit_define_divergence,
+        # which goes green). Configure-only, same shape as fixture 168: the
+        # scan of the mismatched CMI would hard-error, so setup only warns.
+        testdir = os.path.join(self.unit_test_dir, '184 header unit eh rtti divergence')
+        out = self.init(testdir)
+        self.assertEqual(out.count('divergent dialects'), 2)
+        self.assertIn("'-fno-exceptions' only in 'prog_eh'", out)
+        self.assertIn("'-fno-rtti' only in 'prog_rtti'", out)
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
+                              compiler='clang')
+    def test_header_unit_eh_rtti_divergence_builds(self):
+        # Three declarers of the same header unit: prog_eh and prog_rtti each
+        # diverge from prog in one BMI-relevant flag, so each must get its own
+        # unit BMI. Every program constant-evaluates the unit's
+        # __cpp_exceptions/__cpp_rtti view, so a wrongly shared BMI is a
+        # failing test run, not merely a build failure. GCC cannot build this
+        # fixture at all -- see test_header_unit_eh_rtti_divergence_warns.
+        self.build_and_check_modules('184 header unit eh rtti divergence',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('util.h')
+        self.assertEqual(len(units), 3, f'expected one util.h BMI per class, got {units}')
+        per_prog = {p: self.header_unit_bmis_of(p, 'util.h')
+                    for p in ('prog', 'prog_eh', 'prog_rtti')}
+        for prog, bmis in per_prog.items():
+            self.assertEqual(len(bmis), 1, f'{prog} must resolve exactly one util.h BMI, got {bmis}')
+        self.assertEqual(len({next(iter(v)) for v in per_prog.values()}), 3,
+                         'each class must have its own unit BMI')
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_generated_header(self):

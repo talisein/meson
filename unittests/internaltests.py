@@ -198,6 +198,46 @@ class InternalTests(unittest.TestCase):
         # Allowlisted differences do not split.
         self.assertEqual(gcc.get_bmi_class_key(base + ['-O2', '-Ia', '-Wall', '-fPIC']),
                          gcc.get_bmi_class_key(base + ['-O0', '-Ib', '-Werror']))
+        # A family prefix ('W', 'O', 'w', 'g') is only safe as far as every
+        # real flag sharing that leading letter is BMI-irrelevant. Each
+        # assertion below is a regression lock for one flag `man gcc`/`clang
+        # --help-hidden` shows sharing a leading letter with an allowlisted
+        # family while meaning something unrelated and BMI-affecting.
+        #
+        # -Wa,/-Wp,/-Wl, forward opaque, comma-delimited content to another
+        # tool stage -- -Wp, in particular can carry a real -D -- and must
+        # not be swallowed by the bare 'W' meant for -Wall et al.
+        self.assertNotEqual(gcc.get_bmi_class_key(base),
+                            gcc.get_bmi_class_key(base + ['-Wp,-DFOO=1']))
+        self.assertNotEqual(gcc.get_bmi_class_key(base),
+                            gcc.get_bmi_class_key(base + ['-Wl,--as-needed']))
+        self.assertNotEqual(gcc.get_bmi_class_key(base),
+                            gcc.get_bmi_class_key(base + ['-Wa,--noexecstack']))
+        self.assertNotEqual(clang.get_bmi_class_key(base),
+                            clang.get_bmi_class_key(base + ['-Wp,-DFOO=1']))
+        # -ObjC/-ObjC++ select a different source language, not an
+        # optimization level, despite sharing 'O' with -O0../-O3.
+        self.assertNotEqual(gcc.get_bmi_class_key(base),
+                            gcc.get_bmi_class_key(base + ['-ObjC']))
+        self.assertNotEqual(clang.get_bmi_class_key(base),
+                            clang.get_bmi_class_key(base + ['-ObjC++']))
+        # --gcc-toolchain= picks an entirely different GCC install
+        # (headers/libs/macros), despite sharing 'g' with Clang's -g/-gdwarf/...
+        self.assertNotEqual(clang.get_bmi_class_key(base),
+                            clang.get_bmi_class_key(base + ['--gcc-toolchain=/opt/gcc-13']))
+        # -working-directory changes how relative #includes resolve, despite
+        # sharing 'w' with Clang's -w.
+        self.assertNotEqual(clang.get_bmi_class_key(base),
+                            clang.get_bmi_class_key(base + ['-working-directory', '/src']))
+        # -wrapper forwards an opaque, comma-separated program+args list (the
+        # same shape as -Wa,/-Wp,/-Wl,), despite sharing 'w' with GCC's -w.
+        self.assertNotEqual(gcc.get_bmi_class_key(base),
+                            gcc.get_bmi_class_key(base + ['-wrapper', 'gdb,--args']))
+        # Ordinary -W warning flags that merely share the leading letter must
+        # keep stripping: this must not regress into treating every -W* as
+        # relevant.
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-Wpedantic']),
+                         gcc.get_bmi_class_key(base))
         # Two-token and joined include spellings are both stripped.
         self.assertEqual(gcc.get_bmi_class_key(base + ['-isystem', '/x']),
                          gcc.get_bmi_class_key(base + ['-isystem/y']))
