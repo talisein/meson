@@ -951,6 +951,58 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertFalse(any('priv.' in line for line in variant_lines),
                          'a BMI-only variant must never compile a private interface')
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_export_dynamic_executable_private_modules(self):
+        # An export_dynamic executable can be linked -- on PE/COFF through the
+        # import library that same kwarg produces -- so it is a normal module
+        # provider: its declared private interface stays in its private
+        # /ifcOutput dir while its public one must reach the shared ifc cache
+        # for the shared_module linking it. cl writes BMIs by /ifcOutput
+        # directory, so confirm the split on disk, not from the command line.
+        self.build_and_check_modules('192 export dynamic private modules', bmis=['pub'])
+        self.assertEqual(self.provided_modules('app'), {'pub'})
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 1)
+        self.assertEqual(self._private_bmi_names(next(iter(dirs))), {'priv'},
+                         "the executable's public module must not land in its private dir")
+        self.assertFalse(os.path.isfile(self.bmi_path('priv')),
+                         'a private module must not reach the shared BMI cache')
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_export_dynamic_executable_private_module_import(self):
+        # The plugin imports the executable's private module instead of its
+        # public one: privacy is not weakened by the target being linkable.
+        testdir = os.path.join(self.unit_test_dir, '192 export dynamic private modules')
+        self.init(testdir, extra_args=['-Dmode=import-private'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'requires module "priv", which target \'app\' provides privately '
+            "(it is listed in that target's cpp_private_module_interfaces). A "
+            'private module can only be imported inside the target that provides it.',
+            cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_export_dynamic_executable_variant_provider(self):
+        # The plugin diverges on cpp_std, so the executable's public module is
+        # recompiled into a BMI-only variant for the plugin's class -- an
+        # executable as a variant provider, which only a linkable one can be.
+        # cl has no cpp_std=c++23, so the divergent dialect is c++latest here.
+        self.build_and_check_modules('192 export dynamic private modules',
+                                     extra_args=['-Dmode=divergent',
+                                                 '-Ddivergent_std=c++latest'])
+        self.assertEqual(len(self.bmi_class_dirs()), 2)
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        self.assertEqual(self.provided_modules('app'), {'pub'})
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            variant_lines = [line for line in f.read().splitlines() if '@bmi@' in line]
+        self.assertTrue(variant_lines)
+        # 'priv' alone would also match the unrelated 'meson-private' prefix of
+        # every private BMI dir; the private interface is named 'priv.cppm'
+        # (source) or 'priv.ifc'/'priv.cpp.obj' (its outputs).
+        self.assertFalse(any('priv.' in line for line in variant_lines),
+                         'a BMI-only variant must never compile a private interface')
+
     def test_gcc_header_unit_space_free_alias(self):
         # The space-free alias that lets a GCC header unit under a spaced path
         # be named in a module mapper (a mapper key cannot contain whitespace):

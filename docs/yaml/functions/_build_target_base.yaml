@@ -330,11 +330,16 @@ kwargs:
       private primary's partition out of `cpp_private_module_interfaces` is a
       build-time error, not a silently-accepted gap.
 
-      Declaring this on an `executable()` is accepted, not an error, even
-      though every module an executable provides is already private (nothing
-      can ever link an executable to import from it): the declaration is
-      simply redundant there, so a target does not need its module keywords
-      edited when switched between `executable()` and a library.
+      Declaring this on an `executable()` is accepted, not an error. On an
+      ordinary executable it is simply redundant -- nothing can link an
+      executable to import from it, so every module it provides is already
+      private -- which means a target does not need its module keywords edited
+      when switched between `executable()` and a library. On an executable
+      built with `export_dynamic`, though, it is meaningful: such an
+      executable *can* be linked (by a [[shared_module]] it loads at runtime,
+      which resolves symbols back into it), so its modules are published to
+      whatever links it exactly as a library's are, and this keyword names the
+      ones that must not be.
 
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only; declaring it

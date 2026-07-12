@@ -29,8 +29,11 @@ primary module; list the partition's own source here too if it should be
 private as well. Meson enforces this: leaving a private primary's partition
 undeclared is a build-time error, not a silently-accepted gap.
 
-Declaring this on an `executable()` is accepted but redundant: nothing can
-ever link an executable, so all of its modules are already private.
+Declaring this on an ordinary `executable()` is accepted but redundant:
+nothing can link one, so all of its modules are already private. On an
+`export_dynamic` executable it is meaningful — a `shared_module` can link
+such an executable, so its modules are published like a library's, and this
+keyword names the ones that stay private.
 
 An import of a private module from outside its defining target is rejected
 with a diagnostic naming both the module and the target that provides it

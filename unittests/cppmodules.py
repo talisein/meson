@@ -50,6 +50,7 @@ Token vocabulary (the API for the C++ module test series):
 from __future__ import annotations
 import functools
 import glob
+import json
 import os
 import re
 import subprocess
@@ -456,6 +457,22 @@ class CppModulesTestMixin:
             contents = f.read()
         return {m.replace('\\', '/')
                 for m in re.findall(r'meson-private[/\\][^/\\\s]*@bmi@[0-9a-f]{12}', contents)}
+
+    def provided_modules(self, target: str) -> T.Set[str]:
+        """The module names a target publishes to targets linking it, from its
+        provided-modules.json. A private module is never in here (it has no
+        importer outside the target), whether it is private by declaration or
+        because nothing can link the target at all."""
+        # The private dir carries the target's output suffix (app.p on POSIX,
+        # app.exe.p on Windows) -- glob rather than hardcode either, as
+        # assert_alias_mapper_key does.
+        patterns = [os.path.join(self.builddir, f'{target}.p', 'provided-modules.json'),
+                    os.path.join(self.builddir, f'{target}.*.p', 'provided-modules.json')]
+        matches = [m for pat in patterns for m in glob.glob(pat)]
+        self.assertEqual(len(matches), 1,
+                         f'{" or ".join(patterns)}: expected one provmap, got {matches}')
+        with open(matches[0], encoding='utf-8') as f:
+            return set(json.load(f))
 
     def private_bmi_dirs(self) -> T.Set[str]:
         """The distinct module-providing-executable private BMI dirs named in

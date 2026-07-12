@@ -1794,16 +1794,28 @@ class BuildTarget(Target):
         return 'cpp' in self.compilers and (self.cpp_modules or self._has_cpp_module_source())
 
     @lru_cache(maxsize=None)
+    def all_cpp_modules_private(self) -> bool:
+        """Whether every C++ module this target provides is private by
+        construction: a module-providing executable nothing can link (no
+        export_dynamic), so no other target could ever import them, whatever
+        the target declares.
+
+        Distinct from provides_private_cpp_modules(), which is true of any
+        target with *some* private module: an export_dynamic executable with
+        cpp_private_module_interfaces has private modules but is not wholly
+        private -- its other modules are importable by whoever links it.
+        """
+        return (isinstance(self, Executable) and self.provides_cpp_modules()
+                and not self.is_linkwithable)
+
+    @lru_cache(maxsize=None)
     def provides_private_cpp_modules(self) -> bool:
         """Whether this target has a C++ module of its own that must never be
         published to a dependent: either declared via
-        cpp_private_module_interfaces, or -- for a module-providing
-        executable, which nothing can ever link -- every module it provides.
+        cpp_private_module_interfaces, or -- when nothing can link the target
+        at all -- every module it provides.
         """
-        if self.cpp_private_module_interfaces:
-            return True
-        return (isinstance(self, Executable) and self.provides_cpp_modules()
-                and not self.is_linkwithable)
+        return bool(self.cpp_private_module_interfaces) or self.all_cpp_modules_private()
 
     @lru_cache(maxsize=None)
     def uses_cpp_modules(self) -> bool:

@@ -1679,11 +1679,15 @@ class NinjaBackend(backends.Backend):
         private_dir = self._module_private_bmi_dir_for(target)
         if private_dir is not None:
             depargs += ['--private-bmi-dir', private_dir]
-            if isinstance(target, build.Executable) and target.provides_private_cpp_modules():
-                # Every module this target provides is private by
-                # construction (Stage 7): no per-source list is needed, or
+            if target.all_cpp_modules_private():
+                # Nothing can link this target, so every module it provides is
+                # private by construction: no per-source list is needed, or
                 # even meaningful, since cpp_private_module_interfaces may be
-                # empty here.
+                # empty here. A target only *some* of whose modules are
+                # private (a library, or an export_dynamic executable, with
+                # cpp_private_module_interfaces) takes the branch below
+                # instead -- privatizing its public provides too would name
+                # their BMIs in the private dir no compile writes them to.
                 depargs += ['--all-provides-private']
             else:
                 for p in sorted(self._private_module_interface_objs(target)):
@@ -2360,9 +2364,11 @@ class NinjaBackend(backends.Backend):
 
     def _module_private_bmi_dir_for(self, target: build.BuildTarget) -> T.Optional[str]:
         """A directory outside the shared cache for the modules of
-        target.provides_private_cpp_modules(): either an executable, a link
-        sink whose modules nothing could ever import anyway, or a library
-        with an explicit cpp_private_module_interfaces declaration.
+        target.provides_private_cpp_modules(): a link sink, whose modules
+        nothing could ever import anyway, or any target with an explicit
+        cpp_private_module_interfaces declaration. Only the target's private
+        modules go here -- a target may well publish others to the shared
+        cache alongside (_is_private_module_source decides per source).
         Unkeyed by BMI class: a private module's only possible consumers are
         this target's own translation units, which all share one class.
         """
@@ -2404,14 +2410,16 @@ class NinjaBackend(backends.Backend):
         return os.path.normpath(key) in self._private_module_interface_paths(target)
 
     def _is_private_module_source(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
-        """Whether src's module (if any) is private: every source of a
-        module-providing executable (Stage 7 -- the whole target is a link
-        sink, so every module it provides is already private by
-        construction), or a source this target explicitly names in
+        """Whether src's module (if any) is private: every source of a target
+        whose modules are wholly private (a link sink -- nothing can import
+        them), or a source this target explicitly names in
         cpp_private_module_interfaces.
+
+        The same predicate decides --all-provides-private on the collate
+        (_module_collate_depargs), so the dyndep and the compile that writes
+        the BMI always agree on which directory it lands in.
         """
-        if (isinstance(target, build.Executable) and target.provides_cpp_modules()
-                and not target.is_linkwithable):
+        if target.all_cpp_modules_private():
             return True
         return self._is_declared_private_interface(target, src)
 
