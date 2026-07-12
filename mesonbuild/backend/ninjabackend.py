@@ -1322,6 +1322,15 @@ class NinjaBackend(backends.Backend):
             return 'none'
         if not isinstance(target, build.BuildTarget):
             return 'none'
+        if isinstance(target, build.CompileTarget):
+            # A preprocess-only target (-E): it neither writes a BMI nor
+            # imports one, and generate_target returns before any collate is
+            # emitted for it -- so no part of the module pipeline (mappers,
+            # scans, header units, provided-module maps) belongs on its edges,
+            # or on the edges of a target that consumes its output. This is
+            # the same exclusion the Fortran dyndep path makes in
+            # add_dependency_scanner_entries_to_element.
+            return 'none'
         if 'fortran' in target.compilers:
             return 'none'
         cpp = target.compilers.get('cpp')
@@ -1409,7 +1418,11 @@ class NinjaBackend(backends.Backend):
         # rejects `export module` / `import` at build time, so fail during setup
         # with a clear message instead. uses_cpp_modules() walks the link graph,
         # so this must run at generation time (not target creation) when it is
-        # frozen -- calling it earlier poisons its memoized result.
+        # frozen -- calling it earlier poisons its memoized result. A
+        # preprocess-only target is exempt: -E never parses `export module` or
+        # `import`, so an older cpp_std preprocesses a module interface fine.
+        if isinstance(target, build.CompileTarget):
+            return
         if 'cpp' not in target.compilers or not target.uses_cpp_modules():
             return
         from ..compilers.cpp import cpp_std_supports_modules
@@ -1427,8 +1440,11 @@ class NinjaBackend(backends.Backend):
         # compiler errors, so report the missing tool at setup instead. The
         # legacy -fmodules/-fmodules-ts regex escape hatch is exempt (it does
         # not need the scanner), as are builds whose ninja lacks dyndep, which
-        # never scan on any compiler.
+        # never scan on any compiler, and preprocess-only targets, which are
+        # never scanned (see cpp_module_scanner_for_target).
         if not self.ninja_has_dyndeps or 'cpp' not in target.compilers:
+            return
+        if isinstance(target, build.CompileTarget):
             return
         cpp = target.compilers['cpp']
         if cpp.get_id() != 'clang' or not target.uses_cpp_modules():
@@ -1444,8 +1460,26 @@ class NinjaBackend(backends.Backend):
         return self.cpp_module_scanner_for_target(target) == 'p1689'
 
     def target_uses_p1689_cpp_modules_edge(self, target: build.BuildTargetTypes, compiler: Compiler) -> bool:
-        """Whether this specific compile/scan edge is a P1689 C++ module edge."""
+        """Whether this compiler's edges in this target are P1689 C++ module edges.
+
+        Target-wide, for the whole-target questions (the PCH is dropped for
+        every source or for none). A question about one compile -- what flags
+        it takes, what it depends on -- is source_uses_p1689_cpp_modules.
+        """
         return compiler.get_language() == 'cpp' and self.target_uses_p1689_cpp_modules(target)
+
+    def source_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes, compiler: Compiler,
+                                      src: FileOrString) -> bool:
+        """Whether this specific compile/scan edge of src is a P1689 module edge.
+
+        The C++ compiler also compiles sources the collate never scans (it
+        assembles .s/.S). Such an edge gets no module flags, no per-TU module
+        mapper and no header-unit deps -- the collate declares those outputs
+        only for the sources select_sources_to_scan yields, so a compile that
+        depended on them would depend on a file nothing produces.
+        """
+        return (self.target_uses_p1689_cpp_modules_edge(target, compiler)
+                and self.source_scan_language(src) == 'cpp')
 
     def get_provided_modules_file_for(self, target: build.BuildTarget) -> str:
         return os.path.join(self.get_target_private_dir(target), 'provided-modules.json')
@@ -1492,7 +1526,7 @@ class NinjaBackend(backends.Backend):
                                  order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None,
                                  header_unit_override: T.Optional[T.List[str]] = None,
                                  pch_dep: T.Optional[T.List[str]] = None) -> None:
-        if not self.target_uses_p1689_cpp_modules_edge(target, compiler):
+        if not self.source_uses_p1689_cpp_modules(target, compiler, rel_src):
             return
         if compiler.get_id() == 'clang':
             # Registered lazily (idempotent): creating clang's scan rule needs
@@ -2463,6 +2497,24 @@ class NinjaBackend(backends.Backend):
         info = self._bmi_classes.get((for_machine, class_key))
         return info.subdir if info else None
 
+    @staticmethod
+    def source_scan_language(src: FileOrString) -> T.Optional[Literal['cpp', 'fortran']]:
+        """The scanning language of a source, or None if it is not scanned.
+
+        The suffix alone decides this, and it is the only thing that does:
+        the C++ compiler also compiles sources with no modules in them (it
+        assembles .s/.S), so a source's compile edge belongs to the module
+        pipeline only if this says 'cpp' -- otherwise nothing scans it and
+        nothing declares its per-TU outputs.
+        """
+        fname = src.fname if isinstance(src, File) else src
+        ext = os.path.splitext(fname)[1][1:]
+        if ext.lower() in compilers.lang_suffixes['cpp'] or ext == 'C':
+            return 'cpp'
+        if ext.lower() in compilers.lang_suffixes['fortran']:
+            return 'fortran'
+        return None
+
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:
         # in practice pick up C++ and Fortran files. If some other language
@@ -2471,11 +2523,9 @@ class NinjaBackend(backends.Backend):
         for source in compiled_sources:
             if isinstance(source, mesonlib.File):
                 source = source.rel_to_builddir(self.build_to_src)
-            ext = os.path.splitext(source)[1][1:]
-            if ext.lower() in compilers.lang_suffixes['cpp'] or ext == 'C':
-                yield source, 'cpp'
-            elif ext.lower() in compilers.lang_suffixes['fortran']:
-                yield source, 'fortran'
+            lang = self.source_scan_language(source)
+            if lang is not None:
+                yield source, lang
 
     def process_target_dependencies(self, target: build.BuildTarget) -> None:
         for t in target.get_dependencies():
@@ -4941,15 +4991,20 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # compiled as a module unit), but MSVC flags it /internalPartition
         # rather than /interface.
         src_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
-        is_internal_partition = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+        # Whether this compile takes part in the module pipeline at all. A
+        # module-enabled target can also hand the C++ compiler a source with
+        # no modules in it (assembly), which is scanned by nothing and so must
+        # carry none of the pipeline's flags, mappers or deps.
+        is_module_edge = self.source_uses_p1689_cpp_modules(target, compiler, src)
+        is_internal_partition = is_module_edge \
             and self._is_declared_internal_partition(target, src)
         # A source named only in cpp_private_module_interfaces (no
         # cppm/ixx extension) is still an interface unit that must be
         # compiled/scanned as one; being private only changes where its BMI
         # ends up, not whether it is an interface at all.
-        is_private_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+        is_private_interface = is_module_edge \
             and self._is_declared_private_interface(target, src)
-        is_module_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+        is_module_interface = is_module_edge \
             and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src)
                  or is_internal_partition or is_private_interface)
 
@@ -4982,11 +5037,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         commands += self._generate_single_compile_target_args(target, compiler)
 
-        # C++ named modules: compile every TU of a module-enabled target with
-        # the module flags, exactly as it will be scanned. The module name and
-        # BMI path never appear on the command line -- ordering is carried by
-        # the dyndep and BMIs are found by directory lookup in the shared cache.
-        if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+        # C++ named modules: compile every scanned TU of a module-enabled
+        # target with the module flags, exactly as it will be scanned. The
+        # module name and BMI path never appear on the command line -- ordering
+        # is carried by the dyndep and BMIs are found by directory lookup in
+        # the shared cache.
+        if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
             private_output = private_dir is not None and self._is_private_module_source(target, src)
             modargs = compiler.get_module_compile_args(
@@ -5189,7 +5245,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             element.add_item('description', f'Compiling {compiler.get_display_language()} object {rel_obj}{cmd_type}')
         else:
             compile_commands = commands
-            if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+            if is_module_edge:
                 # cl and clang consumers must name each imported header unit's
                 # BMI explicitly (no directory lookup). On cl the flags go only
                 # on the compile, never on the scan -- which reuses `commands`
@@ -5223,7 +5279,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # before this compile (in gcm.cache for GCC, at the path we chose for
         # MSVC), and a source that imports one must recompile when its BMI
         # changes. See provision_header_units.
-        if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+        if is_module_edge:
             element.add_dep(self.provision_header_units(target, compiler))
         self.add_build(element)
         # Emit the P1689 scan edge for GCC/MSVC/Clang module targets,
@@ -5305,10 +5361,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         if isinstance(target, build.CompileTarget):
             return
-        extension = os.path.splitext(src.fname)[1][1:]
-        if extension != 'C':
-            extension = extension.lower()
-        if not (extension in compilers.lang_suffixes['fortran'] or extension in compilers.lang_suffixes['cpp']):
+        if self.source_scan_language(src) is None:
             return
         dep_scan_file = self.get_dep_scan_file_for(target)[1]
         element.add_item('dyndep', dep_scan_file)

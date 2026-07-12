@@ -719,6 +719,31 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('172 module sources with spaces')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_preprocess_module_interface(self):
+        # compiler.preprocess() of a module interface: a preprocess-only target
+        # neither writes a BMI nor imports one, and generate_target returns
+        # before any collate is emitted for it, so no part of the module
+        # pipeline may reach its /EP compile. Pre-fix cl was handed
+        # /interface /ifcOutput on the preprocess plus a dead cpp_MODULE_SCAN
+        # edge whose .ddi no collate consumes -- cl silently ignores module
+        # flags under /EP, so it failed quietly rather than loudly. The same
+        # source compiled normally, in the library next door, is untouched.
+        self.build_and_check_modules(
+            '195 preprocess module interface',
+            bmis=['modlib'],
+            ninja_not_contains=['modlib.cppm.ii.ddi'])
+        preproc_dir = os.path.join(self.builddir, 'preprocessor_0.p')
+        self.assertTrue(os.path.isfile(os.path.join(preproc_dir, 'modlib.cppm.ii')))
+        # The preprocess edge carries none of the module pipeline's flags.
+        edge = self.link_edge('preprocessor_0.p/modlib.cppm.ii')
+        for flag in ('/interface', '/ifcOutput', '/ifcSearchDir'):
+            self.assertNotIn(flag, edge)
+        # Its private dir holds only the .ii: no BMI, scan output or provmap.
+        for name in os.listdir(preproc_dir):
+            self.assertFalse(name.endswith(('.ifc', '.ddi')) or name == 'provided-modules.json',
+                             f'{name} must not be in a preprocess-only target dir')
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
     def test_msvc_runtime_bmi_classes(self):
         # The MSVC runtime library (/MD vs /MT) is BMI-affecting and not
