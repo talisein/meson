@@ -543,11 +543,19 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # "../header.hpp", and the bare spelling itself cl cannot open as a
         # file. Both fail at Meson's collator with a legible message; only the
         # include-path spelling (plain) is portable.
-        for mode in ('aliased', 'undeclared'):
+        # Grouping (declared spellings of one file sharing a BMI) is emitted at
+        # configure time, before cl ever gets a chance to reject the import, so
+        # it is observable here even though 'aliased'/'classes' still fail at
+        # the collator: exactly one unit edge per BMI class, not one per
+        # spelling.
+        for mode in ('aliased', 'undeclared', 'classes'):
             with self.subTest(mode=mode):
                 self.new_builddir()
                 self.init(os.path.join(self.unit_test_dir, testdir),
                           extra_args=[f'-Dmode={mode}'])
+                if mode in ('aliased', 'classes'):
+                    self.assertEqual(len(self.header_unit_bmis('header.hpp')),
+                                     2 if mode == 'classes' else 1)
                 with self.assertRaises(subprocess.CalledProcessError) as cm:
                     self.build()
                 self.assertIn('not declared in this target', cm.exception.stdout)
@@ -870,6 +878,74 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # importers, worse than the diagnosed failure.
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             self.assertNotIn('meson-private/imap/', f.read())
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_aliasing(self):
+        # Windows counterpart of LinuxlikeTests.test_header_unit_aliasing: the
+        # alias link edge (copy.py --link, ninja rule cpp_header_unit_alias) and
+        # the grouping it depends on have never run on this platform.
+        testdir = '173 header unit aliasing'
+        self.build_and_check_modules(testdir, ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
+
+        self.new_builddir()
+        self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
+                                     ninja_args_not_contains=(),
+                                     setup_not_contains=['cannot name a header unit'])
+        self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
+        self.check_gcc_module_mappers()
+        alias_bmi = self.assert_alias_mapper_key('prog', 'foo_aliased.cpp')
+        plain_bmi = self.assert_alias_mapper_key('prog', 'main.cpp', alias=False)
+        self.assertEqual(alias_bmi, plain_bmi,
+                         'both spellings must resolve the one BMI of the file')
+        # The alias's default-named path holds the canonical BMI itself (a hard
+        # link on NTFS, copy.py's fallback elsewhere) -- not a second build of
+        # it -- and a follow-up build must see nothing to do.
+        self.assert_header_unit_alias_link(alias_bmi)
+        self.assertBuildIsNoop()
+
+        self.new_builddir()
+        self.build_and_check_modules(testdir, extra_args=['-Dmode=classes'],
+                                     ninja_args_not_contains=(),
+                                     setup_not_contains=['cannot name a header unit'])
+        units = self.header_unit_bmis('header.hpp')
+        self.assertEqual(len(units), 2, f'expected one BMI per class, got {units}')
+        per_prog = {}
+        for prog in ('prog', 'progfoo'):
+            alias_bmi = self.assert_alias_mapper_key(prog, 'foo_aliased.cpp')
+            plain_bmi = self.assert_alias_mapper_key(prog, 'main.cpp', alias=False)
+            self.assertEqual(alias_bmi, plain_bmi,
+                             f'{prog} must reach one BMI through either spelling')
+            per_prog[prog] = alias_bmi
+        self.assertNotEqual(per_prog['prog'], per_prog['progfoo'],
+                            'divergent classes must not share a unit BMI')
+        self.assert_header_unit_alias_link(per_prog['prog'])
+        self.assertBuildIsNoop()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_stl_header_units(self):
+        # Windows counterpart of LinuxlikeTests.test_gcc_stl_header_units:
+        # <vector> resolves to a drive-letter absolute path here, and
+        # flat_cmi_path must mangle its colon (a literal one reads as an NTFS
+        # alternate-data-stream separator) the same way it mangles '.' and
+        # '..' -- nothing on Windows exercised that path before.
+        self.build_and_check_modules('171 stl header units',
+                                     setup_not_contains=['cannot name a header unit'])
+        self.check_gcc_module_mappers()
+        import glob
+        mappers = glob.glob(os.path.join(self.builddir, 'prog.*.p', 'main.cpp.*.mapper'))
+        self.assertEqual(len(mappers), 1, f'expected one main.cpp mapper, got {mappers}')
+        with open(mappers[0], encoding='utf-8') as f:
+            mapper = f.read().splitlines()
+        for line in mapper:
+            key, _, bmi = line.partition(' ')
+            if os.path.basename(key) == 'vector':
+                self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$')
+                want = f'gcm.cache/{key[0]}-{key[2:]}.gcm'
+                self.assertEqual(bmi.replace('\\', '/'), want.replace('\\', '/'))
+                break
+        else:
+            self.fail(f'no vector header-unit mapping in {mapper}')
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

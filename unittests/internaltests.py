@@ -713,13 +713,16 @@ class InternalTests(unittest.TestCase):
     def test_depaccumulate_flat_cmi_path(self):
         # GCC's default header-unit CMI naming under the flat cache: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path
-        # is appended as-is under the cache root.
+        # is appended as-is under the cache root. A Windows drive letter's
+        # colon is mangled the same way, to a hyphen -- confirmed against real
+        # GCC's own "compiled module file is ..." diagnostic on WinLibs 16.
         from mesonbuild.utils.core import flat_cmi_path
         cases = {
             './util.h': 'gcm.cache/,/util.h.gcm',
             './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',
             '../srcx/hdr.h': 'gcm.cache/,,/srcx/hdr.h.gcm',
             '/usr/include/c++/16/vector': 'gcm.cache/usr/include/c++/16/vector.gcm',
+            'C:/Users/x/vector': 'gcm.cache/C-/Users/x/vector.gcm',
         }
         for name, want in cases.items():
             self.assertEqual(flat_cmi_path(name, 'gcm.cache', '.gcm'), want, name)

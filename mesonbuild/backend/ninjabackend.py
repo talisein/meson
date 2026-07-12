@@ -2025,7 +2025,12 @@ class NinjaBackend(backends.Backend):
         if not self._has_space(d):
             return d
         root = self.build_to_src
-        if d == root or d.startswith(root + '/'):
+        # Separator-insensitive: build_to_src and d are OS-joined (backslash on
+        # Windows), so a literal '/' prefix check would never match a
+        # subdirectory there and each one would fall through to being aliased
+        # on its own -- exactly the two-names-for-one-BMI outcome above warns
+        # against.
+        if d == root or d.replace('\\', '/').startswith(root.replace('\\', '/') + '/'):
             alias = self._space_free_dir_alias(self.environment.get_source_dir())
             return None if alias is None else alias + d[len(root):]
         # Outside the source tree (an absolute include dir, or a generated
