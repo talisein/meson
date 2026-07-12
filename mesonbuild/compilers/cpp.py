@@ -493,13 +493,14 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return [f'-fprebuilt-module-path={self.get_module_cache_dir(class_subdir)}',
                 '-fmodules', '-fno-modules']
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative Clang strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable). A user-passed -fmodules is intentionally NOT stripped:
         # implicit Clang header modules genuinely change the compile.
-        return (frozenset({'g', 'O', 'W', 'w', 'Q', 'fmodule-file', 'fPIC',
+        return (frozenset(),
+                frozenset({'g', 'O', 'W', 'w', 'Q', 'fmodule-file', 'fPIC',
                            'fpic', 'fPIE', 'fpie', 'fsanitize', 'embed-dir'}),
                 frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
 
@@ -838,12 +839,13 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # .gch at all). GCC's position is that header units subsume PCH.
         return False
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative GCC strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable); -Mno-modules shapes only the depfile, never the BMI.
-        return (frozenset({'O', 'W', 'w', 'Q', 'fmodule-mapper', 'fmodules-ts',
+        return (frozenset(),
+                frozenset({'O', 'W', 'w', 'Q', 'fmodule-mapper', 'fmodules-ts',
                            'fmodules', 'fPIC', 'fpic', 'fPIE', 'fpie',
                            'fsanitize', 'embed-dir', 'Mno-modules'}),
                 frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}))
@@ -1295,21 +1297,27 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         cache = self.get_module_cache_dir(class_subdir)
         return ['/ifcSearchDir', cache, '/ifcOutput', f'{cache}/']
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative MSVC strip list. Defines are deliberately
         # absent (a -D difference must split the BMI class) and so is /O
         # (conservative: optimization divergence splits here). 'isystem' is
         # listed because Meson emits system includes as unix-form two-token
-        # ['-isystem', dir] until native conversion at write time. Inherited
-        # coarse spot: the 'E' prefix also strips /EHsc, so an exception-model
-        # divergence goes unnoticed -- acceptable for a warning-only key.
-        return (frozenset({'TP', 'errorReport', 'W', 'w', 'sourceDependencies',
-                           'scanDependencies', 'PD', 'nologo', 'MP',
-                           'internalPartition', 'interface', 'ifcOutput',
-                           'help', 'headerName', 'Fp', 'Fm', 'Fe', 'Fd', 'FC',
-                           'exportHeader', 'EP', 'E', 'doc', 'diagnostics',
-                           'cgthreads', 'C', 'analyze', '?', 'external',
-                           'fsanitize'}),
+        # ['-isystem', dir] until native conversion at write time. /EH* (which
+        # cpp_eh controls) is deliberately NOT stripped: it changes
+        # _CPPUNWIND, an ABI-relevant macro that can be baked into
+        # constexpr-evaluated BMI content, so a divergence there must split
+        # the class -- the key is not advisory here (supports_bmi_classes()
+        # is unconditionally True for this compiler). 'E' therefore lives in
+        # the exact set below, not prefix: as a prefix it used to also match
+        # /EHsc and /EHs-c-, silently merging BMIs built under different
+        # exception-handling models.
+        return (frozenset({'E', 'EP', 'TP', 'nologo', 'internalPartition',
+                           'interface', 'help', 'exportHeader', 'C', '?'}),
+                frozenset({'errorReport', 'W', 'w', 'sourceDependencies',
+                           'scanDependencies', 'PD', 'MP', 'ifcOutput',
+                           'headerName', 'Fp', 'Fm', 'Fe', 'Fd', 'FC',
+                           'doc', 'diagnostics', 'cgthreads', 'analyze',
+                           'external', 'fsanitize'}),
                 frozenset({'Fo', 'I', 'reference', 'headerUnit', 'isystem',
                            'ifcSearchDir'}))
 

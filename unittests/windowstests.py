@@ -724,6 +724,61 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                consumers=('prog_md.exe', 'prog_mt.exe'),
                                expected_targets=('modlib', 'prog_md', 'prog_mt'))
 
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_rtti_divergence_builds(self):
+        # cpp_rtti (/GR-) is not on cl's class-key strip list, so prog resolves
+        # modlib through a BMI-only variant instead of importing a
+        # /GR-mismatched provider BMI; the constexpr probe turns a wrongly
+        # shared BMI into a wrong exit code.
+        self.build_and_check_modules('177 msvc module rtti divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_define_divergence_builds(self):
+        # A -D divergence splits the class on cl too: prog resolves modlib
+        # through a BMI-only variant built without -DFOO instead of importing
+        # a FOO-mismatched provider BMI.
+        self.build_and_check_modules('178 msvc module define divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_header_unit_rtti_divergence_builds(self):
+        # Each declarer of the same header unit gets its own unit BMI when
+        # cpp_rtti diverges: prog_a and prog_b must not share one.
+        self.build_and_check_modules('179 msvc header unit rtti divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('util.h')), 2)
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_header_unit_define_divergence_builds(self):
+        # Same as above, driven by a -D divergence instead of cpp_rtti.
+        self.build_and_check_modules('180 msvc header unit define divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('util.h')), 2)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_eh_divergence_builds(self):
+        # cpp_eh (/EHs-c- vs /EHsc) must split the class: prog resolves
+        # modlib through a BMI-only variant instead of importing an
+        # /EH-mismatched provider BMI; the constexpr probe turns a wrongly
+        # shared BMI into a wrong exit code.
+        self.build_and_check_modules('181 msvc module eh divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'])
+        self.assertEqual(len(self.bmi_variant_ids()), 1)
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_header_unit_eh_divergence_builds(self):
+        # Each declarer of the same header unit gets its own unit BMI when
+        # cpp_eh diverges: prog_a and prog_b must not share one.
+        self.build_and_check_modules('182 msvc header unit eh divergence',
+                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     ninja_args_not_contains=())
+        self.assertEqual(len(self.header_unit_digests('util.h')), 2)
+
     def test_gcc_header_unit_space_free_alias(self):
         # The space-free alias that lets a GCC header unit under a spaced path
         # be named in a module mapper (a mapper key cannot contain whitespace):

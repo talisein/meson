@@ -229,6 +229,27 @@ class InternalTests(unittest.TestCase):
         # GNU-syntax command line even though 'W' would prefix-match it.
         self.assertIn('/Work/lib.a', gcc.get_bmi_class_key(base + ['/Work/lib.a']))
 
+        # cpp_eh (/EH*) must split the class: 'E' is exact-only, not a
+        # prefix, so it no longer swallows /EHsc, /EHs-c-, /EHa -- regression
+        # lock for the bug where bare 'E' as a prefix merged exception-model
+        # divergences into one class.
+        self.assertNotEqual(msvc.get_bmi_class_key(mbase + ['/EHsc']),
+                            msvc.get_bmi_class_key(mbase + ['/EHs-c-']))
+        self.assertNotEqual(msvc.get_bmi_class_key(mbase + ['/EHsc']),
+                            msvc.get_bmi_class_key(mbase + ['/EHa']))
+        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
+                            msvc.get_bmi_class_key(mbase + ['/EHsc']))
+        # Bare /E (preprocess-only) still strips as before -- the exact-set
+        # move must not regress the original stripping intent.
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/E']),
+                         msvc.get_bmi_class_key(mbase))
+        # Spot-check two more entries moved from prefix- to exact-matching:
+        # still stripped when bare.
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/nologo']),
+                         msvc.get_bmi_class_key(mbase))
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/TP']),
+                         msvc.get_bmi_class_key(mbase))
+
     def test_cpp_std_supports_modules(self):
         # C++ modules need C++20+. The helper must accept c++20 and later in all
         # spellings (c++/gnu++/vc++, draft aliases, latest) and reject older

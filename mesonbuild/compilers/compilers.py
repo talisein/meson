@@ -1589,18 +1589,32 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return True
 
-    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
-        """(prefix flags, argument-consuming flags) known not to affect a C++ module BMI.
+    def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
+        """(exact flags, prefix flags, argument-consuming flags) known not to
+        affect a C++ module BMI.
 
-        Spelled without the leading '-', '--' or '/'. A prefix flag drops any
-        argument starting with it; a consuming flag additionally drops the
-        following argument when it matches exactly. This is a best-effort list
-        (after xmake's strip lists): a missing entry only splits a BMI
-        equivalence class too eagerly, so the cost of getting it wrong is a
-        redundant BMI, never a shared incompatible one. Empty by default: with
-        no knowledge, every flag difference splits the class.
+        Spelled without the leading '-', '--' or '/'. An exact flag strips only
+        an argument that equals it exactly -- use this for a bare flag with no
+        legitimate suffix or attached-argument spelling (e.g. MSVC's 'nologo').
+        A prefix flag additionally drops any argument merely *starting* with
+        it -- reserve this for a flag with a genuine suffix family (e.g.
+        MSVC's 'W' for /W0../W4/Wall, GCC's 'O' for -O0../-O3/-Os/-Oz): a
+        prefix too short for the family it is meant to cover will silently
+        swallow an unrelated, BMI-affecting flag that happens to share it
+        (this bit Meson once -- MSVC's bare 'E', meant only for /E, also
+        matched /EHsc and /EHs-c-, merging BMIs built under different
+        exception-handling models). A consuming flag drops the following
+        argument when the flag itself matches exactly, and -- for its
+        attached-argument spelling (e.g. /Fooutput.obj) -- also participates
+        in prefix matching. This is a best-effort list (after xmake's strip
+        lists): a missing entry only splits a BMI equivalence class too
+        eagerly, so the cost of getting it wrong that way is a redundant BMI,
+        never a shared incompatible one -- an entry that is too broad (prefix
+        where it should be exact) is the unsafe direction, since it can merge
+        genuinely different compiles. Empty by default: with no knowledge,
+        every flag difference splits the class.
         """
-        return frozenset(), frozenset()
+        return frozenset(), frozenset(), frozenset()
 
     def split_bmi_args(self, args: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
         """Partition a compile command into (BMI-relevant, BMI-irrelevant)
@@ -1609,8 +1623,8 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         Unrecognized flags are relevant, so an unknown divergence splits the
         class rather than sharing a potentially incompatible BMI.
         """
-        prefixes, consuming = self.get_bmi_irrelevant_args()
-        strippable = prefixes | consuming
+        exact, prefixes, consuming = self.get_bmi_irrelevant_args()
+        strippable_prefixes = prefixes | consuming
         leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
         relevant: T.List[str] = []
         irrelevant: T.List[str] = []
@@ -1626,7 +1640,7 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
                 if consumed is not None:
                     irrelevant.append(consumed)
                 continue
-            if any(body.startswith(s) for s in strippable):
+            if body in exact or any(body.startswith(s) for s in strippable_prefixes):
                 irrelevant.append(arg)
             else:
                 relevant.append(arg)
