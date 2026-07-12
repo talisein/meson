@@ -139,8 +139,23 @@ def _source_key(path: str) -> str:
     build-relative, so both are resolved to an absolute path and case-folded
     (a no-op on case-sensitive filesystems). The collate runs with the build
     directory as cwd, which both relative forms are relative to.
+
+    Symlinks are resolved too, because the two spellings can reach one file by
+    different routes: a scanner is free to emit a canonicalized source-path,
+    while a path Meson derived host-side may traverse a symlinked prefix
+    (/usr/local -> /opt/homebrew, /usr/lib64 -> lib) -- as the standard
+    library's own module source, found via -print-file-name, routinely does.
+    Two spellings of one file must key alike or the interface check below
+    rejects a source that is declared.
+
+    Resolution belongs here and nowhere else: this key only ever answers "are
+    these the same file", and is never emitted. Every path that reaches a
+    mapper key, a dyndep, or a command line stays exactly as spelled -- the
+    module-mapper aliases are symlinked directories whose whole purpose is to
+    offer a space-free route to a spaced path, and resolving those spellings
+    would undo them.
     """
-    return os.path.normcase(os.path.abspath(path))
+    return os.path.normcase(os.path.realpath(path))
 
 
 def _write_if_different(path: str, content: str) -> None:
@@ -240,6 +255,11 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
     and contents appear atomically: collates run concurrently under ninja,
     and a loser that could read a created-but-not-yet-written owner would
     mistake the winner's live claim for a stale one and take it over.
+
+    A claim can equally vanish under a loser -- another collate found the same
+    claim stale and unlinked it -- so every step here loops rather than trusts
+    what the previous step saw: an owner file that is gone means the name is
+    unowned again, not that the build is broken.
     """
     owner_file = cache_bmi + '.owner'
     os.makedirs(os.path.dirname(owner_file), exist_ok=True)
@@ -264,8 +284,14 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
                     with os.fdopen(fd, 'w', encoding='utf-8') as f:
                         f.write(provmap)
                     return
-            with open(owner_file, encoding='utf-8') as f:
-                owner = f.read()
+            try:
+                with open(owner_file, encoding='utf-8') as f:
+                    owner = f.read()
+            except FileNotFoundError:
+                # The claim we just lost the race to is already gone: another
+                # collate judged it stale and unlinked it. The name is up for
+                # grabs again -- retry the atomic claim.
+                continue
             if owner == provmap:
                 return
             live = False

@@ -586,6 +586,98 @@ class InternalTests(unittest.TestCase):
             with self.assertRaises(MesonException):
                 collate(d, bmidir, 'liba')
 
+    def test_depaccumulate_claim_owner_vanishes_under_a_loser(self):
+        # Collates run concurrently under ninja, and a stale claim is taken
+        # over by unlinking its owner file: a claimant that loses the atomic
+        # link can therefore find the very claim it lost to already gone by
+        # the time it reads it. That means the name is unowned again, not that
+        # the build is broken -- the claim must be retried, not raised on.
+        # Driven at the seam, the window itself being unreproducible: the
+        # first os.link fails the way a lost race fails, having first removed
+        # the owner file the way a concurrent takeover would.
+        from mesonbuild.scripts.depaccumulate import _claim_module_provider
+
+        real_link = os.link
+
+        with tempfile.TemporaryDirectory() as d:
+            cache_bmi = os.path.join(d, 'gcm.cache', 'mod.gcm')
+            owner_file = cache_bmi + '.owner'
+            ours = os.path.join(d, 'libb-pm.json')
+            theirs = os.path.join(d, 'liba-pm.json')
+            os.mkdir(os.path.dirname(cache_bmi))
+            with open(theirs, 'w', encoding='utf-8') as f:
+                json.dump({'mod': 'gcm.cache/mod.gcm'}, f)
+            with open(owner_file, 'w', encoding='utf-8') as f:
+                f.write(theirs)
+
+            calls: T.List[None] = []
+
+            def link(src: str, dst: str) -> None:
+                calls.append(None)
+                if len(calls) == 1:
+                    # The claim we lose to is taken over and unlinked by a
+                    # third collate in the same instant.
+                    os.unlink(owner_file)
+                    raise FileExistsError(f'File exists: {dst!r}')
+                real_link(src, dst)
+
+            with mock.patch('os.link', link):
+                _claim_module_provider('mod', cache_bmi, ours)
+            # Retried rather than trusting the failed link's verdict, and the
+            # claim is now ours.
+            self.assertGreater(len(calls), 1)
+            with open(owner_file, encoding='utf-8') as f:
+                self.assertEqual(f.read(), ours)
+            # No temp file left behind.
+            self.assertEqual(os.listdir(os.path.dirname(cache_bmi)),
+                             [os.path.basename(owner_file)])
+
+    def test_depaccumulate_p1689_interface_source_through_symlink(self):
+        # A source declared as a module interface and the same source named in
+        # a P1689 scan may be spelled by different routes to one file: a
+        # scanner may canonicalize its source-path while the path Meson
+        # derived host-side traverses a symlinked prefix (/usr/local ->
+        # /opt/homebrew), which is exactly what the standard library's own
+        # module source, found via -print-file-name, does. Either spelling
+        # must satisfy the Clang interface check; a source that genuinely was
+        # not declared must still be rejected.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import MesonException
+
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.join(d, 'real')
+            link = os.path.join(d, 'link')
+            os.mkdir(real)
+            try:
+                os.symlink(real, link, target_is_directory=True)
+            except (OSError, NotImplementedError) as e:
+                raise unittest.SkipTest(f'symlinks unavailable: {e}')
+            for name in ('std.cc', 'other.cc'):
+                with open(os.path.join(real, name), 'w', encoding='utf-8'):
+                    pass
+
+            def collate(src: str, declared: str) -> int:
+                ddi = os.path.join(d, 'std.cc.o.ddi')
+                with open(ddi, 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'std.cc.o',
+                                          'provides': [{'logical-name': 'std',
+                                                        'source-path': src}]}]}, f)
+                return run_p1689(['--dyndep', os.path.join(d, 'out.dd'),
+                                  '--provmap', os.path.join(d, 'pm.json'),
+                                  '--bmi-dir', os.path.join(d, 'pcm.cache'),
+                                  '--bmi-suffix', '.pcm',
+                                  '--stamp-suffix', '.pcm.stamp',
+                                  '--interface-source', declared, ddi])
+
+            through_link = os.path.join(link, 'std.cc')
+            through_real = os.path.join(real, 'std.cc')
+            self.assertEqual(collate(through_link, through_real), 0)
+            self.assertEqual(collate(through_real, through_link), 0)
+            # Same file, two routes -- not "any file matches any declaration".
+            with self.assertRaises(MesonException) as cm:
+                collate(os.path.join(link, 'other.cc'), through_real)
+            self.assertIn('not marked a module interface', str(cm.exception))
+
     def test_depaccumulate_p1689_private_bmi_dir(self):
         # --bmi-dir always names the shared class-cache directory, for both
         # this target's own public provides and anything reached through a
