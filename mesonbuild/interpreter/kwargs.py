@@ -420,6 +420,7 @@ class BuildTarget(BaseBuildTarget):
     cpp_header_units: T.List[T.Union[str, File]]
     cpp_module_interfaces: T.List[T.Union[str, File]]
     cpp_internal_partitions: T.List[T.Union[str, File]]
+    cpp_private_module_interfaces: T.List[T.Union[str, File]]
     c_args: T.List[str]
     cpp_args: T.List[str]
     cuda_args: T.List[str]

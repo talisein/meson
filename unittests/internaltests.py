@@ -586,18 +586,20 @@ class InternalTests(unittest.TestCase):
             with self.assertRaises(MesonException):
                 collate(d, bmidir, 'liba')
 
-    def test_depaccumulate_p1689_dep_bmi_dir(self):
-        # A module-providing executable's --bmi-dir is private (its own
-        # module never resolves in the shared cache), but it may still link a
-        # dependency and import that dependency's public module -- which must
-        # resolve at --dep-bmi-dir, the shared class cache, not the private
-        # --bmi-dir. Without --dep-bmi-dir the old single-directory behaviour
-        # is preserved exactly (every existing caller never passes it).
+    def test_depaccumulate_p1689_private_bmi_dir(self):
+        # --bmi-dir always names the shared class-cache directory, for both
+        # this target's own public provides and anything reached through a
+        # linked dependency. A module-providing executable's own module is
+        # private (--all-provides-private): it resolves at --private-bmi-dir
+        # instead, but a linked dependency's public module still resolves at
+        # --bmi-dir. Without --all-provides-private/--private-bmi-dir every
+        # name resolves at --bmi-dir, the old single-directory behaviour
+        # (every pre-Stage-8 caller never passes them).
         from mesonbuild.scripts.depaccumulate import run_p1689
 
         def collate(extra: T.List[str]) -> int:
             return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
-                              '--bmi-dir', 'private', '--bmi-suffix', '.gcm',
+                              '--bmi-dir', 'shared', '--bmi-suffix', '.gcm',
                               '--mapper-suffix', '.mapper',
                               '--dep-provmap', 'dep-pm.json', *extra,
                               'test1.cppm.o.ddi', 'main1.cpp.o.ddi'])
@@ -616,17 +618,18 @@ class InternalTests(unittest.TestCase):
                 with open('dep-pm.json', 'w', encoding='utf-8') as f:
                     json.dump({'libmod': 'shared/libmod.gcm'}, f)
 
-                # Without --dep-bmi-dir: both names resolve at --bmi-dir, as before.
+                # Without --all-provides-private/--private-bmi-dir: both
+                # names resolve at --bmi-dir, as before.
                 self.assertEqual(collate([]), 0)
                 with open('main1.cpp.o.mapper', encoding='utf-8') as f:
                     self.assertEqual(f.read(),
-                                     'tests private/tests.gcm\n'
-                                     'libmod private/libmod.gcm\n')
+                                     'tests shared/tests.gcm\n'
+                                     'libmod shared/libmod.gcm\n')
 
-                # With --dep-bmi-dir: the own-provided name still resolves at
-                # --bmi-dir, but the dependency-provided name resolves at
-                # --dep-bmi-dir instead.
-                self.assertEqual(collate(['--dep-bmi-dir', 'shared']), 0)
+                # With --all-provides-private and --private-bmi-dir: the
+                # own-provided name resolves at --private-bmi-dir, but the
+                # dependency-provided name still resolves at --bmi-dir.
+                self.assertEqual(collate(['--all-provides-private', '--private-bmi-dir', 'private']), 0)
                 with open('main1.cpp.o.mapper', encoding='utf-8') as f:
                     self.assertEqual(f.read(),
                                      'tests private/tests.gcm\n'

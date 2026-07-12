@@ -1572,18 +1572,25 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         return f'{self.get_module_cache_dir(class_subdir)}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None) -> T.List[str]:
+                                private_dir: T.Optional[str] = None,
+                                private_output: bool = False) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.
 
         ``class_subdir`` selects a per-BMI-equivalence-class subdirectory of
         the module cache; None means the single shared cache dir (the only
         case for compilers without supports_bmi_classes()). ``private_dir``,
-        set only for a module-providing executable (nothing can ever link an
-        executable, so its modules are private to it), is a directory outside
-        the shared cache: the target's own BMIs are found and written there
-        instead, while the shared class cache stays additionally searchable
-        for its dependencies' public modules. Returns [] for compilers/targets
-        that do not use the module pipeline.
+        set whenever the target has any module of its own that is private
+        (a module-providing executable, where nothing can ever link it so
+        every module is private; or a library with a
+        cpp_private_module_interfaces declaration), is a directory outside
+        the shared cache: it is always additionally searchable, alongside the
+        shared class cache, so the target's own private imports and its
+        dependencies' public imports both resolve. ``private_output``, only
+        meaningful when ``private_dir`` is set, says whether *this specific
+        compile*, if it produces a BMI, writes it to ``private_dir`` rather
+        than the shared cache -- the mixed public/private case a library can
+        have that a wholly-private executable cannot. Returns [] for
+        compilers/targets that do not use the module pipeline.
         """
         return []
 

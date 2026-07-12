@@ -3813,7 +3813,8 @@ class Interpreter(InterpreterBase, HoldableObject):
         """
         # copy common arguments directly
         for arg in ('build_by_default', 'build_rpath', 'build_subdir', 'c_pch',
-                    'cpp_modules', 'cpp_header_units', 'cpp_module_interfaces', 'cpp_internal_partitions', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
+                    'cpp_modules', 'cpp_header_units', 'cpp_module_interfaces', 'cpp_internal_partitions',
+                    'cpp_private_module_interfaces', 'cpp_pch', 'd_debug', 'd_module_versions', 'd_unittest',
                     'dependencies', 'gnu_symbol_visibility', 'install',
                     'install_mode', 'install_rpath',
                     'implicit_include_directories', 'link_args', 'link_early_args',
@@ -4195,6 +4196,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         self._check_cpp_header_units_supported(name, target)
         self._check_cpp_module_interfaces(name, target)
         self._check_cpp_internal_partitions(name, target)
+        self._check_cpp_private_module_interfaces(name, target)
 
         self.add_target(name, target)
         self.project_args_frozen = True
@@ -4247,6 +4249,47 @@ class Interpreter(InterpreterBase, HoldableObject):
                 raise InvalidArguments(
                     f'Target {name!r} lists {entry!s} in cpp_internal_partitions, but '
                     "it is not one of the target's sources.")
+
+    def _check_cpp_private_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
+        # Every cpp_private_module_interfaces entry must name one of the
+        # target's own sources, like cpp_module_interfaces. A source may not
+        # be listed in both: being private already implies being an
+        # interface, so the combination is pure, ambiguous redundancy rather
+        # than a meaningful declaration. Listing a source in both
+        # cpp_internal_partitions and cpp_private_module_interfaces is fine
+        # (and is how a partition itself is marked private -- privacy is not
+        # inherited from a primary module).
+        if not target.cpp_private_module_interfaces:
+            return
+        sources = set(target.sources)
+        public_interfaces = {
+            entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
+            for entry in target.cpp_module_interfaces}
+        for entry in target.cpp_private_module_interfaces:
+            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
+            if f not in sources:
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in cpp_private_module_interfaces, but '
+                    "it is not one of the target's sources.")
+            if f in public_interfaces:
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in both cpp_module_interfaces and '
+                    'cpp_private_module_interfaces; list it in cpp_private_module_interfaces '
+                    'only (being private already implies being an interface).')
+        # cpp_private_module_interfaces is only acted on by the P1689
+        # pipeline, like cpp_header_units: on any other compiler the
+        # declaration would be silently dropped, and unlike the other module
+        # kwargs, a silently-dropped privacy declaration is a correctness
+        # footgun, not a portability inconvenience -- the module would be
+        # published and globally claimed exactly as if it were public.
+        cpp = target.compilers.get('cpp')
+        if cpp is None or cpp.get_id() not in {'gcc', 'msvc', 'clang'} \
+                or not cpp.supports_cpp_modules_p1689():
+            got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
+            raise InvalidArguments(
+                f'Target {name!r} declares cpp_private_module_interfaces, which requires a '
+                f'C++ compiler with module support in the P1689 pipeline (GCC >= 14, MSVC, '
+                f'or Clang with a P1689-capable clang-scan-deps); got {got}.')
 
     def add_stdlib_info(self, target: build.BuildTarget) -> None:
         for l in target.compilers.keys():

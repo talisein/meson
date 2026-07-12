@@ -88,6 +88,7 @@ if T.TYPE_CHECKING:
         cpp_header_units: T.List[T.Union[str, File]]
         cpp_module_interfaces: T.List[T.Union[str, File]]
         cpp_internal_partitions: T.List[T.Union[str, File]]
+        cpp_private_module_interfaces: T.List[T.Union[str, File]]
         d_debug: T.List[T.Union[str, int]]
         d_import_dirs: T.List[IncludeDirs]
         d_module_versions: T.List[T.Union[str, int]]
@@ -925,6 +926,7 @@ class BuildTarget(Target):
         self.cpp_header_units = kwargs.get('cpp_header_units', [])
         self.cpp_module_interfaces = kwargs.get('cpp_module_interfaces', [])
         self.cpp_internal_partitions = kwargs.get('cpp_internal_partitions', [])
+        self.cpp_private_module_interfaces = kwargs.get('cpp_private_module_interfaces', [])
         self.gnu_symbol_visibility = kwargs.get('gnu_symbol_visibility', '')
         self.rust_dependency_map = kwargs.get('rust_dependency_map', {})
 
@@ -1763,9 +1765,10 @@ class BuildTarget(Target):
         # Whether the target carries a module-interface source, marking it a
         # module provider. Decided without reading contents: by the cppm/ixx
         # extension (also on generated outputs) or an explicit cpp_module_interfaces
-        # / cpp_internal_partitions declaration. The module *names* come later,
-        # from the build-time scan.
-        if self.cpp_module_interfaces or self.cpp_internal_partitions:
+        # / cpp_internal_partitions / cpp_private_module_interfaces declaration.
+        # The module *names* come later, from the build-time scan.
+        if (self.cpp_module_interfaces or self.cpp_internal_partitions
+                or self.cpp_private_module_interfaces):
             return True
         for s in self.get_sources():
             suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()
@@ -1789,6 +1792,18 @@ class BuildTarget(Target):
         which are fixed once the target is constructed.
         """
         return 'cpp' in self.compilers and (self.cpp_modules or self._has_cpp_module_source())
+
+    @lru_cache(maxsize=None)
+    def provides_private_cpp_modules(self) -> bool:
+        """Whether this target has a C++ module of its own that must never be
+        published to a dependent: either declared via
+        cpp_private_module_interfaces, or -- for a module-providing
+        executable, which nothing can ever link -- every module it provides.
+        """
+        if self.cpp_private_module_interfaces:
+            return True
+        return (isinstance(self, Executable) and self.provides_cpp_modules()
+                and not self.is_linkwithable)
 
     @lru_cache(maxsize=None)
     def uses_cpp_modules(self) -> bool:

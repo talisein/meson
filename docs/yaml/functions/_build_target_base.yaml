@@ -263,6 +263,53 @@ kwargs:
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
+  cpp_private_module_interfaces:
+    type: array[str | file]
+    since: 1.12.0
+    default: []
+    description: |
+      Names which of this target's C++ sources are module interfaces that are
+      *private*: importable only by this target's own sources, never
+      published to anything that links this target, and not subject to the
+      *build-tree-wide* rule that a module name have only one providing
+      target -- two unrelated targets may each declare their own private
+      module of the same name. This does not relax the rule *within one
+      link*: a module's exported entities are mangled from its bare module
+      name alone, so two same-named modules -- private or not -- reaching
+      the same link is still a hard error, exactly as for two public ones.
+      Each entry is one of the target's own sources (a string or a [[files]]
+      object); a path that names no source is an error, not a silent no-op.
+
+      This takes sources, not module names, for two reasons. A module's name
+      is only known after Meson scans the source at build time, but the
+      directory a private interface's BMI is written to is decided at setup
+      time, before any scan runs -- so privacy has to be decidable from the
+      source alone. And on MSVC, `/ifcOutput` (the directory cl writes a
+      translation unit's BMI to) is fixed once per compile; a target mixing
+      public and private interfaces needs to know, per source and at setup
+      time, which directory each one's BMI belongs in.
+
+      A source may not be listed in both `cpp_module_interfaces` and
+      `cpp_private_module_interfaces`: being private already implies being an
+      interface, so the combination is ambiguous rather than meaningful, and
+      is rejected. Listing a source in both `cpp_internal_partitions` and
+      `cpp_private_module_interfaces` is fine, and is in fact how a partition
+      itself is marked private -- **a partition does not automatically
+      inherit privacy from its primary module**, and must be listed here on
+      its own if it too should be private.
+
+      Declaring this on an `executable()` is accepted, not an error, even
+      though every module an executable provides is already private (nothing
+      can ever link an executable to import from it): the declaration is
+      simply redundant there, so a target does not need its module keywords
+      edited when switched between `executable()` and a library.
+
+      Currently supported with GCC (>= 14), MSVC, and Clang (needs a
+      P1689-capable `clang-scan-deps`) on the Ninja backend only; declaring it
+      with any other compiler is an error rather than being silently ignored,
+      since a silently-dropped privacy declaration would leave the module
+      published under the ordinary global-uniqueness rule with no warning.
+
   include_directories:
     type: array[inc | str]
     description: |

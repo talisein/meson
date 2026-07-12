@@ -584,6 +584,11 @@ class ModuleInterfaceSource:
     # An internal (implementation) partition: cl flags it /internalPartition
     # rather than /interface, in the variant recompile as on the compile edge.
     is_internal_partition: bool = False
+    # A private interface (cpp_private_module_interfaces, or every interface
+    # of a module-providing executable): excluded from BMI-only variant
+    # recompilation, since no consumer outside the target could ever import
+    # it and compiling it there would be wasted work at best.
+    is_private: bool = False
 
 
 @dataclass
@@ -1445,6 +1450,13 @@ class NinjaBackend(backends.Backend):
     def get_provided_modules_file_for(self, target: build.BuildTarget) -> str:
         return os.path.join(self.get_target_private_dir(target), 'provided-modules.json')
 
+    def get_private_modules_file_for(self, target: build.BuildTarget) -> str:
+        # A bare JSON list of the private module names target provides --
+        # names only, never paths, so a consumer can recognize a private
+        # module (for the diagnostic in depaccumulate.run_p1689) but never
+        # resolve one.
+        return os.path.join(self.get_target_private_dir(target), 'private-modules.json')
+
     @staticmethod
     def get_ddi_file_for(objfile: str) -> str:
         # One P1689 scan result per object, kept next to it in the private dir.
@@ -1588,15 +1600,24 @@ class NinjaBackend(backends.Backend):
                 mappers.append(source2object[src] + '.mapper')
 
         dep_provmaps: T.List[str] = []
+        dep_private_maps: T.List[T.Tuple[str, str]] = []
         for t in target.get_all_linked_targets():
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
                 dep_provmaps.append(self._module_provmap_for(target, t))
+                # Unlike the provmap, never routed through a BMI-class
+                # variant: a private module is never recompiled into a
+                # variant (_get_or_create_bmi_variant excludes it), and a
+                # name-only list has no per-class content, so a consumer
+                # always reads the provider's own private-modules.json.
+                dep_private_maps.append((self.get_private_modules_file_for(t), t.name))
         dep_provmaps.sort()
+        dep_private_maps.sort()
 
         dyndep_file = self.get_dep_scan_file_for(target)[1]
         provmap_file = self.get_provided_modules_file_for(target)
-        elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file],
+        private_map_file = self.get_private_modules_file_for(target)
+        elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file, private_map_file],
                                  'cpp_module_collate', sorted(ddis))
         if cpp.get_id() == 'gcc':
             # The per-TU module mappers the compile edges rebuild on. They
@@ -1606,54 +1627,83 @@ class NinjaBackend(backends.Backend):
             elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
+        if dep_private_maps:
+            elem.add_dep([p for p, _ in dep_private_maps])
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
-        # BMIs are named from logical-names, in lockstep with module_name_to_filename.
-        elem.add_item('BMIDIR', self._module_bmi_dir_for(target))
+        # A target's own public provides are always named in the shared class
+        # cache: a private provide is redirected to --private-bmi-dir in
+        # DEPARGS below instead (_module_collate_depargs), never here.
+        elem.add_item('BMIDIR', self._module_shared_bmi_dir_for(target))
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
-        elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps))
+        elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps, dep_private_maps))
         elem.add_item('name', target.name)
         self.add_build(elem)
 
     def _module_collate_depargs(self, target: build.BuildTarget, cpp: Compiler,
-                                dep_provmaps: T.List[str]) -> T.List[str]:
+                                dep_provmaps: T.List[str],
+                                dep_private_maps: T.List[T.Tuple[str, str]]) -> T.List[str]:
         """Per-compiler flags for the P1689 collator (depaccumulate --p1689).
 
         Clang BMIs reach the shared cache via harvest edges, so the dyndep orders
         consumers against the harvest stamps (--stamp-suffix, in lockstep with
         get_bmi_stamp_for), and the collator rejects a provide from a source
         Clang did not compile as an interface unit -- extension-less interfaces
-        declared via cpp_module_interfaces are passed as source paths so the
-        collator accepts them. For cl the declared header units are passed so
-        the collator can flag an import of one this target never declared (cl
-        reports header-unit requires from a cold scan; GCC cannot, so it is
-        omitted there). A GCC target's collate also writes the per-TU module
-        mappers (--mapper-suffix, in lockstep with the compile edges'
-        get_module_mapper_args paths) its BMI lookups go through. A mapper
-        disables GCC's default module->CMI naming outright, so it must also name
-        every header unit the TU imports: the ones built for this target's own
-        BMI class outright (--header-unit-bmi), and the rest -- those left at the
-        default-named path their first-declaring class builds them at -- by
-        reproducing that naming (--flat-bmi-dir).
+        declared via cpp_module_interfaces (or cpp_private_module_interfaces)
+        are passed as source paths so the collator accepts them. For cl the
+        declared header units are passed so the collator can flag an import of
+        one this target never declared (cl reports header-unit requires from a
+        cold scan; GCC cannot, so it is omitted there). A GCC target's collate
+        also writes the per-TU module mappers (--mapper-suffix, in lockstep
+        with the compile edges' get_module_mapper_args paths) its BMI lookups
+        go through. A mapper disables GCC's default module->CMI naming
+        outright, so it must also name every header unit the TU imports: the
+        ones built for this target's own BMI class outright (--header-unit-bmi),
+        and the rest -- those left at the default-named path their
+        first-declaring class builds them at -- by reproducing that naming
+        (--flat-bmi-dir).
+
+        --private-map (this target's own private module names) is always
+        passed; --private-bmi-dir/--private-interface/--all-provides-private
+        only when this target actually has a private module of its own; and
+        --dep-private-map once per linked, module-providing dependency, always
+        naming that dependency's own private-modules.json directly (never a
+        BMI-class variant's -- a private module never appears in any variant).
+        --private-interface names a provide by its *object* path (a P1689
+        rule's primary-output), not its source: only Clang's P1689 output
+        carries a source-path for a provide at all, so the collator cannot
+        use it as a compiler-agnostic privacy key the way --interface-source
+        (a genuinely Clang-only concern) does.
         """
-        depargs: T.List[str] = []
+        depargs: T.List[str] = ['--private-map', self.get_private_modules_file_for(target)]
+        private_dir = self._module_private_bmi_dir_for(target)
+        if private_dir is not None:
+            depargs += ['--private-bmi-dir', private_dir]
+            if isinstance(target, build.Executable) and target.provides_private_cpp_modules():
+                # Every module this target provides is private by
+                # construction (Stage 7): no per-source list is needed, or
+                # even meaningful, since cpp_private_module_interfaces may be
+                # empty here.
+                depargs += ['--all-provides-private']
+            else:
+                for p in sorted(self._private_module_interface_objs(target)):
+                    depargs += ['--private-interface', p]
+        for path, tname in dep_private_maps:
+            depargs += ['--dep-private-map', path, tname]
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
-            # Declared interfaces and internal partitions are both compiled as
-            # interface units (Clang emits a BMI only for those), so pass both
-            # as source paths the collator's interface check accepts.
+            # Declared interfaces, internal partitions and private interfaces
+            # are all compiled as interface units (Clang emits a BMI only for
+            # those), so pass all three as source paths the collator's
+            # interface check accepts.
             for p in sorted(self._module_interface_paths(target)
-                            | self._internal_partition_paths(target)):
+                            | self._internal_partition_paths(target)
+                            | self._private_module_interface_paths(target)):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper']
-            if self._module_private_bmi_dir_for(target) is not None:
-                # This target's own provides are named in its private dir, but a
-                # dependency's public module (from a linked target) still lives in
-                # the shared class cache: the mapper needs both directories.
-                depargs += ['--dep-bmi-dir', self._module_shared_bmi_dir_for(target)]
             depargs += ['--flat-bmi-dir', cpp.get_module_cache_dir()]
             self.provision_header_units(target, cpp)
             depargs += self._header_unit_bmi_args(
@@ -1704,10 +1754,11 @@ class NinjaBackend(backends.Backend):
         target: its edges hang off consuming collates and dyndeps only, so a
         variant nobody links is never built.
 
-        Every recorded interface is compiled: Meson has no module visibility,
-        so by convention all interfaces are importable. If visibility is ever
-        added, private interfaces must be excluded here -- no consumer could
-        import them, and compiling them would be wasted work at best.
+        Only public interfaces are recompiled here (ModuleInterfaceSource.is_private
+        is filtered out below): a private interface -- cpp_private_module_interfaces,
+        or every interface of a module-providing executable -- has no consumer
+        outside its own target, so a variant of it would be pure waste, and it is
+        never published for a cross-target consumer to reach in the first place.
         """
         memo_key = (provider.get_id(), class_key)
         existing = self._bmi_variants.get(memo_key)
@@ -1754,7 +1805,7 @@ class NinjaBackend(backends.Backend):
 
         self.generate_bmi_variant_compile_rule(cpp)
         rulename = self.get_compiler_rule_name('cpp', cpp.for_machine, 'BMI_VARIANT')
-        recs = self._target_module_interfaces[provider.get_id()]
+        recs = [r for r in self._target_module_interfaces[provider.get_id()] if not r.is_private]
         ddis: T.List[str] = []
         for rec in recs:
             # cl and clang need each unit flagged explicitly, mirroring the
@@ -2280,22 +2331,61 @@ class NinjaBackend(backends.Backend):
         return cpp.get_module_cache_dir(self._bmi_class_subdir_for(target))
 
     def _module_private_bmi_dir_for(self, target: build.BuildTarget) -> T.Optional[str]:
-        """An executable is a link sink -- nothing can import its modules -- so
-        one that provides its own gets a directory to itself, outside the shared
-        cache and unkeyed by BMI class (a private module has exactly one
-        consumer, the target itself, so exactly one class). Excludes an
-        executable built with export_dynamic: true, which -- uniquely among
-        executables -- other targets actually can link against
-        (is_linkable_target()), breaking the link-sink premise this rests on.
+        """A directory outside the shared cache for the modules of
+        target.provides_private_cpp_modules(): either an executable, a link
+        sink whose modules nothing could ever import anyway, or a library
+        with an explicit cpp_private_module_interfaces declaration.
+        Unkeyed by BMI class: a private module's only possible consumers are
+        this target's own translation units, which all share one class.
         """
-        if (isinstance(target, build.Executable) and target.provides_cpp_modules()
-                and not target.is_linkwithable):
+        if target.provides_private_cpp_modules():
             return os.path.join('meson-private', f'{target.get_id()}@bmi-private')
         return None
 
-    def _module_bmi_dir_for(self, target: build.BuildTarget) -> str:
-        """The directory this target's own module BMIs are found and written to."""
-        return self._module_private_bmi_dir_for(target) or self._module_shared_bmi_dir_for(target)
+    def _private_module_interface_paths(self, target: build.BuildTarget) -> T.Set[str]:
+        # Normalized build-root-relative paths of the sources this target
+        # declares as private module interfaces (cpp_private_module_interfaces),
+        # the same comparable key as _module_interface_paths.
+        paths: T.Set[str] = set()
+        for entry in target.cpp_private_module_interfaces:
+            f = entry if isinstance(entry, File) else \
+                File.from_source_file(self.source_dir, target.get_subdir(), entry)
+            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
+        return paths
+
+    def _private_module_interface_objs(self, target: build.BuildTarget) -> T.Set[str]:
+        """Build-root-relative object paths of this target's own private
+        interface compiles, matching a P1689 rule's primary-output.
+
+        The collator cannot key privacy by source-path: only Clang's P1689
+        output carries one for a provide, GCC's carries none at all (only
+        logical-name and is-interface), so a source-path is not a
+        compiler-agnostic key. primary-output, unlike source-path, is part of
+        the P1689 schema every compiler's output includes.
+        """
+        target_dir = self.get_target_private_dir(target)
+        return {os.path.join(target_dir, rec.obj_basename)
+                for rec in self._target_module_interfaces.get(target.get_id(), [])
+                if rec.is_private}
+
+    def _is_declared_private_interface(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
+        # Whether src is one of target's declared cpp_private_module_interfaces sources.
+        if not target.cpp_private_module_interfaces:
+            return False
+        key = src.rel_to_builddir(self.build_to_src) if isinstance(src, File) else src
+        return os.path.normpath(key) in self._private_module_interface_paths(target)
+
+    def _is_private_module_source(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
+        """Whether src's module (if any) is private: every source of a
+        module-providing executable (Stage 7 -- the whole target is a link
+        sink, so every module it provides is already private by
+        construction), or a source this target explicitly names in
+        cpp_private_module_interfaces.
+        """
+        if (isinstance(target, build.Executable) and target.provides_cpp_modules()
+                and not target.is_linkwithable):
+            return True
+        return self._is_declared_private_interface(target, src)
 
     def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
                                       class_key: T.Tuple[str, ...]) -> T.Optional[str]:
@@ -4787,9 +4877,15 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         src_suffix = src.suffix if isinstance(src, File) else os.path.splitext(src)[1][1:].lower()
         is_internal_partition = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
             and self._is_declared_internal_partition(target, src)
+        # A source named only in cpp_private_module_interfaces (no
+        # cppm/ixx extension) is still an interface unit that must be
+        # compiled/scanned as one; being private only changes where its BMI
+        # ends up, not whether it is an interface at all.
+        is_private_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
+            and self._is_declared_private_interface(target, src)
         is_module_interface = self.target_uses_p1689_cpp_modules_edge(target, compiler) \
             and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src)
-                 or is_internal_partition)
+                 or is_internal_partition or is_private_interface)
 
         # Include PCH header as first thing as it must be the first one or it will be
         # ignored by gcc https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100462
@@ -4825,8 +4921,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # BMI path never appear on the command line -- ordering is carried by
         # the dyndep and BMIs are found by directory lookup in the shared cache.
         if self.target_uses_p1689_cpp_modules_edge(target, compiler):
+            private_dir = self._module_private_bmi_dir_for(target)
+            private_output = private_dir is not None and self._is_private_module_source(target, src)
             modargs = compiler.get_module_compile_args(
-                self._bmi_class_subdir_for(target), self._module_private_bmi_dir_for(target))
+                self._bmi_class_subdir_for(target), private_dir, private_output)
             if compiler.get_id() == 'clang' and '-fmodules' in commands:
                 # The user turned on implicit Clang modules themselves (via
                 # cpp_args, add_project_arguments, ...; all those channels are
@@ -5071,10 +5169,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if is_miu:
             self._target_module_interfaces[target.get_id()].append(ModuleInterfaceSource(
                 rel_src, os.path.basename(rel_obj), tuple(header_deps), tuple(order_deps),
-                is_internal_partition=is_internal_partition))
+                is_internal_partition=is_internal_partition,
+                is_private=self._is_private_module_source(target, src)))
         if clang_miu:
-            self.generate_cpp_module_harvest(target, compiler, rel_obj,
-                                             self._module_bmi_dir_for(target))
+            private_dir = self._module_private_bmi_dir_for(target)
+            harvest_dir = private_dir if (private_dir is not None
+                                          and self._is_private_module_source(target, src)) \
+                else self._module_shared_bmi_dir_for(target)
+            self.generate_cpp_module_harvest(target, compiler, rel_obj, harvest_dir)
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)
         return (rel_obj, rel_src.replace('\\', '/'))

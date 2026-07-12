@@ -472,17 +472,23 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return True
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None) -> T.List[str]:
+                                private_dir: T.Optional[str] = None,
+                                private_output: bool = False) -> T.List[str]:
         # Imports resolve by name lookup in the shared cache (the target's
         # class subdir of it, when BMI classes are in play). Producers write
         # their BMI next to the object (-fmodule-output, added per interface
         # unit by the backend) and a harvest edge publishes it into the cache;
         # no module name or BMI path ever appears on a command line.
         #
-        # private_dir, set only for a module-providing executable, is searched
-        # first: its own modules live there, never in the shared cache. The
-        # shared class cache is still listed, since it may link dependencies
-        # whose public modules it imports.
+        # private_dir, set whenever the target has any private module of its
+        # own, is searched first: a private import resolves there, never in
+        # the shared cache. The shared class cache is still listed, since the
+        # target may also import its dependencies' public modules, or (for a
+        # library) have public modules of its own. private_output is unused
+        # here: unlike MSVC's directory-addressed /ifcOutput, Clang's own BMI
+        # never has a compile-time output directory to steer -- the harvest
+        # edge decides per-source, private or shared, where a Clang interface's
+        # BMI is published (see the backend's Clang harvest call site).
         #
         # -fmodules -fno-modules exists to defeat ccache. ccache does not
         # track the contents of BMIs (they never appear in preprocessed
@@ -821,21 +827,23 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         return '-fmodules' if version_compare(self.version, '>=15') else '-fmodules-ts'
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None) -> T.List[str]:
+                                private_dir: T.Optional[str] = None,
+                                private_output: bool = False) -> T.List[str]:
         # The modules flag enables named modules. -Mno-modules stops GCC from
         # writing its make-style module dependency rules (phony
         # '<name>.c++-module' targets and an order-only
         # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected.
-        # class_subdir/private_dir are unused: GCC carries no cache dir on the
-        # command line. Every BMI a compile resolves, in any class or a
-        # target-private directory, is named by the per-TU module mapper
-        # instead (get_module_mapper_args, plus --dep-bmi-dir at the
-        # collator for a private target's dependencies), which the backend
-        # adds to compile edges only -- a scan resolves no named modules, and
-        # header units stay in the flat default cache the mapper-less scan
-        # already finds.
+        # class_subdir/private_dir/private_output are all unused: GCC carries
+        # no cache dir on the command line. Every BMI a compile resolves, in
+        # any class or a target-private directory, is named by the per-TU
+        # module mapper instead (get_module_mapper_args), whose contents the
+        # collator resolves (--private-bmi-dir/--private-interface at the
+        # collator, in lockstep with this target's own privacy), which the
+        # backend adds to compile edges only -- a scan resolves no named
+        # modules, and header units stay in the flat default cache the
+        # mapper-less scan already finds.
         return [self._named_modules_flag(), '-Mno-modules']
 
     def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
@@ -1329,21 +1337,30 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         return '.ifc'
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None) -> T.List[str]:
+                                private_dir: T.Optional[str] = None,
+                                private_output: bool = False) -> T.List[str]:
         # Read and write BMIs by directory, shared by every compile. /interface
         # is per interface-unit and is added at the compile site, not here. The
         # trailing slash marks /ifcOutput as a directory; a forward slash avoids
         # backslash-escaping in the generated ninja file (cl accepts either).
         #
-        # private_dir, set only for a module-providing executable, is where its
-        # own BMIs are read and written; the shared class cache is still listed
-        # as a second search dir, since it may link dependencies whose public
-        # modules it imports.
+        # private_dir, set whenever the target has any private module of its
+        # own, is always an extra search dir, alongside the shared class
+        # cache: a private import resolves there, and the target may also
+        # import public modules (its own, or a dependency's) from the shared
+        # cache. /ifcOutput, cl's single write destination for this compile,
+        # is the one place the two cannot both be listed -- private_output
+        # picks which of the two this specific compile's BMI (if it produces
+        # one) is written to. A wholly-private executable (Stage 7) always
+        # passes private_output=True for its own compiles; a library mixing
+        # public and private interfaces passes it per source.
         cache = self.get_module_cache_dir(class_subdir)
-        out = private_dir if private_dir is not None else cache
-        args = ['/ifcSearchDir', out]
         if private_dir is not None:
-            args += ['/ifcSearchDir', cache]
+            out = private_dir if private_output else cache
+            args = ['/ifcSearchDir', private_dir, '/ifcSearchDir', cache]
+        else:
+            out = cache
+            args = ['/ifcSearchDir', out]
         args += ['/ifcOutput', f'{out}/']
         return args
 

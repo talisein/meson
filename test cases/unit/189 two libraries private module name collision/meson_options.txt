@@ -1,0 +1,5 @@
+option('mode', type: 'combo',
+       choices: ['separate', 'collision'],
+       value: 'separate',
+       description: 'separate: two executables, each linking only one library (safe). ' +
+                    'collision: one executable links both (a hard error).')
