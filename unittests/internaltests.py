@@ -473,6 +473,9 @@ Thread model: posix'''), '21.9.0')
         target = mock.MagicMock(spec=build.BuildTarget)
         target.compilers = {'cpp': cpp}
         target.uses_cpp_modules.return_value = True
+        # A Fortran target uses Fortran's scanner, not this pipeline; say so,
+        # or the mock answers every unstubbed predicate with a truthy mock.
+        target.uses_fortran.return_value = False
         target.extra_args = {'cpp': []}
 
         r1 = be.target_uses_p1689_cpp_modules(target)
@@ -499,6 +502,7 @@ Thread model: posix'''), '21.9.0')
             target = mock.MagicMock(spec=build.BuildTarget)
             target.compilers = {'cpp': cpp}
             target.uses_cpp_modules.return_value = True
+            target.uses_fortran.return_value = False
             target.extra_args = {'cpp': []}
             with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
                             'current_vs_supports_modules', return_value=vs_ok):
