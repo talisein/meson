@@ -315,10 +315,13 @@ def run_p1689(argv: T.List[str]) -> int:
     private rather than absent, without ever being able to resolve it.
     "Never globally claimed" narrows the uniqueness requirement to one link's
     own transitive closure rather than the whole build tree; it does not
-    remove it: two dependencies of one link privately providing the same
-    name still collide at the linkage-symbol level (a module's exported
-    entities are mangled from its bare name, private or not), so
-    --dep-private-map is also checked for that cross-target collision here.
+    remove it: two targets of one link privately providing the same name
+    still collide at the linkage-symbol level (a module's exported entities
+    are mangled from its bare name, private or not), so --dep-private-map is
+    also checked for that collision here -- between two dependencies, and
+    between a dependency and this target's own private provides. The colliding
+    targets are told apart by target id, never by name: a name is unique only
+    within one subdir.
 
     With --mapper-suffix it also writes a GCC module mapper per translation
     unit (<primary-output><suffix>, an implicit input of the compile edge)
@@ -357,20 +360,28 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='Every provide in this target is private (a module-providing '
                              "executable: nothing can ever link it, so all of its modules "
                              'are private by construction). Overrides --private-interface.')
-    parser.add_argument('--private-map', default=None,
+    parser.add_argument('--private-map', default=None, nargs=2,
+                        metavar=('PATH', 'DISPLAY'),
                         help="Output a JSON list of this target's own private module names "
                              '(names only, never paths, so a consumer can recognize one but '
-                             'never resolve it). Omitted for a BMI-only variant\'s collate, '
+                             'never resolve it), plus how to name this target in a diagnostic. '
+                             'Omitted for a BMI-only variant\'s collate, '
                              'which never has private provides of its own.')
-    parser.add_argument('--dep-private-map', action='append', default=[], nargs=2,
-                        dest='dep_private_maps', metavar=('PATH', 'TARGET'),
-                        help='A linked dependency\'s own private-modules.json and the name of '
-                             'the target that provides it, for the "provided but private" '
-                             'diagnostic. Repeatable.')
+    parser.add_argument('--dep-private-map', action='append', default=[], nargs=3,
+                        dest='dep_private_maps', metavar=('PATH', 'ID', 'DISPLAY'),
+                        help='A linked dependency\'s own private-modules.json, the id of the '
+                             'target that provides it, and how to name that target in a '
+                             'diagnostic. The id, not the name, is the provider\'s identity: '
+                             'the collision check below tells two providers apart, and a '
+                             'target name is only unique within one subdir. Three arguments, '
+                             'not one joined key: a display string carries spaces and quotes. '
+                             'Repeatable.')
     parser.add_argument('--own-private-map', default=None, nargs=2,
-                        dest='own_private_map', metavar=('PATH', 'TARGET'),
-                        help="This rule set's own provider's private-modules.json and its "
-                             'target name. Only ever passed for a BMI-only variant\'s '
+                        dest='own_private_map', metavar=('PATH', 'DISPLAY'),
+                        help="This rule set's own provider's private-modules.json and how to "
+                             'name that target in a diagnostic (never compared against '
+                             'another provider, so no id is needed). Only ever passed for a '
+                             'BMI-only variant\'s '
                              "collate: a variant recompiles a public interface under another "
                              "class's flags, and that interface may legally import the "
                              "provider's own private module (same target, same "
@@ -424,22 +435,29 @@ def run_p1689(argv: T.List[str]) -> int:
     private_interface_objs = set(args.private_interface_objs)
     class_units = {name: bmi for name, bmi in args.header_unit_bmis}
 
-    # name -> owning target's name, for every private module of a linked
-    # dependency: the "provided but private" diagnostic below. Two different
-    # dependencies privately providing the same name is a hard error here,
-    # not just a bookkeeping conflict: a module's exported entities are
-    # mangled from its bare module name alone (verified on GCC: two
-    # unrelated "export module detail;" translation units emit the
-    # identical symbol for a same-named function, e.g. detail_value@detail()),
-    # so linking two same-named private modules into one binary is a
-    # silent ODR violation -- the linker picks one definition arbitrarily,
-    # regardless of which target's collate ever tried to claim the name.
-    # Privacy removes the *global*, whole-build-tree uniqueness requirement
+    # name -> the target privately providing it, for every private module of a
+    # linked dependency: the "provided but private" diagnostic below. Two
+    # different dependencies privately providing the same name is a hard error
+    # here, not just a bookkeeping conflict: a module's exported entities are
+    # mangled from its bare module name alone (two unrelated
+    # "export module detail;" translation units emit the identical symbol for
+    # a same-named function, e.g. detail_value@detail()), so linking two
+    # same-named private modules into one binary is a silent ODR violation --
+    # the linker picks one definition arbitrarily, regardless of which
+    # target's collate ever tried to claim the name. Privacy removes the
+    # *global*, whole-build-tree uniqueness requirement
     # (_claim_module_provider), not the requirement that one link's own
-    # transitive closure never contains two same-named modules -- that
-    # second requirement is the same one the public "provided by more than
-    # one target reaching this link" check below enforces, and it applies to
-    # private names exactly as much as public ones.
+    # transitive closure never contains two same-named modules -- that second
+    # requirement is the same one the public "provided by more than one target
+    # reaching this link" check below enforces, and it applies to private
+    # names exactly as much as public ones.
+    #
+    # A provider is identified by its target *id*: it is what tells two
+    # providers apart, and a target name cannot, being unique only within one
+    # subdir. Keyed by name, two same-named targets in different subdirs would
+    # read as one provider and their collision would go silently unreported --
+    # the very outcome this check exists to prevent. The display string is
+    # only ever printed.
     #
     # The loop below raises immediately before ever overwriting an existing
     # entry with a different owner, in the same iteration as the write --
@@ -448,19 +466,23 @@ def run_p1689(argv: T.List[str]) -> int:
     # most one owner per name can ever end up in this dict, so the singular
     # attribution the diagnostic below gives is structurally guaranteed, not
     # merely likely.
-    private_elsewhere: T.Dict[str, str] = {}
-    for path, tname in args.dep_private_maps:
+    private_elsewhere: T.Dict[str, T.Tuple[str, str]] = {}
+    for path, tid, display in args.dep_private_maps:
         with open(path, encoding='utf-8') as f:
             for name in json.load(f):
                 owner = private_elsewhere.get(name)
-                if owner is not None and owner != tname:
+                if owner is not None and owner[0] != tid:
                     raise MesonException(
                         f'Module "{name}" is privately provided by more than one target '
-                        f'reaching this link ({owner!r} and {tname!r}); both would emit '
+                        f'reaching this link ({owner[1]} and {display}); both would emit '
                         'the same linkage symbol for its exported entities, which is '
                         'undefined behavior even though each target only claims the name '
                         'privately. Rename one of the two modules.')
-                private_elsewhere[name] = tname
+                private_elsewhere[name] = (tid, display)
+
+    # How to name this target itself in a diagnostic (a BMI-only variant's
+    # collate passes no --private-map and has no private provides of its own).
+    own_display = args.private_map[1] if args.private_map is not None else None
 
     # This rule set's own provider's private names (a BMI-only variant's
     # collate only) -- distinct from private_elsewhere, which is populated
@@ -469,9 +491,9 @@ def run_p1689(argv: T.List[str]) -> int:
     # entries, so this needs its own map.
     own_private_names: T.Optional[T.Tuple[T.Set[str], str]] = None
     if args.own_private_map is not None:
-        own_path, own_tname = args.own_private_map
+        own_path, own_provider_display = args.own_private_map
         with open(own_path, encoding='utf-8') as f:
-            own_private_names = (set(json.load(f)), own_tname)
+            own_private_names = (set(json.load(f)), own_provider_display)
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -562,6 +584,24 @@ def run_p1689(argv: T.List[str]) -> int:
                 'cpp_private_module_interfaces too -- a partition of a private module '
                 "takes the module-wide claim its primary deliberately avoids.")
 
+    # One of this target's own private names colliding with a linked
+    # dependency's private name is the same silent ODR violation as two
+    # dependencies colliding with each other -- both definitions reach one
+    # binary under one mangled name -- but the loop above cannot see it: a
+    # target is never among its own --dep-private-map entries. No id
+    # comparison is needed on this side for the same reason. A collate with
+    # private provides always carries --private-map (and so own_display); the
+    # only one without it, a BMI-only variant's, never has a private provide.
+    own_collisions = sorted(private_names & private_elsewhere.keys())
+    if own_collisions:
+        name = own_collisions[0]
+        raise MesonException(
+            f'Module "{name}" is privately provided both by this target ({own_display}) '
+            f'and by {private_elsewhere[name][1]}, which it links; both would emit the '
+            'same linkage symbol for its exported entities, which is undefined behavior '
+            'even though each target only claims the name privately. Rename one of the '
+            'two modules.')
+
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
             imported: T.Dict[str, str] = json.load(f)
@@ -651,7 +691,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     if own_private_names is not None and name in own_private_names[0]:
                         raise MesonException(
                             f'{display}, recompiled for another BMI class, imports '
-                            f'module "{name}", which target {own_private_names[1]!r} '
+                            f'module "{name}", which target {own_private_names[1]} '
                             'provides privately. A public module interface consumed '
                             'across BMI classes cannot import a private module; move '
                             f'the import into an implementation unit, or make "{name}" '
@@ -659,7 +699,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     if name in private_elsewhere:
                         raise MesonException(
                             f'{obj} requires module "{name}", which target '
-                            f'{private_elsewhere[name]!r} provides privately (it is '
+                            f'{private_elsewhere[name][1]} provides privately (it is '
                             "listed in that target's cpp_private_module_interfaces). "
                             'A private module can only be imported inside the target '
                             'that provides it.')
@@ -693,7 +733,7 @@ def run_p1689(argv: T.List[str]) -> int:
     with open(args.provmap, 'w', encoding='utf-8') as pm:
         json.dump(provided, pm)
     if args.private_map is not None:
-        with open(args.private_map, 'w', encoding='utf-8') as pm:
+        with open(args.private_map[0], 'w', encoding='utf-8') as pm:
             json.dump(sorted(private_names), pm)
 
     # Claim the provided names only after publishing the map, so a concurrent

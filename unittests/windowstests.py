@@ -930,6 +930,61 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             'Module "detail" is privately provided by more than one target reaching this link',
             cm.exception.stdout)
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_same_name_targets(self):
+        # Two static_library('util') targets in different subdirs -- a target
+        # name is only unique within its subdir -- each privately exporting
+        # "detail", each linked into its own executable. Each private ifc dir
+        # must independently hold its own same-named detail BMI: cl writes
+        # BMIs by /ifcOutput directory, so only disk shows it.
+        self.build_and_check_modules('193 same name targets private module collision')
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 2)
+        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
+        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
+                         'a private module must never take a global name claim')
+        for d in dirs:
+            self.assertEqual(self._private_bmi_names(d), {'detail'},
+                             f'{d}: expected its own private detail BMI')
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_same_name_targets_in_one_link(self):
+        # The same collision as above, between two targets that share a name:
+        # the check must key on target identity, not on the name, or the two
+        # providers read as one and the ODR violation ships silently. The
+        # diagnostic must also tell two same-named targets apart.
+        testdir = os.path.join(self.unit_test_dir, '193 same name targets private module collision')
+        self.init(testdir, extra_args=['-Dmode=collision'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'Module "detail" is privately provided by more than one target reaching this link '
+            "('util' (defined in sub1/meson.build) and 'util' (defined in sub2/meson.build))",
+            cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_distinct_providers_in_one_link(self):
+        # Two private-module providers in one link whose module names differ:
+        # only the module name is ever mangled into a symbol, so this is no
+        # collision at all and must keep building.
+        self.build_and_check_modules('193 same name targets private module collision',
+                                     extra_args=['-Dmode=distinct'])
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_cpp_private_module_own_and_dep_collision(self):
+        # A target's own private module colliding with the private module of a
+        # library it links is the same symbol-level collision as two libraries
+        # colliding with each other -- and it is invisible to the dep-vs-dep
+        # check, since a target is never among its own dependencies.
+        testdir = os.path.join(self.unit_test_dir, '193 same name targets private module collision')
+        self.init(testdir, extra_args=['-Dmode=own-collision'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'Module "detail" is privately provided both by this target (\'prog\') and by '
+            "'util' (defined in sub1/meson.build), which it links",
+            cm.exception.stdout)
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
     def test_msvc_cpp_private_module_interfaces_variant_exclusion(self):
         # A private module (priv) alongside a public one (pubmod) that

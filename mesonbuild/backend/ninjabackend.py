@@ -1458,6 +1458,29 @@ class NinjaBackend(backends.Backend):
         return os.path.join(self.get_target_private_dir(target), 'private-modules.json')
 
     @staticmethod
+    def private_map_display_for(target: build.BuildTarget) -> str:
+        """How depaccumulate names target in a private-module diagnostic.
+
+        Never an identity: two targets can share a name (a name is only unique
+        within one subdir), so the collator compares get_id() and prints this.
+        The subdir a name repeats across is the one thing that tells the two
+        apart for a reader, and it cannot be recovered from an id, whose subdir
+        part is a hash -- so it is spelled out here.
+        """
+        subdir = target.get_subdir()
+        if not subdir:
+            return f'{target.name!r}'
+        # Forward slashes: the same string is asserted on by the POSIX and the
+        # Windows test drivers.
+        defined_in = '/'.join(subdir.split(os.sep)) + '/meson.build'
+        return f'{target.name!r} (defined in {defined_in})'
+
+    def private_map_ref_for(self, target: build.BuildTarget) -> T.Tuple[str, str, str]:
+        """(private-modules.json, target id, display) for --dep-private-map."""
+        return (self.get_private_modules_file_for(target), target.get_id(),
+                self.private_map_display_for(target))
+
+    @staticmethod
     def get_ddi_file_for(objfile: str) -> str:
         # One P1689 scan result per object, kept next to it in the private dir.
         return objfile + '.ddi'
@@ -1600,7 +1623,7 @@ class NinjaBackend(backends.Backend):
                 mappers.append(source2object[src] + '.mapper')
 
         dep_provmaps: T.List[str] = []
-        dep_private_maps: T.List[T.Tuple[str, str]] = []
+        dep_private_maps: T.List[T.Tuple[str, str, str]] = []
         for t in target.get_all_linked_targets():
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
@@ -1610,7 +1633,7 @@ class NinjaBackend(backends.Backend):
                 # variant (_get_or_create_bmi_variant excludes it), and a
                 # name-only list has no per-class content, so a consumer
                 # always reads the provider's own private-modules.json.
-                dep_private_maps.append((self.get_private_modules_file_for(t), t.name))
+                dep_private_maps.append(self.private_map_ref_for(t))
         dep_provmaps.sort()
         dep_private_maps.sort()
 
@@ -1628,7 +1651,7 @@ class NinjaBackend(backends.Backend):
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
         if dep_private_maps:
-            elem.add_dep([p for p, _ in dep_private_maps])
+            elem.add_dep([p for p, _, _ in dep_private_maps])
         elem.add_item('DYNDEP', dyndep_file)
         elem.add_item('PROVMAP', provmap_file)
         # A target's own public provides are always named in the shared class
@@ -1642,7 +1665,7 @@ class NinjaBackend(backends.Backend):
 
     def _module_collate_depargs(self, target: build.BuildTarget, cpp: Compiler,
                                 dep_provmaps: T.List[str],
-                                dep_private_maps: T.List[T.Tuple[str, str]]) -> T.List[str]:
+                                dep_private_maps: T.List[T.Tuple[str, str, str]]) -> T.List[str]:
         """Per-compiler flags for the P1689 collator (depaccumulate --p1689).
 
         Clang BMIs reach the shared cache via harvest edges, so the dyndep orders
@@ -1669,13 +1692,19 @@ class NinjaBackend(backends.Backend):
         --dep-private-map once per linked, module-providing dependency, always
         naming that dependency's own private-modules.json directly (never a
         BMI-class variant's -- a private module never appears in any variant).
+        A dependency is identified to the collator by its target *id*, not its
+        name: the collator refuses two private providers of one name in a
+        single link, and target names repeat across subdirs, so a name would
+        make two distinct providers look like one (private_map_ref_for pairs
+        the id with a display string the collator only ever prints).
         --private-interface names a provide by its *object* path (a P1689
         rule's primary-output), not its source: only Clang's P1689 output
         carries a source-path for a provide at all, so the collator cannot
         use it as a compiler-agnostic privacy key the way --interface-source
         (a genuinely Clang-only concern) does.
         """
-        depargs: T.List[str] = ['--private-map', self.get_private_modules_file_for(target)]
+        depargs: T.List[str] = ['--private-map', self.get_private_modules_file_for(target),
+                                self.private_map_display_for(target)]
         private_dir = self._module_private_bmi_dir_for(target)
         if private_dir is not None:
             depargs += ['--private-bmi-dir', private_dir]
@@ -1692,8 +1721,8 @@ class NinjaBackend(backends.Backend):
             else:
                 for p in sorted(self._private_module_interface_objs(target)):
                     depargs += ['--private-interface', p]
-        for path, tname in dep_private_maps:
-            depargs += ['--dep-private-map', path, tname]
+        for path, tid, display in dep_private_maps:
+            depargs += ['--dep-private-map', path, tid, display]
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         if cpp.get_id() == 'clang':
@@ -1866,12 +1895,12 @@ class NinjaBackend(backends.Backend):
         # dep_private_maps relies on), so this mirrors that loop directly
         # rather than going through _provmap_for_class for the private side.
         dep_provmaps: T.List[str] = []
-        dep_private_maps: T.List[T.Tuple[str, str]] = []
+        dep_private_maps: T.List[T.Tuple[str, str, str]] = []
         for t in provider.get_all_linked_targets():
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
                 dep_provmaps.append(self._provmap_for_class(t, class_key))
-                dep_private_maps.append((self.get_private_modules_file_for(t), t.name))
+                dep_private_maps.append(self.private_map_ref_for(t))
         dep_provmaps = sorted(set(dep_provmaps))
         dep_private_maps = sorted(set(dep_private_maps))
         # The provider's own private-modules.json: a recompiled public
@@ -1892,15 +1921,16 @@ class NinjaBackend(backends.Backend):
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
         if dep_private_maps:
-            elem.add_dep([p for p, _ in dep_private_maps])
+            elem.add_dep([p for p, _, _ in dep_private_maps])
         elem.add_dep(own_private_map)
         elem.add_item('DYNDEP', variant.dyndep)
         elem.add_item('PROVMAP', variant.provmap)
         elem.add_item('BMIDIR', cpp.get_module_cache_dir(info.subdir))
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
-        depargs: T.List[str] = ['--own-private-map', own_private_map, provider.name]
-        for path, tname in dep_private_maps:
-            depargs += ['--dep-private-map', path, tname]
+        depargs: T.List[str] = ['--own-private-map', own_private_map,
+                                self.private_map_display_for(provider)]
+        for path, tid, display in dep_private_maps:
+            depargs += ['--dep-private-map', path, tid, display]
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
