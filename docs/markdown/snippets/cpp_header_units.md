@@ -45,13 +45,14 @@ Current limitations:
   file's directory, and is the only portable form.
   - *GCC* keys a unit's BMI by the *textual* resolved name without normalizing
     it, so `import "../hdr.h";` from a subdirectory resolves to a name of its
-    own and misses the declared unit's BMI (the scan fails with GCC's "imports
+    own and misses an undeclared unit's BMI (the scan fails with GCC's "imports
     must be built before being imported"). If an aliased spelling is
-    unavoidable, declare it as its own unit spelled the way the importer
-    resolves it (`cpp_header_units: ['hdr.h', 'sub/../hdr.h']`), which builds a
-    second BMI of the same header.
-  - *Clang* normalizes the resolved file and matches the declared unit from any
-    spelling.
+    unavoidable, declare it alongside the plain one, spelled the way the importer
+    resolves it (`cpp_header_units: ['hdr.h', 'sub/../hdr.h']`). That costs
+    nothing: spellings of the same file share its BMI rather than each building
+    one. An *undeclared* spelling stays an error and cannot be healed —
+    discovering it would take the very scan that its missing BMI is what breaks.
+  - *Clang* matches a declared unit from any spelling of the same file.
   - *MSVC* matches a unit by the *literal* import spelling it scans, so
     `import "../hdr.h";` matches no target-level declaration and there is **no
     alias escape hatch**: the GCC-style resolved-path spelling still mismatches
@@ -78,10 +79,14 @@ Current limitations:
   Clang module and header-unit consumers, so Meson makes it fall back to the
   real compiler for module compiles (as it already does for GCC's
   `-fmodules`); module-enabled sources do not benefit from ccache.
-- A unit's BMI freezes the module-affecting flags it was built with. As with
-  Meson's module support in general, header units expect uniform
-  module-affecting flags across the build: every target that declares a given
-  header unit shares one BMI (built from the first declaring target's flags),
-  so diverging the flags for a header unit between targets is undefined
-  behavior. This matches GCC's module cache, which is keyed by header path
-  rather than flags and so can only hold one BMI per header regardless.
+- A unit's BMI freezes the module-affecting flags it was built with, so targets
+  that declare the same header unit with divergent module-affecting flags get a
+  BMI of it each, one per flag equivalence class, on every supported compiler.
+  Sharing a unit across targets with different `cpp_args` is therefore fine.
+  - The exception is GCC and the **dialect**: `cpp_std`, `cpp_eh` and `cpp_rtti`.
+    GCC records these in a header unit and refuses to read it back under any
+    other, and it enforces that while *scanning* — before any per-class BMI can
+    be selected. Declaring one header unit from targets whose dialects differ
+    therefore cannot work on GCC; Meson warns at configure time and the build
+    fails at the scan. Give those targets the same dialect, or stop sharing the
+    unit between them.
