@@ -1,0 +1,4 @@
+option('mode', type: 'combo',
+       choices: ['module_source', 'links_provider', 'supported'],
+       value: 'module_source',
+       description: 'Which Fortran/C++-module mix to configure.')
