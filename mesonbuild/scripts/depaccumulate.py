@@ -15,7 +15,7 @@ import shutil
 import textwrap
 import typing as T
 
-from ..utils.core import MesonException
+from ..utils.core import MesonException, flat_cmi_path
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -141,27 +141,6 @@ def _source_key(path: str) -> str:
     directory as cwd, which both relative forms are relative to.
     """
     return os.path.normcase(os.path.abspath(path))
-
-
-def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
-    """The CMI path GCC's default (mapper-less) mapping gives a header unit.
-
-    A header unit's logical-name is its resolved header path; GCC stores its
-    CMI under the flat cache root with '.' and '..' components mangled to ','
-    and ',,' and an absolute path appended as-is: './util.h' ->
-    'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
-    'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
-    'gcm.cache/usr/include/c++/16/vector.gcm'.
-
-    Scan edges carry no mapper -- one would disable default naming for named
-    modules too, whose names only the scan itself supplies -- so a scan reaches a
-    unit only here. The backend builds the unit's first-declaring class's BMI at
-    this path and names the other classes' outright (--header-unit-bmi); both
-    sides derive the path from this function.
-    """
-    parts = [',' * len(p) if p in ('.', '..') else p
-             for p in logical_name.split('/')]
-    return f'{flat_dir}/' + '/'.join(p for p in parts if p) + suffix
 
 
 def _write_if_different(path: str, content: str) -> None:

@@ -36,7 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
-from ..scripts.depaccumulate import flat_cmi_path
+from ..utils.core import flat_cmi_path
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 

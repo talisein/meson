@@ -714,7 +714,7 @@ class InternalTests(unittest.TestCase):
         # GCC's default header-unit CMI naming under the flat cache: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path
         # is appended as-is under the cache root.
-        from mesonbuild.scripts.depaccumulate import flat_cmi_path
+        from mesonbuild.utils.core import flat_cmi_path
         cases = {
             './util.h': 'gcm.cache/,/util.h.gcm',
             './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',

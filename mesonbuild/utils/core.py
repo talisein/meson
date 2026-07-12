@@ -173,3 +173,25 @@ class ExecutableSerialisation:
         self.skip_if_destdir = False
         self.subproject = T.cast('SubProject', '')  # avoid circular import
         self.dry_run = False
+
+
+def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
+    """The CMI path GCC's default (mapper-less) mapping gives a header unit.
+
+    A header unit's logical-name is its resolved header path; GCC stores its
+    CMI under the flat cache root with '.' and '..' components mangled to ','
+    and ',,' and an absolute path appended as-is: './util.h' ->
+    'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
+    'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
+    'gcm.cache/usr/include/c++/16/vector.gcm'.
+
+    Scan edges carry no mapper -- one would disable default naming for named
+    modules too, whose names only the scan itself supplies -- so a scan reaches a
+    unit only here. The backend builds the unit's first-declaring class's BMI at
+    this path and names the other classes' outright (--header-unit-bmi); both
+    sides derive the path from this function, which is why it lives here rather
+    than in either of them.
+    """
+    parts = [',' * len(p) if p in ('.', '..') else p
+             for p in logical_name.split('/')]
+    return f'{flat_dir}/' + '/'.join(p for p in parts if p) + suffix
