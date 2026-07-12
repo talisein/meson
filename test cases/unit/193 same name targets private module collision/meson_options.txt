@@ -1,0 +1,8 @@
+option('mode', type: 'combo',
+       choices: ['separate', 'collision', 'distinct', 'own-collision'],
+       value: 'separate',
+       description: 'separate: the two same-named targets land in different executables (safe). ' +
+                    'collision: one executable links both (a hard error). ' +
+                    'distinct: one executable links two private providers whose module names differ (safe). ' +
+                    'own-collision: the private module of the executable itself collides with the one ' +
+                    'its library provides privately (a hard error).')
