@@ -49,6 +49,7 @@ Token vocabulary (the API for the C++ module test series):
 
 from __future__ import annotations
 import functools
+import glob
 import os
 import re
 import subprocess
@@ -492,7 +493,16 @@ class CppModulesTestMixin:
         """The BMI a GCC TU resolves header.hpp to, checking its mapper key is the
         spelling that TU resolved -- textually, '..' and all, since that is what
         the compiler keys a unit by. Returns the BMI it names."""
-        path = os.path.join(self.builddir, f'{target}.p', f'{obj}.o.mapper')
+        # The private dir carries the target's output suffix (prog.p on POSIX,
+        # prog.exe.p on Windows) and so does the object (.o vs .obj) -- glob
+        # rather than hardcode either. The dot before each wildcard keeps
+        # 'prog' from also matching 'progfoo's directory.
+        patterns = [os.path.join(self.builddir, f'{target}.p', f'{obj}.*.mapper'),
+                    os.path.join(self.builddir, f'{target}.*.p', f'{obj}.*.mapper')]
+        matches = [m for pat in patterns for m in glob.glob(pat)]
+        self.assertEqual(len(matches), 1,
+                          f'{" or ".join(patterns)}: expected one mapper, got {matches}')
+        path = matches[0]
         with open(path, encoding='utf-8') as f:
             lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
         self.assertEqual(len(lines), 1, f'{path}: expected one header.hpp line, got {lines}')
@@ -668,7 +678,9 @@ class CppModulesTestMixin:
                                  f'scan edge for {out} must not carry a mapper')
             elif 'HEADER_UNIT' in rule and s.startswith('HUMAPPER ='):
                 unit_edges += 1
-                mapper = s.partition('-fmodule-mapper=')[2].strip()
+                # Windows quotes the whole arg ('"-fmodule-mapper=path"'), so the
+                # closing quote lands in the partitioned tail; POSIX does not.
+                mapper = s.partition('-fmodule-mapper=')[2].strip().rstrip('"')
                 self.assertTrue(mapper, f'header-unit edge for {out} must carry a mapper')
                 self.assertTrue(os.path.isfile(os.path.join(self.builddir, mapper)),
                                 f'missing header-unit mapper file {mapper}')

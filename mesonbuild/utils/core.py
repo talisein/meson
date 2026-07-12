@@ -183,7 +183,11 @@ def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     and ',,' and an absolute path appended as-is: './util.h' ->
     'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
     'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
-    'gcm.cache/usr/include/c++/16/vector.gcm'.
+    'gcm.cache/usr/include/c++/16/vector.gcm'. A Windows drive letter's colon
+    is mangled to a hyphen the same way ('.' and '..' components are, since a
+    literal colon there would read as an NTFS alternate-data-stream separator):
+    'C:/Users/x/vector' -> 'gcm.cache/C-/Users/x/vector.gcm' (confirmed against
+    real GCC's own "compiled module file is ..." diagnostic on WinLibs 16).
 
     Scan edges carry no mapper -- one would disable default naming for named
     modules too, whose names only the scan itself supplies -- so a scan reaches a
@@ -192,6 +196,8 @@ def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     sides derive the path from this function, which is why it lives here rather
     than in either of them.
     """
-    parts = [',' * len(p) if p in ('.', '..') else p
-             for p in logical_name.split('/')]
+    parts = logical_name.split('/')
+    if len(parts) > 1 and len(parts[0]) == 2 and parts[0][1] == ':' and parts[0][0].isalpha():
+        parts[0] = parts[0][0] + '-'
+    parts = [',' * len(p) if p in ('.', '..') else p for p in parts]
     return f'{flat_dir}/' + '/'.join(p for p in parts if p) + suffix
