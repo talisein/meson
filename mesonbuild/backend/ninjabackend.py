@@ -1294,6 +1294,40 @@ class NinjaBackend(backends.Backend):
                 self.add_build(elem)
 
     @lru_cache(maxsize=None)
+    def cpp_module_pipeline_applies(self, target: build.BuildTargetTypes | build.Target) -> bool:
+        """Whether the C++ module pipeline is even a candidate for this target.
+
+        The structural question, asked before any of "does the target want
+        modules" and "is a scanner available": no answer here depends on the
+        compiler's capabilities or on what the target declares. Kept separate
+        because those later answers are not interchangeable with this one -- a
+        target that reaches 'none' through this predicate has no module problem
+        to report, while a target that reaches it past this predicate is one
+        the pipeline wanted and could not have.
+
+        Excluded, and why:
+        - ninja without dyndep support: nothing scans, on any compiler.
+        - a preprocess-only target (-E): it neither writes a BMI nor imports
+          one, and generate_target returns before a collate is ever emitted for
+          it, so mappers, scans and header units would name outputs nothing
+          produces.
+        - a target with Fortran sources: a target gets one scanner and this one
+          uses Fortran's (should_use_dyndeps_for_target enables it without this
+          pipeline). check_cpp_modules_fortran_mix reports the C++ modules such
+          a target cannot have.
+        - a target with no C++ compiler at all.
+        """
+        if not self.ninja_has_dyndeps:
+            return False
+        if not isinstance(target, build.BuildTarget):
+            return False
+        if isinstance(target, build.CompileTarget):
+            return False
+        if target.uses_fortran():
+            return False
+        return 'cpp' in target.compilers
+
+    @lru_cache(maxsize=None)
     def cpp_module_scanner_for_target(self, target: build.BuildTargetTypes | build.Target) -> Literal['none', 'regex', 'p1689']:
         """Which C++ module scanning pipeline this target uses, if any.
 
@@ -1305,38 +1339,25 @@ class NinjaBackend(backends.Backend):
         but modules-capable compilers (GCC < 14, cl 19.28.28617 - 19.31), and
         the legacy escape hatch of a bare -fmodules/-fmodules-ts in the
         target's cpp_args.
-        'none': no C++ module scanning.
+        'none': the target wants no C++ modules, or wants them and no scanner
+        can serve it (Clang without clang-scan-deps -- the one case a caller
+        may want to report; cpp_module_pipeline_applies has already screened
+        out the targets the pipeline never applies to).
 
         A target opts in by declaration (a module-interface source, the
         cpp_modules/cpp_header_units kwargs, or linking a module provider --
         uses_cpp_modules()); source contents are never read. cl before build
         19.28.28617 (VS 16.8/16.9) has broken modules, and
         current_vs_supports_modules() rejects a too-old developer prompt.
-        Mixed C++/Fortran targets stay on the Fortran scanner, which
-        should_use_dyndeps_for_target enables without this pipeline.
 
         Memoized: re-asked once per source on the ninja-gen hot path, and the
         inputs (ninja/compiler versions, dev-prompt, target flags) are frozen
         by generation time.
         """
-        if not self.ninja_has_dyndeps:
+        if not self.cpp_module_pipeline_applies(target):
             return 'none'
-        if not isinstance(target, build.BuildTarget):
-            return 'none'
-        if isinstance(target, build.CompileTarget):
-            # A preprocess-only target (-E): it neither writes a BMI nor
-            # imports one, and generate_target returns before any collate is
-            # emitted for it -- so no part of the module pipeline (mappers,
-            # scans, header units, provided-module maps) belongs on its edges,
-            # or on the edges of a target that consumes its output. This is
-            # the same exclusion the Fortran dyndep path makes in
-            # add_dependency_scanner_entries_to_element.
-            return 'none'
-        if 'fortran' in target.compilers:
-            return 'none'
-        cpp = target.compilers.get('cpp')
-        if cpp is None:
-            return 'none'
+        assert isinstance(target, build.BuildTarget)
+        cpp = target.compilers['cpp']
         if target.uses_cpp_modules():
             if cpp.get_id() == 'gcc':
                 return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
@@ -1357,8 +1378,10 @@ class NinjaBackend(backends.Backend):
         return 'none'
 
     def should_use_dyndeps_for_target(self, target: build.BuildTargetTypes | build.Target) -> bool:
+        # The other side of the exclusion cpp_module_pipeline_applies makes: a
+        # Fortran target dyndeps on Fortran's own scanner, never on the C++ one.
         if self.ninja_has_dyndeps and isinstance(target, build.BuildTarget) \
-                and 'fortran' in target.compilers:
+                and target.uses_fortran():
             return True
         return self.cpp_module_scanner_for_target(target) != 'none'
 
@@ -1467,6 +1490,12 @@ class NinjaBackend(backends.Backend):
         # frozen -- calling it earlier poisons its memoized result. A
         # preprocess-only target is exempt: -E never parses `export module` or
         # `import`, so an older cpp_std preprocesses a module interface fine.
+        #
+        # Not keyed on cpp_module_pipeline_applies: this is a property of the
+        # source language, not of the pipeline. A module source needs c++20 to
+        # compile whether or not Meson would have scanned it -- with a ninja too
+        # old for dyndep, say -- so the exemption here is only the one case
+        # where the source is never compiled as C++ at all.
         if isinstance(target, build.CompileTarget):
             return
         if 'cpp' not in target.compilers or not target.uses_cpp_modules():
@@ -1484,20 +1513,15 @@ class NinjaBackend(backends.Backend):
         # probed, no version assumption). Without it a module-using target
         # would silently get no scanning and fail at build time with confusing
         # compiler errors, so report the missing tool at setup instead. The
-        # legacy -fmodules/-fmodules-ts regex escape hatch is exempt (it does
-        # not need the scanner), as are builds whose ninja lacks dyndep, which
-        # never scan on any compiler.
+        # legacy -fmodules/-fmodules-ts regex escape hatch is exempt: it does
+        # not need the scanner, and answers 'regex' rather than 'none'.
         #
-        # Only a target the P1689 pipeline would otherwise claim can be missing
-        # the tool: the other ways to reach 'none' are structural, and blaming
-        # clang-scan-deps for them sends the reader hunting a tool that is
-        # installed and fine. A preprocess-only target is never scanned, and a
-        # Fortran target uses the Fortran scanner -- so a Fortran program
-        # linking a C++ module library is not a scanner problem at all
-        # (check_cpp_modules_fortran_mix has already had its say about the mix).
-        if not self.ninja_has_dyndeps or 'cpp' not in target.compilers:
-            return
-        if isinstance(target, build.CompileTarget) or target.uses_fortran():
+        # The three conditions below are the only three there are: the pipeline
+        # applies, the target wants modules, and no scanner answered. Blaming
+        # clang-scan-deps for a target the pipeline never applied to would send
+        # the reader hunting a tool that is installed and fine, which is why
+        # that question is asked first and asked by name.
+        if not self.cpp_module_pipeline_applies(target):
             return
         cpp = target.compilers['cpp']
         if cpp.get_id() != 'clang' or not target.uses_cpp_modules():
