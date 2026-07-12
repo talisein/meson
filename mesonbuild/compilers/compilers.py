@@ -1661,14 +1661,11 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         return False
 
     def supports_bmi_class_header_units(self) -> bool:
-        """Whether header units are built once per BMI equivalence class
-        rather than once build-wide. True only where
-        get_header_unit_consumer_args names the unit's BMI by explicit path,
-        which is all the resolution a per-class BMI needs. GCC stays False
-        even with the module mapper: a unit's CMI name is its resolved header
-        path, known only when the compiler runs, so the unit build edge
-        cannot be given a generate-time per-class mapping. Its units stay
-        deduped build-wide in the flat cache, with the divergence warning.
+        """Whether header units are built once per BMI equivalence class rather
+        than once build-wide. True wherever a consumer can be pointed at one
+        BMI among several: by explicit path on the command line
+        (get_header_unit_consumer_args) as cl and clang need, or through a
+        module mapper as GCC does.
         """
         return False
 

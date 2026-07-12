@@ -812,7 +812,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # build resolves its BMIs through per-TU mappers just as a multi-class
         # one does -- only the directory the mappers name differs.
         self.build_and_check_modules('139 gcc cpp modules',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'dot.mod.sub'])
         self.check_gcc_module_mappers()
@@ -898,7 +898,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # build must keep the flat pcm.cache (no class subdir) and synthesize
         # no BMI-only variant.
         self.build_and_check_modules('156 clang cpp modules',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'oddname', 'dot.mod.sub'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
@@ -1013,7 +1013,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # before BMI classes GCC silently shared the mismatched BMI here
         # (or hard-errored, depending on version), and setup could only warn.
         self.build_and_check_modules('145 gcc module cpp_std divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
@@ -1021,7 +1021,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The same divergence across a subproject boundary: parent c++23
         # consumes a subproject module library built at c++20.
         self.build_and_check_modules('146 gcc module subproject cpp_std divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
@@ -1031,26 +1031,28 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # runs fine.
         self.build_and_check_modules('165 module bmi flag divergence',
                                      extra_args=['-Dwithfoo=false'],
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_header_unit_divergence_warns(self):
         testdir = os.path.join(self.unit_test_dir, '168 header unit divergence')
-        # On GCC header units are deduped build-wide and built with the first
-        # declarer's flags, so a declarer in a divergent BMI class must be
-        # warned about -- once: the same-class re-declarer (prog20b) shares
-        # the unit quietly. (Clang builds one unit per class instead and is
-        # covered by test_clang_header_unit_bmi_classes.)
+        # Header units get a BMI per class everywhere, but never across a
+        # *dialect* on GCC: it checks the dialect when reading a CMI, the P1689
+        # scan included, and a scan reaches the unit only at the default-named
+        # path the first-declaring class built. So a dialect-divergent declarer
+        # is warned about, once -- the same-class re-declarer (prog20b) shares
+        # the unit quietly. The define-divergent case does go green:
+        # test_header_unit_define_divergence.
         #
-        # Configure-only: the warning describes a build that cannot succeed.
-        # The one shared unit BMI is built at prog20's c++20, and prog23's scan
-        # of it hard-errors ("language dialect differs"), so there is no
-        # build-success to assert until header units get a BMI per class.
+        # Configure-only: the warning describes a build that cannot succeed
+        # (prog23's scan of the c++20 BMI hard-errors "language dialect
+        # differs"), which is why it warns rather than fails.
         out = self.init(testdir)
-        self.assertEqual(out.count('divergent BMI-affecting flags'), 1)
+        self.assertEqual(out.count('divergent dialects'), 1)
         self.assertIn("'util.h'", out)
         self.assertIn("'-std=c++23' only in 'prog23'", out)
         self.assertIn("'-std=c++20' only in ", out)
+        self.assertIn('will fail when it scans', out)
         self.assertNotIn("'prog20b'", out)
         # The unit's path contains a space (this fixture's own directory name),
         # which a mapper key cannot hold -- but it is reached through a
@@ -1065,7 +1067,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # builds, runs (each side constant-evaluates the BMI's _REENTRANT
         # view against its own), and rebuilds no-op.
         self.build_and_check_modules('159 module pthread divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1076,7 +1078,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # exit code: the importer constant-evaluates the BMI's FOO view
         # against its own.
         self.build_and_check_modules('165 module bmi flag divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1257,7 +1259,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # dialect probe, so a wrongly shared BMI is a failing test run, not
         # merely a build failure.
         self.build_and_check_modules('169 header unit bmi classes',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_digests('util.h')
         self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
@@ -1273,23 +1275,37 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
 
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_bmi_classes_deferred(self):
-        # GCC header units stay single-class even under the module mapper (a
-        # unit's CMI name is its resolved header path, known only at compile
-        # time, so the unit build edge cannot be given a per-class mapping):
-        # the two-class fixture keeps the one shared unit edge plus the
-        # divergence warning. Configure-only -- GCC hard-errors the divergent
-        # unit import at build. prog23's import of modlib across the class
-        # split is handled by a BMI-only variant and warns no more.
-        testdir = os.path.join(self.unit_test_dir, '169 header unit bmi classes')
-        out = self.init(testdir)
-        self.assertEqual(out.count('import the same C++ header unit'), 1)
-        self.assertEqual(out.count('divergent BMI-affecting flags'), 1)
-        self.assertNotIn("'prog20b'", out)
-        self.assertEqual(len(self.header_unit_digests('util.h')), 1,
-                         'GCC must keep one shared unit BMI per spelling')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
+                              compiler=('gcc', 'clang'))
+    def test_header_unit_define_divergence(self):
+        # Three declarers of util.h, two in one BMI class and progfoo diverging
+        # on -DFOO: each must get its own class's BMI, and modlib's BMI-only
+        # variant for progfoo must import progfoo's, not the provider's. Every
+        # program constant-evaluates the unit's view of FOO, so a wrongly shared
+        # BMI is a failing test run, not merely a build failure.
+        #
+        # Each main imports a named module as well as the unit, which is what
+        # pins the scan edges staying mapper-less: a mapper on a scan would leave
+        # `import modlib;` unresolvable.
+        #
+        # 169 is the same shape diverging on cpp_std, which GCC cannot do at all
+        # -- see test_header_unit_divergence_warns.
+        self.build_and_check_modules('174 header unit define divergence',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('util.h')
+        self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
+        per_prog = {p: self.header_unit_bmis_of(p, 'util.h')
+                    for p in ('prog', 'progb', 'progfoo')}
+        for prog, bmis in per_prog.items():
+            self.assertEqual(len(bmis), 1, f'{prog} must resolve exactly one util.h BMI, got {bmis}')
+        self.assertEqual(per_prog['prog'], per_prog['progb'],
+                         'same-class declarers must share one unit BMI')
+        self.assertNotEqual(per_prog['progfoo'], per_prog['prog'],
+                            'divergent classes must not share a unit BMI')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
+        if self.host_cpp_compiler().get_id() == 'gcc':
+            self.check_gcc_module_mappers()
 
     @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_generated_header(self):
@@ -1340,7 +1356,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The opt-out spelling: no thread flags on the std module or its
         # consumers, and no divergence warning since both sides agree.
         self.build_and_check_modules('160 import std nothreads',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         for entry in self.get_compdb():
             self.assertNotIn('-pthread', entry['command'])
@@ -1369,7 +1385,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # links and runs. GCC maps units via the module mapper, so the default
         # check that no BMI path appears on a command line applies in full.
         self.build_and_check_modules('142 gcc header units',
-                                     setup_not_contains=['divergent BMI-affecting flags',
+                                     setup_not_contains=['divergent dialects',
                                                          'cannot name a header unit'])
         self.check_gcc_module_mappers()
         # The mapper must name the units: a mapping file disables GCC's default
@@ -1457,7 +1473,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # A mixed target: two declared header units (quote and angle spelling)
         # plus a named module -- the program links and runs.
         self.build_and_check_modules('158 clang header units',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         # The unit edges' declared outputs are the real BMIs (no stamps), at
         # exactly the single-class paths -- the digest hashes '<mode>:<spelling>'
@@ -1491,16 +1507,17 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # unit edge.
         testdir = '173 header unit aliasing'
         self.build_and_check_modules(testdir, ninja_args_not_contains=())
-        self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
+        self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
 
-        # An importer-relative spelling ("../header.hpp") resolves to its own
-        # logical name; declared as its own alias unit it gets its own edge
-        # and BMI of the same file.
+        # An importer-relative spelling ("../header.hpp") resolves to a logical
+        # name of its own and must be declared, but it names the same file as the
+        # plain spelling -- so it is an extra name for the one BMI, not a second
+        # one. Exactly one unit compile edge, whichever spelling an importer used.
         self.new_builddir()
         self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
                                      ninja_args_not_contains=(),
                                      setup_not_contains=['cannot name a header unit'])
-        self.assertEqual(len(self.header_unit_digests('header.hpp')), 2)
+        self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
         if self.host_cpp_compiler().get_id() == 'gcc':
             # This fixture's path contains spaces, so its units are named
             # through a space-free alias -- and it is the one fixture that
@@ -1512,13 +1529,38 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             # or normalizing the path, gives the importer and the unit edge two
             # different names for one BMI and neither finds the other's.
             self.check_gcc_module_mappers()
-            with open(os.path.join(self.builddir, 'prog.p', 'foo_aliased.cpp.o.mapper'),
-                      encoding='utf-8') as f:
-                lines = f.read().splitlines()
-            key, _, bmi = lines[0].partition(' ')
-            self.assertRegex(key, r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$')
-            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
-                            f'mapper names {bmi}, which the unit edge did not write')
+            alias_bmi = self.assert_alias_mapper_key('prog', 'foo_aliased.cpp')
+            plain_bmi = self.assert_alias_mapper_key('prog', 'main.cpp', alias=False)
+            self.assertEqual(alias_bmi, plain_bmi,
+                             'both spellings must resolve the one BMI of the file')
+            # A scan carries no mapper, so a TU importing through the alias reaches
+            # the unit only at the path that spelling's own name mangles to. The
+            # BMI is linked there, not built there.
+            self.assert_header_unit_alias_link(alias_bmi)
+
+        # Two divergent BMI classes over the same aliased unit: one BMI each, and
+        # each class's importers must reach their own through *either* spelling.
+        # Both programs constant-evaluate the unit's view of FOO, so a wrongly
+        # shared BMI is a failing run.
+        self.new_builddir()
+        self.build_and_check_modules(testdir, extra_args=['-Dmode=classes'],
+                                     ninja_args_not_contains=(),
+                                     setup_not_contains=['cannot name a header unit'])
+        units = self.header_unit_bmis('header.hpp')
+        self.assertEqual(len(units), 2, f'expected one BMI per class, got {units}')
+        if self.host_cpp_compiler().get_id() == 'gcc':
+            per_prog = {}
+            for prog in ('prog', 'progfoo'):
+                alias_bmi = self.assert_alias_mapper_key(prog, 'foo_aliased.cpp')
+                plain_bmi = self.assert_alias_mapper_key(prog, 'main.cpp', alias=False)
+                self.assertEqual(alias_bmi, plain_bmi,
+                                 f'{prog} must reach one BMI through either spelling')
+                per_prog[prog] = alias_bmi
+            self.assertNotEqual(per_prog['prog'], per_prog['progfoo'],
+                                'divergent classes must not share a unit BMI')
+            # The alias's flat path serves every class's scans, so it stands at the
+            # BMI of the class that declared the unit first.
+            self.assert_header_unit_alias_link(per_prog['prog'])
 
         # Without the alias declaration the two compilers diverge: GCC keys
         # CMIs by the textual resolved name (no normalization), so the import
@@ -1535,7 +1577,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         else:
             self.build_and_check_modules(testdir, extra_args=['-Dmode=undeclared'],
                                          ninja_args_not_contains=())
-            self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
+            self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_header_unit_rebuild_on_user_header_change(self):

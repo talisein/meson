@@ -500,7 +500,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # setup_not_contains: prog and prog2 declare the same unit in the same
         # BMI class, which must stay warning-free.
         self.build_and_check_modules('151 msvc header units',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         # Units are pre-built to a Meson-chosen .ifc, deduped globally by
         # (mode, spelling): the user unit shared by both targets is one edge/BMI.
@@ -593,7 +593,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # program constant-evaluates the unit's dialect probe, so a wrongly
         # shared BMI is a failing test run, not merely a build failure.
         self.build_and_check_modules('169 header unit bmi classes',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=(),
                                      extra_args=self._MSVC_TWO_CLASS_ARGS)
         units = self.header_unit_digests('util.h')
@@ -731,7 +731,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # /GR-mismatched provider BMI; the constexpr probe turns a wrongly
         # shared BMI into a wrong exit code.
         self.build_and_check_modules('177 msvc module rtti divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
@@ -740,7 +740,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # through a BMI-only variant built without -DFOO instead of importing
         # a FOO-mismatched provider BMI.
         self.build_and_check_modules('178 msvc module define divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
@@ -748,7 +748,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # Each declarer of the same header unit gets its own unit BMI when
         # cpp_rtti diverges: prog_a and prog_b must not share one.
         self.build_and_check_modules('179 msvc header unit rtti divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
@@ -756,7 +756,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_header_unit_define_divergence_builds(self):
         # Same as above, driven by a -D divergence instead of cpp_rtti.
         self.build_and_check_modules('180 msvc header unit define divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
@@ -767,7 +767,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # /EH-mismatched provider BMI; the constexpr probe turns a wrongly
         # shared BMI into a wrong exit code.
         self.build_and_check_modules('181 msvc module eh divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
@@ -775,7 +775,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # Each declarer of the same header unit gets its own unit BMI when
         # cpp_eh diverges: prog_a and prog_b must not share one.
         self.build_and_check_modules('182 msvc header unit eh divergence',
-                                     setup_not_contains=['divergent BMI-affecting flags'],
+                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
@@ -836,7 +836,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # through the space-free alias, and the BMI the mapper points at is the
         # one the unit edge wrote.
         self.build_and_check_modules('142 gcc header units',
-                                     setup_not_contains=['divergent BMI-affecting flags',
+                                     setup_not_contains=['divergent dialects',
                                                          'cannot name a header unit'])
         self.check_gcc_module_mappers()
         import glob

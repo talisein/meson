@@ -193,23 +193,37 @@ kwargs:
       Each entry is the header **as spelled in the import**, resolved on the
       target's include path: `'pkg/header.h'` is a user header unit
       (`import "pkg/header.h";`) and `'<pkg/header.h>'` is a system header unit
-      (`import <pkg/header.h>;`). Meson pre-builds each unit's BMI once (shared
-      across the build) from this list, because a header unit's BMI must exist
-      before the sources that import it are scanned and compiled. On GCC
-      consumers resolve the BMI by directory lookup with no BMI path on the
-      command line; on MSVC and Clang Meson passes each consumer an explicit
-      mapping to the unit's BMI (`/headerUnit` and `-fmodule-file`
-      respectively).
+      (`import <pkg/header.h>;`). Meson pre-builds each unit's BMI from this
+      list, because a header unit's BMI must exist before the sources that
+      import it are scanned and compiled. On GCC consumers resolve the BMI
+      through a module mapper, so no BMI path reaches a command line; on MSVC
+      and Clang Meson passes each consumer an explicit mapping to it
+      (`/headerUnit` and `-fmodule-file` respectively).
+
+      A unit's BMI freezes the module-affecting flags it was built with, so
+      targets that declare the same header unit with divergent flags each get a
+      BMI of it, one per flag equivalence class. The exception is GCC and the
+      *dialect* (`cpp_std`, `cpp_eh`, `cpp_rtti`), which it records in the unit
+      and refuses to read back under any other, while scanning -- before a
+      per-class BMI can be selected. Declaring one header unit from targets whose
+      dialects differ therefore cannot work on GCC: Meson warns and the build
+      fails at the scan.
 
       Every header unit a source imports must be listed (the declaration does
       not propagate through dependencies, so a consumer that imports the same
-      header must declare it too). **Ordering:** the units are built before all
-      of the target's scans and compiles, but they are *not* ordered relative to
-      each other, so a header unit that itself `import`s another header unit is
-      not supported (list header units that only `#include` their prerequisites,
-      which are absorbed textually). A unit's BMI also freezes the preprocessor
-      state it was built with, so the whole build must use uniform
-      module-affecting flags. Implies module handling for the target.
+      header must declare it too), and it must be listed **as that source spells
+      it**: a compiler keys a unit by the text the import resolved through, so
+      `import "../header.h";` from a subdirectory is a spelling of its own.
+      Declaring several spellings of one file is free -- they share its BMI
+      rather than each building one. An *undeclared* spelling is an error on GCC
+      and cannot be healed, because finding it would take the scan that the
+      missing BMI is what breaks; Clang matches any spelling of a declared unit.
+
+      **Ordering:** the units are built before all of the target's scans and
+      compiles, but they are *not* ordered relative to each other, so a header
+      unit that itself `import`s another header unit is not supported (list
+      header units that only `#include` their prerequisites, which are absorbed
+      textually). Implies module handling for the target.
 
       Currently supported with GCC (>= 14), MSVC (>= VS 2022 17.2, cl 19.32)
       and Clang (needs a P1689-capable `clang-scan-deps`, the same requirement

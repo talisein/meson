@@ -832,6 +832,13 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # older than that.
         return True
 
+    def supports_bmi_class_header_units(self) -> bool:
+        # The mapper names a header unit's CMI too, so it can stand at a
+        # per-class path with each consumer sent to its own class's, and no BMI
+        # path on any command line. The backend computes what GCC calls a unit
+        # (the header as resolved on the include path) to write those lines.
+        return True
+
     def supports_pch_with_cpp_modules(self) -> bool:
         # Mutually exclusive: any -fmodules compile rejects a .gch built
         # without -fmodules as invalid, and building the .gch with -fmodules

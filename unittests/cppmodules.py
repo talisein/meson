@@ -473,6 +473,70 @@ class CppModulesTestMixin:
                     digests.update(pattern.findall(line))
         return digests
 
+    def header_unit_bmis(self, basename: str) -> T.Set[str]:
+        """Every header-unit BMI the build declares for `basename`, from the
+        outputs of the header-unit rule. Unlike header_unit_digests this sees
+        GCC's too, whose first-declaring class builds its BMI at the compiler's
+        default-named path rather than under meson-private/header-units."""
+        outputs: T.Set[str] = set()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if not line.startswith('build ') or 'HEADER_UNIT' not in line:
+                    continue
+                out = line[len('build '):].partition(': ')[0].strip()
+                if basename in os.path.basename(out):
+                    outputs.add(out.replace('\\', '/'))
+        return outputs
+
+    def assert_alias_mapper_key(self, target: str, obj: str, alias: bool = True) -> str:
+        """The BMI a GCC TU resolves header.hpp to, checking its mapper key is the
+        spelling that TU resolved -- textually, '..' and all, since that is what
+        the compiler keys a unit by. Returns the BMI it names."""
+        path = os.path.join(self.builddir, f'{target}.p', f'{obj}.o.mapper')
+        with open(path, encoding='utf-8') as f:
+            lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
+        self.assertEqual(len(lines), 1, f'{path}: expected one header.hpp line, got {lines}')
+        key, _, bmi = lines[0].partition(' ')
+        self.assertRegex(key, r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$'
+                         if alias else r'^\./meson-private/imap/[0-9a-f]+/header\.hpp$')
+        self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
+                        f'mapper names {bmi}, which nothing produced')
+        return bmi
+
+    def assert_header_unit_alias_link(self, canonical_bmi: str) -> None:
+        """The alias spelling's default-named path holds the canonical BMI itself,
+        not a second build of it. Scans carry no mapper, so a TU importing through
+        the alias reaches the unit only there."""
+        outs = []
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build ') and 'cpp_header_unit_alias' in line:
+                    outs.append(line[len('build '):].partition(': ')[0].strip())
+        self.assertEqual(len(outs), 1, f'expected one alias link edge, got {outs}')
+        alias_path = os.path.join(self.builddir, outs[0])
+        self.assertTrue(os.path.isfile(alias_path), f'alias link {outs[0]} was not built')
+        self.assertTrue(
+            os.path.samefile(alias_path, os.path.join(self.builddir, canonical_bmi)),
+            f'{outs[0]} must be the canonical BMI, not a second copy of it')
+
+    def header_unit_bmis_of(self, target: str, basename: str) -> T.Set[str]:
+        """The header-unit BMIs `target`'s own compiles resolve for `basename`.
+        Read from its per-TU module mappers on GCC, where no unit BMI path
+        reaches a command line; from the compile edge's flags elsewhere."""
+        if self.host_cpp_compiler().get_id() != 'gcc':
+            return self.header_unit_digests(basename, edges=f'{target}.p/')
+        bmis: T.Set[str] = set()
+        tdir = os.path.join(self.builddir, f'{target}.p')
+        for entry in sorted(os.listdir(tdir)):
+            if not entry.endswith('.mapper'):
+                continue
+            with open(os.path.join(tdir, entry), encoding='utf-8') as f:
+                for line in f:
+                    _, _, bmi = line.strip().partition(' ')
+                    if bmi and basename in os.path.basename(bmi):
+                        bmis.add(bmi.replace('\\', '/'))
+        return bmis
+
     def bmi_class_dirs(self) -> T.List[str]:
         """The BMI class subdirectories of the shared module cache, sorted."""
         cpp = self.host_cpp_compiler()
@@ -504,7 +568,7 @@ class CppModulesTestMixin:
         provider's BMI, not spawn a redundant variant."""
         cpp = self.host_cpp_compiler()
         self.build_and_check_modules(testdir_name, extra_args=extra_args,
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         bmi = module_name.replace(':', '-') + cpp.get_module_bmi_suffix()
         cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
         class_dirs = self.bmi_class_dirs()
@@ -549,7 +613,7 @@ class CppModulesTestMixin:
         cpp = self.host_cpp_compiler()
         suffix = cpp.get_module_bmi_suffix()
         self.build_and_check_modules(testdir_name, extra_args=extra_args,
-                                     setup_not_contains=['divergent BMI-affecting flags'])
+                                     setup_not_contains=['divergent dialects'])
         self.assert_std_link_edges(progs, ())
         for t in progs:
             self.assertEqual(self.count_on_link_line(t, 'lib__meson_cxx_std.a'), 1,
@@ -576,15 +640,22 @@ class CppModulesTestMixin:
         self.assert_variants_emit_no_objects()
 
     def check_gcc_module_mappers(self) -> None:
-        """GCC builds resolve modules through per-TU mappers, whatever their
-        class topology: every module compile edge names its own object's
-        mapper (a static path whose scan-derived contents the collate
-        writes), scan edges carry none -- a scan resolves no named module --
-        and the mapper files exist on disk."""
+        """GCC builds resolve modules through mappers, whatever their class
+        topology: every module compile edge names its own object's mapper (a
+        static path whose scan-derived contents the collate writes), every
+        header-unit edge names one written at setup, the mapper files exist on
+        disk -- and scan edges carry no mapper at all.
+
+        That last one is load-bearing. A mapper file switches off GCC's default
+        naming outright, named modules included, and their names come from the
+        very scan the mapper would serve: a scan carrying one dies on the first
+        `import some_module;`. It is why a unit's first-declaring class must keep
+        the default-named BMI path, which is all a scan can reach."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             lines = f.read().splitlines()
         rule = out = ''
         compile_edges = 0
+        unit_edges = 0
         for line in lines:
             if line.startswith('build '):
                 head, _, tail = line.partition(': ')
@@ -592,12 +663,16 @@ class CppModulesTestMixin:
                 rule = tail.split(' ')[0]
                 continue
             s = line.strip()
-            if not s.startswith('ARGS ='):
-                continue
-            if 'MODULE_SCAN' in rule:
+            if 'MODULE_SCAN' in rule and s.startswith(('ARGS =', 'HUMAPPER =')):
                 self.assertNotIn('-fmodule-mapper', s,
                                  f'scan edge for {out} must not carry a mapper')
-            elif rule.startswith('cpp_COMPILER'):
+            elif 'HEADER_UNIT' in rule and s.startswith('HUMAPPER ='):
+                unit_edges += 1
+                mapper = s.partition('-fmodule-mapper=')[2].strip()
+                self.assertTrue(mapper, f'header-unit edge for {out} must carry a mapper')
+                self.assertTrue(os.path.isfile(os.path.join(self.builddir, mapper)),
+                                f'missing header-unit mapper file {mapper}')
+            elif rule.startswith('cpp_COMPILER') and s.startswith('ARGS ='):
                 compile_edges += 1
                 # The mapper path is spelled OS-natively in ARGS (backslashes on
                 # Windows) while the build-target 'out' uses forward slashes;

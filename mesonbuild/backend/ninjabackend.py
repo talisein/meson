@@ -36,6 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
+from ..scripts.depaccumulate import flat_cmi_path
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 
@@ -621,11 +622,13 @@ class NinjaBackend(backends.Backend):
         # - https://github.com/mesonbuild/meson/issues/9479#issuecomment-953485040
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
-        # (unit key, consumer id) pairs already warned about for divergent
-        # BMI-affecting flags on a shared header unit, so each divergence is
-        # reported once; the class that built each unit is recorded at edge
-        # creation.
+        # (unit key, consumer id) pairs already warned about for a header unit
+        # shared across dialects, so each divergence is reported once; the class
+        # that first declared each unit is recorded at edge creation.
         self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
+        # (mode, spelling) -> the BMI class and target that first declared it.
+        # On GCC that class is also the unit's designated one, whose BMI stands
+        # at the flat default-named path (see _provision_header_unit_edges).
         self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
         # Spellings already warned about for a header unit GCC's module mapper
         # cannot name. Keyed by the unit, not the importer: the unit is what is
@@ -634,15 +637,25 @@ class NinjaBackend(backends.Backend):
         # Real directory -> space-free build-relative alias (None if the
         # platform could not make one), for GCC header-unit naming.
         self._dir_aliases: T.Dict[str, T.Optional[str]] = {}
+        # Where the compiler resolves a header unit to, memoised: the probe
+        # spawns the compiler, and a unit is declared by many targets.
+        self._probed_header_units: T.Dict[T.Tuple[T.Any, ...], T.Optional[str]] = {}
         # Header units: global dedup of unit build edges, keyed by
-        # (mode, spelling) -- plus compile args on MSVC -> the edge output (a
-        # stamp for GCC, the real .ifc for
-        # MSVC); plus per-target caches of those outputs (ordered before the
-        # target's scans/compiles) and, for MSVC, the /headerUnit flags its
-        # compiles need to name each unit's BMI.
+        # (mode, spelling) -- plus compile args on MSVC, plus the declarer's BMI
+        # class where the compiler builds units per class -> the edge output (the
+        # real BMI on every compiler). Plus per-target caches of those outputs
+        # (ordered before the target's scans/compiles), of the flags MSVC and
+        # clang compiles need to name each unit's BMI, and of the (resolved name,
+        # BMI) pairs a GCC target's mapper lines are written from.
         self._header_units: T.Dict[str, str] = {}
         self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
+        self._target_header_unit_bmis: T.Dict[str, T.List[T.Tuple[str, str]]] = {}
+        # (mode, resolved file) -> the spelling of it that builds the BMI, so
+        # declared spellings of one file share it; and the alias spellings'
+        # default-named paths already linked to a group's BMI.
+        self._header_unit_group: T.Dict[T.Tuple[str, str], str] = {}
+        self._header_unit_alias_links: T.Dict[str, str] = {}
         # BMI class registry, frozen by _compute_bmi_class_registry before any
         # target is generated; only populated for compilers that
         # supports_bmi_classes(). Variants are memoized per (provider id,
@@ -1609,9 +1622,11 @@ class NinjaBackend(backends.Backend):
         omitted there). A GCC target's collate also writes the per-TU module
         mappers (--mapper-suffix, in lockstep with the compile edges'
         get_module_mapper_args paths) its BMI lookups go through. A mapper
-        disables GCC's default module->CMI naming outright, so it must also
-        name the header units, which stay in the unkeyed cache the mapper-less
-        scan finds them in (--flat-bmi-dir); the two flags are inseparable.
+        disables GCC's default module->CMI naming outright, so it must also name
+        every header unit the TU imports: the ones built for this target's own
+        BMI class outright (--header-unit-bmi), and the rest -- those left at the
+        default-named path their first-declaring class builds them at -- by
+        reproducing that naming (--flat-bmi-dir).
         """
         depargs: T.List[str] = []
         for pm in dep_provmaps:
@@ -1627,10 +1642,26 @@ class NinjaBackend(backends.Backend):
         if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper',
                         '--flat-bmi-dir', cpp.get_module_cache_dir()]
+            self.provision_header_units(target, cpp)
+            depargs += self._header_unit_bmi_args(
+                cpp, self._target_header_unit_bmis.get(target.get_id(), []))
         if cpp.get_id() == 'msvc':
             for hu in target.cpp_header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
+        return depargs
+
+    def _header_unit_bmi_args(self, cpp: Compiler,
+                              bmis: T.List[T.Tuple[str, str]]) -> T.List[str]:
+        # Only the units this class built its own BMI of. One left at the
+        # default-named path is what --flat-bmi-dir already reconstructs, so a
+        # single-class build emits none of these.
+        flat_dir = cpp.get_module_cache_dir()
+        suffix = cpp.get_module_bmi_suffix()
+        depargs: T.List[str] = []
+        for name, bmi in bmis:
+            if bmi != flat_cmi_path(name, flat_dir, suffix):
+                depargs += ['--header-unit-bmi', name, bmi]
         return depargs
 
     def _module_provmap_for(self, consumer: build.BuildTarget,
@@ -1687,13 +1718,11 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
-        # An interface's `import <hdr>;` must resolve this class's unit BMI
-        # where the compiler builds units per class, reusing a class-mate
-        # target's edges when they exist; on GCC units are deduped build-wide
-        # (the subdir lookup yields None) and the variant shares the flat
-        # ones. Built from the same pre-module args as a target's own units.
-        # `args` keeps growing below, so the unit edges get their own copy.
-        hu_outputs, hu_args = self._provision_header_unit_edges(
+        # An interface's `import <hdr>;` must resolve this class's unit BMI,
+        # reusing a class-mate target's edges when they exist. Built from the
+        # same pre-module args as a target's own units. `args` keeps growing
+        # below, so the unit edges get their own copy.
+        hu_outputs, hu_args, hu_bmis = self._provision_header_unit_edges(
             cpp, provider.cpp_header_units, args.copy(), class_key,
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
             vid, None)
@@ -1782,6 +1811,7 @@ class NinjaBackend(backends.Backend):
         if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper',
                         '--flat-bmi-dir', cpp.get_module_cache_dir()]
+            depargs += self._header_unit_bmi_args(cpp, hu_bmis)
         for rec in recs:
             depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
         if cpp.get_id() == 'msvc':
@@ -1821,38 +1851,40 @@ class NinjaBackend(backends.Backend):
     @staticmethod
     def _render_bmi_divergence(name_a: str, key_a: T.Tuple[str, ...],
                                name_b: str, key_b: T.Tuple[str, ...]) -> str:
-        """The "<flags> only in <target>" clauses plus the tailored -pthread
-        advice, for the header-unit divergence warning. -pthread gets its own
-        fix because dependency('threads') injects it per target; the
-        synthesized std target's POSIX-thread setting follows the dependency
-        spelling (in lockstep with _cpp_std_module_dependency)."""
+        """The "<flags> only in <target>" clauses of the header-unit divergence
+        warning."""
         adiff = sorted((Counter(key_a) - Counter(key_b)).keys())
         bdiff = sorted((Counter(key_b) - Counter(key_a)).keys())
         parts = [', '.join(repr(f) for f in diff) + f' only in {n!r}'
                  for diff, n in ((adiff, name_a), (bdiff, name_b)) if diff]
-        message = '; '.join(parts) + '.'
-        if '-pthread' in adiff or '-pthread' in bdiff:
-            wo = name_b if '-pthread' in adiff else name_a
-            if wo == '__meson_cxx_std':
-                fix = "use the threaded dependency('std') instead of dependency('std-nothreads')"
-            else:
-                fix = f"add dependency('threads') to {wo!r}"
-            message += f' For -pthread, {fix}.'
-        return message
+        return '; '.join(parts) + '.'
+
+    # What GCC records as a CMI's dialect and refuses to read it back under, cut
+    # down to the flags a Meson option sets (cpp_std, cpp_eh, cpp_rtti). Its full
+    # set is wider and moves between releases; a flag reaching it through raw
+    # cpp_args is left to GCC's own scan error.
+    _GCC_DIALECT_FLAGS = frozenset({'-fno-exceptions', '-fno-rtti'})
+
+    @classmethod
+    def _dialect_of(cls, class_key: T.Tuple[str, ...]) -> T.Tuple[str, ...]:
+        return tuple(sorted(f for f in class_key
+                            if f.startswith('-std=') or f in cls._GCC_DIALECT_FLAGS))
 
     def warn_on_header_unit_divergence(self, target: build.BuildTarget,
                                        class_key: T.Tuple[str, ...],
                                        unit_key: str, spelling: str) -> None:
-        """Warn when a target reuses a header unit's BMI that was built in a
-        different BMI equivalence class, once per (unit, consumer). Only
-        reachable for compilers without supports_bmi_class_header_units()
-        (GCC): their units are deduped build-wide and built with the first
-        declarer's flags (see provision_header_units), so the target silently
-        shares a gcm.cache BMI baked under someone else's flags. This only
-        reports the hazard; nothing about the build changes.
+        """Warn when targets declaring one header unit disagree on the dialect,
+        once per (unit, consumer).
+
+        Divergent classes otherwise each get their own BMI of the unit. Not this
+        one: GCC checks the dialect when it *reads* a CMI, the P1689 scan
+        included, and a scan can only reach the unit at its default-named path --
+        the first-declaring class's. No per-class BMI can rescue it. Warned about
+        here because GCC's own error names a CMI path and a language level, not
+        the two targets that disagree.
         """
         owner_key, owner_name = self._header_unit_class[unit_key]
-        if class_key == owner_key:
+        if self._dialect_of(class_key) == self._dialect_of(owner_key):
             return
         pair = (unit_key, target.get_id())
         if pair in self._warned_header_unit_divergence:
@@ -1860,10 +1892,13 @@ class NinjaBackend(backends.Backend):
         self._warned_header_unit_divergence.add(pair)
         mlog.warning(
             f'Targets {target.name!r} and {owner_name!r} import the same C++ '
-            f'header unit {spelling!r} but compile with divergent '
-            'BMI-affecting flags: '
-            + self._render_bmi_divergence(target.name, class_key, owner_name, owner_key)
-            + " The unit's BMI is built once, with the flags of the first declarer.")
+            f'header unit {spelling!r} but compile with divergent dialects: '
+            + self._render_bmi_divergence(target.name, self._dialect_of(class_key),
+                                          owner_name, self._dialect_of(owner_key))
+            + ' GCC records the dialect in the header unit and rejects it under '
+            'any other, so this build will fail when it scans. Give the targets '
+            'the same cpp_std, cpp_eh and cpp_rtti, or stop sharing the unit '
+            'between them.')
 
     @staticmethod
     def _has_space(s: str) -> bool:
@@ -2087,6 +2122,66 @@ class NinjaBackend(backends.Backend):
                 return os.path.join(d, spelling)
         return None
 
+    def _header_unit_gcc_name(self, compiler: Compiler,
+                              args: T.Union['CompilerArgs', T.List[str]],
+                              mode: str, spelling: str) -> T.Optional[str]:
+        """The name GCC gives a header unit: the key an importer looks it up by,
+        and the stem of the CMI path it writes by default.
+
+        It is the header as the command line spells it -- './' plus the -I entry
+        plus the spelling, or the path outright when that entry (or, for a system
+        header, the compiler's own search path) is absolute. The text is kept as
+        found: '..' is not collapsed, so a header reached two ways has two names.
+        None when the header resolves nowhere.
+        """
+        key = self._header_unit_mapper_key(args, spelling) if mode == 'user' else None
+        if key is None:
+            # Off the -I path: a system header, or a quote-form spelling falling
+            # through to the compiler's own search path.
+            key = self._probe_header_unit_path(compiler, args, mode, spelling)
+        if key is None:
+            return None
+        is_abs = os.path.isabs(key)
+        key = key.replace('\\', '/')
+        if is_abs:
+            return key
+        # One './', even when the -I entry is '.': GCC names a hit in the build
+        # directory './hdr.h', not '././hdr.h'.
+        while key.startswith('./'):
+            key = key[2:]
+        return './' + key
+
+    def _probe_header_unit_path(self, compiler: Compiler,
+                                args: T.Union['CompilerArgs', T.List[str]],
+                                mode: str, spelling: str) -> T.Optional[str]:
+        """Ask the compiler where a header resolves: -H reports each header it
+        opens, and the first '. ' line is the one asked for, spelled as the lookup
+        found it. Memoised on the args, which an -isystem entry can move.
+        """
+        arglist = list(args)
+        cache_key = (compiler.get_id(), tuple(compiler.get_exelist()), tuple(arglist), mode, spelling)
+        if cache_key in self._probed_header_units:
+            return self._probed_header_units[cache_key]
+        include = f'<{spelling}>' if mode == 'system' else f'"{spelling}"'
+        cmd = compiler.get_exelist() + arglist + ['-E', '-H', '-x', 'c++', '-']
+        found: T.Optional[str] = None
+        try:
+            # From the build directory: the -I entries are relative to it, and so
+            # is the answer. stderr is read whatever the exit status, since -H
+            # prints what it opened before reporting any error inside it.
+            _, _, stderr = mesonlib.Popen_safe(cmd, write=f'#include {include}\n',
+                                               cwd=self.environment.get_build_dir())
+        except OSError:
+            stderr = ''
+        for line in stderr.splitlines():
+            if line.startswith('. '):
+                found = line[2:].strip()
+                break
+        if found is None:
+            mlog.debug(f'Could not probe the path of header unit {spelling!r}.')
+        self._probed_header_units[cache_key] = found
+        return found
+
     def warn_on_unmappable_header_units(self, target: build.BuildTarget,
                                         args: T.Union['CompilerArgs', T.List[str]]) -> None:
         """Warn when a GCC module mapper cannot name a declared header unit.
@@ -2094,15 +2189,18 @@ class NinjaBackend(backends.Backend):
         A unit's mapper key is its resolved header path, and a mapper file's
         key ends at the first space or tab with no quoting or escape form, so a
         header under a path containing whitespace is unnameable and the import
-        fails at compile with 'no such module'. Such a header is normally
-        reached through a space-free alias (_respell_dir), which leaves no
-        whitespace in the key at all; this fires only where that alias was
-        needed and the platform could not make one. Reported once per unit --
-        every target importing it fails the same way.
+        fails at compile. Such a header is normally reached through a space-free
+        alias (_respell_dir), which leaves no whitespace in the key at all; this
+        fires only where that alias was needed and the platform could not make
+        one, or where the path is the compiler's own and no -I of ours can
+        respell it. Reported once per unit -- every target importing it fails the
+        same way, and the unit itself keeps the one build-wide BMI it can still
+        be given.
         """
+        compiler = target.compilers['cpp']
         for hu in target.cpp_header_units:
-            _, spelling = self._header_unit_spelling(hu, target.compilers['cpp'])
-            key = self._header_unit_mapper_key(args, spelling)
+            mode, spelling = self._header_unit_spelling(hu, compiler)
+            key = self._header_unit_gcc_name(compiler, args, mode, spelling)
             if key is None or not self._has_space(key):
                 continue
             if spelling in self._warned_unmappable_header_units:
@@ -3854,16 +3952,15 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                           '$SPELLING', '-o', '$out']
             self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
             return
-        # GCC writes the BMI to a mangled gcm.cache path we don't track, so the
-        # edge's output is only a stamp and consumers find the BMI by directory
-        # lookup. The compile runs through the exe wrapper so that same process
-        # refreshes the stamp: Ninja on Windows runs a command without a shell,
-        # so a '&&'-chained stamp step would not run. -fmodule-only skips the
-        # object; $HULANG is c++-user-header or c++-system-header.
+        # GCC takes a header unit's CMI path from its mapper, so $HUMAPPER -- one
+        # setup-written line naming the resolved header and this edge's $out --
+        # is what lets the edge declare the real .gcm. It is empty for a unit no
+        # mapper key can name (whitespace in the path), which falls back to
+        # default naming; $out is that same path, so the output appears either
+        # way. -fmodule-only skips the object; $HULANG is c++-{user,system}-header.
         modargs = NinjaCommandArg.list(compiler.get_module_compile_args(), Quoting.none)
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
-        command = self.environment.get_build_command() + ['--internal', 'exe', '--stamp', '$out', '--']
-        args = compiler.get_exelist() + ['$ARGS'] + modargs + depargs + \
+        args = ['$ARGS'] + modargs + ['$HUMAPPER'] + depargs + \
             ['-fmodule-only', '-x', '$HULANG', '-c', '$SPELLING']
         self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
 
@@ -3943,24 +4040,24 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         order-only deps to the target's scans and implicit deps to its compiles
         so the scanner is never cold (GCC) and BMIs exist at compile.
 
-        GCC writes the BMI to an untracked gcm.cache path, so the edge output is
-        a stamp and consumers resolve by directory lookup. cl and clang write
-        the BMI to the path we pick (the real output) and consumers must name
-        it; those per-target /headerUnit (-fmodule-file) flags are recorded for
-        the compile site -- and, on clang, for the scan site too.
+        Every compiler writes the BMI to the path we pick. cl and clang make
+        consumers name it, and those per-target /headerUnit (-fmodule-file) flags
+        are recorded for the compile site -- and, on clang, for the scan site too.
+        GCC resolves it through the module mapper instead, so no unit BMI path
+        ever reaches a GCC command line.
 
         Edges are deduped by (mode, spelling) plus, for compilers with
-        supports_bmi_class_header_units(), the declarer's BMI class: each
-        class builds its own BMI (a unit is interface-only, so per-class
-        copies are purely additive) and every consumer's explicit-path flags
-        name its own class's. On a single-class machine the key carries no
-        class part, keeping paths and edges byte-identical to a pre-class
-        build. GCC units stay deduped build-wide even under the module
-        mapper: a unit's CMI name is its resolved header path, known only
-        when the compiler runs, so the unit build edge cannot be handed a
-        generate-time per-class mapping. The first declarer's flags build the
-        one flat-cache BMI and a declarer in a divergent class only gets
-        warn_on_header_unit_divergence.
+        supports_bmi_class_header_units(), the declarer's BMI class: each class
+        builds its own BMI (a unit is interface-only, so per-class copies are
+        purely additive) and each consumer resolves its own class's. On a
+        single-class machine the key carries no class part, keeping paths and
+        edges byte-identical to a pre-class build.
+
+        On GCC the first-declaring class keeps the default-named CMI path, which
+        is the only place a mapper-less scan can find a unit
+        (_provision_header_unit_edges). The returned outputs therefore carry that
+        BMI as well as the target's own class's, so a target in another class
+        still orders its scans behind the BMI they read.
         """
         cid = compiler.get_id()
         if cid not in ('gcc', 'msvc', 'clang'):
@@ -3970,6 +4067,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return self._target_header_unit_outputs[tid]
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
+        bmis: T.List[T.Tuple[str, str]] = []
         if target.cpp_header_units:
             # Build each unit with the target's full compile args (base +
             # per-target), the same a consumer sees, so the BMI freezes the same
@@ -3983,11 +4081,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # a successful respelling leaves no whitespace in the resolved
                 # path, which is exactly what the warning tests for.
                 self.warn_on_unmappable_header_units(target, args)
-            outputs, consumer_args = self._provision_header_unit_edges(
+            outputs, consumer_args, bmis = self._provision_header_unit_edges(
                 compiler, target.cpp_header_units, args, class_key, class_subdir,
                 target.name, target)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
+        self._target_header_unit_bmis[tid] = bmis
         return outputs
 
     def _provision_header_unit_edges(self, compiler: Compiler,
@@ -3997,14 +4096,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                      class_subdir: T.Optional[str],
                                      declarer: str,
                                      warn_target: T.Optional[build.BuildTarget]
-                                     ) -> T.Tuple[T.List[str], T.List[str]]:
+                                     ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
         """The edge-emitting half of provision_header_units, also used by
         BMI-only module variants to build their class's units (with no
         warn_target: reuse there is same-class by construction). Returns
-        (unit outputs, per-unit consumer args).
+        (unit outputs, per-unit consumer args, per-unit (GCC name, BMI) pairs).
         """
         if not header_units:
-            return [], []
+            return [], [], []
         cid = compiler.get_id()
         if cid == 'clang':
             # Registered lazily (idempotent), like clang's scan rule: only
@@ -4012,41 +4111,185 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.generate_cpp_header_unit_rule(compiler)
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
         is_msvc = cid == 'msvc'
-        suffix = '.stamp' if cid == 'gcc' else compiler.get_module_bmi_suffix()
+        is_gcc = cid == 'gcc'
+        suffix = compiler.get_module_bmi_suffix()
+        flat_dir = compiler.get_module_cache_dir()
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
+        seen_consumer_args: T.List[T.List[str]] = []
+        bmis: T.List[T.Tuple[str, str]] = []
         for hu in header_units:
             mode, spelling = self._header_unit_spelling(hu, compiler)
-            # One BMI per (mode, spelling) and, when classes are in play, per
-            # class; within a key the first edge's args build the unit for
-            # every consumer (see the provision_header_units docstring).
-            key = f'{mode}:{spelling}'
-            if class_subdir is not None:
-                key += f':{class_subdir}'
+            # One BMI per file and, when classes are in play, per class; the
+            # canonical spelling of the group builds it and the others are extra
+            # names for it (see the provision_header_units docstring). Within a
+            # key the first edge's args build the unit for every consumer.
+            canon = self._canonical_header_unit(args, mode, spelling)
+            base = f'{mode}:{canon}'
+            key = base if class_subdir is None else f'{base}:{class_subdir}'
+            name: T.Optional[str] = None
+            mappable = flat = False
+            if is_gcc:
+                name = self._header_unit_gcc_name(compiler, args, mode, canon)
+                owner_key, _ = self._header_unit_class.setdefault(base, (class_key, declarer))
+                if warn_target is not None:
+                    self.warn_on_header_unit_divergence(warn_target, class_key, base, canon)
+                # A mapper key holds no whitespace, and an unresolved header has
+                # no key at all; either way the unit keeps default naming and
+                # takes no mapper (warn_on_unmappable_header_units reports it).
+                mappable = name is not None and not self._has_space(name)
+                # Scan edges carry no mapper, so a scan of any class reaches a
+                # unit only at its default-named path. The class that declared it
+                # first therefore builds its BMI there -- not a copy of one -- and
+                # only the other classes get a class-keyed path. Those classes
+                # scan against the owner's macros, which can misdirect a scan only
+                # if the unit computes a macro from flag-dependent state and that
+                # macro gates an import; their compiles resolve their own BMI
+                # regardless.
+                flat = not mappable or class_key == owner_key
+                if flat:
+                    key = base
             output = self._header_units.get(key)
             if output is None:
-                digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
-                safe = os.path.basename(spelling) or 'header'
-                # Forward slashes so the path is safe in the ninja file on
-                # Windows (cl accepts either).
-                output = f'meson-private/header-units/{safe}.{digest}{suffix}'
+                mapper: T.Optional[str] = None
+                if is_gcc and flat and name is not None:
+                    output = flat_cmi_path(name, flat_dir, suffix)
+                else:
+                    output = self._class_header_unit_path(key, canon, suffix)
+                if mappable:
+                    # Under meson-private even when the BMI is not: written at
+                    # setup and never rebuilt, so it must not sit in a cache
+                    # directory the compiler owns and a user may clear.
+                    mapper = self._class_header_unit_path(key, canon, '.mapper')
+                    self._write_header_unit_mapper(mapper, name, output)
                 elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
                 elem.add_item('ARGS', args)
-                elem.add_item('SPELLING', spelling)
+                elem.add_item('SPELLING', canon)
                 if is_msvc:
                     elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
                 else:
                     elem.add_item('HULANG', f'c++-{mode}-header')
                     elem.add_item('DEPFILE', output + '.d')
+                if is_gcc:
+                    # A setup-written file is a fine ninja input: what ninja
+                    # rejects is an input that no rule makes and no file provides.
+                    elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
+                    if mapper is not None:
+                        elem.add_dep(mapper)
                 self.add_build(elem)
                 self._header_units[key] = output
-                self._header_unit_class[key] = (class_key, declarer)
-            elif warn_target is not None:
-                self.warn_on_header_unit_divergence(warn_target, class_key, key, spelling)
             outputs.append(output)
-            # GCC consumers resolve by directory lookup (returns []).
-            consumer_args += compiler.get_header_unit_consumer_args(mode, spelling, output)
-        return outputs, consumer_args
+            if is_gcc:
+                # This target's scans read the unit at the default-named path
+                # whatever class it is in, so order that BMI before them too.
+                flat_output = self._header_units[base]
+                if flat_output not in outputs:
+                    outputs.append(flat_output)
+                # Every declared spelling of the group names the class's one BMI.
+                alias = spelling != canon
+                sname = self._header_unit_gcc_name(compiler, args, mode, spelling) \
+                    if alias else name
+                if sname is not None:
+                    bmis.append((sname, output))
+                if alias and mappable and sname is not None and not self._has_space(sname):
+                    link = self._alias_header_unit_link(sname, flat_output, flat_dir, suffix)
+                    if link not in outputs:
+                        outputs.append(link)
+            # Returns [] on GCC: its consumers resolve through the mapper. Whole
+            # lists, not flags, are deduped: clang names only the BMI, so two
+            # spellings of one unit repeat a flag it must see once, while cl
+            # names the spelling too and needs a pair for each.
+            cargs = compiler.get_header_unit_consumer_args(mode, spelling, output)
+            if cargs and cargs not in seen_consumer_args:
+                seen_consumer_args.append(cargs)
+                consumer_args += cargs
+        return outputs, consumer_args, bmis
+
+    def _canonical_header_unit(self, args: T.Union['CompilerArgs', T.List[str]],
+                               mode: str, spelling: str) -> str:
+        """The spelling that builds the BMI for whatever file `spelling` names.
+
+        Declared spellings of one file share one BMI; the rest become extra names
+        for it. The group is build-wide, not per-target: a unit's default-named
+        CMI path is a pure function of its resolved name, so each name has to have
+        exactly one producer across the build, and two targets that disagreed on
+        which spelling was canonical would emit two.
+        """
+        ident = self._header_unit_identity(args, mode, spelling)
+        if ident is None:
+            return spelling
+        return self._header_unit_group.setdefault((mode, ident), spelling)
+
+    def _header_unit_identity(self, args: T.Union['CompilerArgs', T.List[str]],
+                              mode: str, spelling: str) -> T.Optional[str]:
+        """Which file a declared header unit names, for grouping its spellings.
+
+        The only place a header-unit path is ever resolved: mapper keys, CMI path
+        mangling and every emitted spelling stay textual, because the compiler
+        names a unit by the text it was reached through. Resolving one of those
+        would both lose the alias GCC is keying on and collapse a space-free
+        include alias back into the spaced path it stands in for.
+
+        None for a system unit -- it is named from the compiler's own search path,
+        and a file reachable as both a user and a system unit stays two units.
+        """
+        if mode != 'user':
+            return None
+        key = self._header_unit_mapper_key(args, spelling)
+        if key is None:
+            return None
+        return os.path.realpath(os.path.join(self.environment.get_build_dir(), key))
+
+    def _alias_header_unit_link(self, alias_name: str, canonical_bmi: str,
+                                flat_dir: str, suffix: str) -> str:
+        """Put the group's BMI at an alias spelling's default-named path too.
+
+        Scan edges carry no mapper, so a TU importing through an alias reaches the
+        unit only at the path that spelling's own name mangles to. A compile
+        resolves it through the mapper and needs no such file, but the scan that
+        comes first does -- so the BMI is linked there rather than built twice.
+        """
+        output = flat_cmi_path(alias_name, flat_dir, suffix)
+        if output not in self._header_unit_alias_links:
+            rulename = 'cpp_header_unit_alias'
+            if not self.ninja.has_rule(rulename):
+                # Lazily, so a build with no aliased unit keeps the rule set it
+                # had. --link hard-links where it can and copies where it cannot.
+                self.add_rule(NinjaRule(
+                    rulename,
+                    self.environment.get_build_command() + ['--internal', 'copy', '--link'],
+                    ['$in', '$out'], 'Aliasing C++ header unit $out'))
+            self.add_build(NinjaBuildElement(self.all_outputs, output, rulename,
+                                             canonical_bmi))
+            self._header_unit_alias_links[output] = canonical_bmi
+        return output
+
+    @staticmethod
+    def _class_header_unit_path(key: str, spelling: str, suffix: str) -> str:
+        # Forward slashes so the path is safe in the ninja file on Windows (cl
+        # accepts either). The key carries the class, so one spelling's BMIs in
+        # different classes cannot collide.
+        digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
+        safe = os.path.basename(spelling) or 'header'
+        return f'meson-private/header-units/{safe}.{digest}{suffix}'
+
+    def _write_header_unit_mapper(self, path: str, name: str, output: str) -> None:
+        # The unit edge's whole mapper: one line sending the header GCC is about
+        # to compile to the BMI path the edge declares. Copy-if-different, like
+        # the collate's per-TU mappers: an unchanged mapper must not rebuild its
+        # unit. newline='' because GCC's mapper parser reads a key to the newline
+        # without stripping a carriage return, so a CRLF would break the lookup.
+        full = os.path.join(self.environment.get_build_dir(), path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        line = f'{name} {output}\n'
+        try:
+            with open(full, encoding='utf-8', newline='') as f:
+                if f.read() == line:
+                    return
+        except OSError:
+            pass
+        with open(full, 'w', encoding='utf-8', newline='') as f:
+            f.write(line)
 
     def generate_compile_rules(self) -> None:
         for for_machine in MachineChoice:

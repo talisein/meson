@@ -342,35 +342,11 @@ class InternalTests(unittest.TestCase):
         self.assertTrue(should('19.32.31114'))   # newer
         self.assertFalse(should('19.32.31114', vs_ok=False))  # old dev prompt
 
-    def test_meson_exe_stamp(self):
-        # `meson --internal exe --stamp` runs the wrapped command and, on
-        # success, unconditionally refreshes the stamp (creates a missing one,
-        # bumps an existing one's mtime) so a consumer ordered after it rebuilds.
-        # It leaves the stamp alone when the command fails. This is how the GCC
-        # header-unit edge stamps its output without a shell '&&'.
-        import sys
-        from mesonbuild.scripts.meson_exe import run
-        with tempfile.TemporaryDirectory() as d:
-            stamp = os.path.join(d, 'x.stamp')
-            ok = [sys.executable, '-c', 'pass']
-            self.assertEqual(run(['--stamp', stamp, '--'] + ok), 0)
-            self.assertTrue(os.path.exists(stamp))
-            old = os.stat(stamp).st_mtime - 100
-            os.utime(stamp, (old, old))
-            self.assertEqual(run(['--stamp', stamp, '--'] + ok), 0)
-            self.assertGreater(os.stat(stamp).st_mtime, old)
-            # A failed command must not stamp: remove the stamp, run a failing
-            # command, and confirm it was not recreated.
-            os.remove(stamp)
-            fail = [sys.executable, '-c', 'import sys; sys.exit(1)']
-            self.assertNotEqual(run(['--stamp', stamp, '--'] + fail), 0)
-            self.assertFalse(os.path.exists(stamp))
-
-    def test_gcc_header_unit_rule_portable_stamp(self):
-        # The GCC header-unit edge only produces a stamp (the BMI lands in an
-        # untracked gcm.cache path). The compile runs through the exe wrapper,
-        # which refreshes the stamp in the same process: a '&&'-chained stamp
-        # step would not run under Ninja on Windows, which has no shell.
+    def test_gcc_header_unit_rule_portable(self):
+        # The GCC header-unit edge is a plain compiler invocation: $HUMAPPER
+        # sends the CMI to the path the edge declares, so $out is a real BMI and
+        # there is no stamping step to chain on. Ninja on Windows runs a rule's
+        # command with no shell, so a '&&'-chained second step would not run.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         be.ninja = mock.MagicMock()
@@ -390,12 +366,14 @@ class InternalTests(unittest.TestCase):
         be.generate_cpp_header_unit_rule(cpp)
 
         self.assertEqual(len(captured), 1)
-        # Normalize quoting: ninja quotes every token on Windows ("--internal"
-        # "exe") but leaves plain tokens bare on Unix, so match on the tokens
-        # rather than a platform-specific quoting of them.
+        # Normalize quoting: ninja quotes every token on Windows but leaves plain
+        # tokens bare on Unix, so match on the tokens rather than a
+        # platform-specific quoting of them.
         command_str = captured[0].command_str.replace('"', '')
-        self.assertIn('--internal exe --stamp', command_str)
         self.assertNotIn('&&', command_str)
+        self.assertNotIn('--internal', command_str)
+        self.assertIn('$HUMAPPER', command_str)
+        self.assertIn('-fmodule-only', command_str)
 
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both
@@ -431,23 +409,31 @@ class InternalTests(unittest.TestCase):
             be._header_unit_class = {}
             be._target_header_unit_outputs = {}
             be._target_header_unit_consumer_args = {}
+            be._target_header_unit_bmis = {}
+            be._warned_header_unit_divergence = set()
             be._warned_unmappable_header_units = set()
+            be._probed_header_units = {}
             be._dir_aliases = {}
-            # No build tree on disk, so the unmappable-header-unit check
-            # resolves nothing on the include path and stays quiet.
+            # No build tree on disk, so nothing names the unit: neither the
+            # include-path walk nor the probe, which cannot even chdir there. It
+            # keeps GCC's own default naming, and the unmappable-header-unit
+            # check stays quiet.
             be.environment = mock.MagicMock()
             be.environment.get_build_dir.return_value = '/nonexistent'
             be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
             be.add_build = mock.MagicMock()
             cpp = mock.MagicMock()
             cpp.get_id.return_value = cid
+            cpp.get_exelist.return_value = ['c++']
             cpp.get_module_bmi_suffix.return_value = suffix
+            cpp.get_module_cache_dir.return_value = 'gcm.cache'
             cpp.get_header_unit_consumer_args.return_value = []
 
             def provision(tid, args):
                 target = mock.MagicMock()
                 target.get_id.return_value = tid
                 target.cpp_header_units = ['util.h']
+                target.compilers = {'cpp': cpp}
                 be._generate_single_compile = mock.MagicMock(return_value=args)
                 return be.provision_header_units(target, cpp)[0]
 
@@ -455,7 +441,7 @@ class InternalTests(unittest.TestCase):
                     provision('b', ['-DBAR']),
                     provision('c', ['-DFOO']))
 
-        for cid, suffix in (('msvc', '.ifc'), ('gcc', '.stamp')):
+        for cid, suffix in (('msvc', '.ifc'), ('gcc', '.gcm')):
             a, b, c = outputs_for(cid, suffix)
             # Differing args (-DFOO vs -DBAR) never split the BMI: one shared
             # edge per spelling, regardless of compiler.
@@ -728,7 +714,7 @@ class InternalTests(unittest.TestCase):
         # GCC's default header-unit CMI naming under the flat cache: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path
         # is appended as-is under the cache root.
-        from mesonbuild.scripts.depaccumulate import _flat_cmi_path
+        from mesonbuild.scripts.depaccumulate import flat_cmi_path
         cases = {
             './util.h': 'gcm.cache/,/util.h.gcm',
             './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',
@@ -736,7 +722,7 @@ class InternalTests(unittest.TestCase):
             '/usr/include/c++/16/vector': 'gcm.cache/usr/include/c++/16/vector.gcm',
         }
         for name, want in cases.items():
-            self.assertEqual(_flat_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
+            self.assertEqual(flat_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
 
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit

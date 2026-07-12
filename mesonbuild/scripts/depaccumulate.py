@@ -143,7 +143,7 @@ def _source_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
-def _flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
+def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 
     A header unit's logical-name is its resolved header path; GCC stores its
@@ -151,10 +151,13 @@ def _flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     and ',,' and an absolute path appended as-is: './util.h' ->
     'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
     'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
-    'gcm.cache/usr/include/c++/16/vector.gcm'. A per-TU mapper disables the
-    default mapping entirely, so it must reproduce this scheme for the units
-    the TU imports: GCC header units stay in the flat shared cache, which no
-    per-class relocation flag can move.
+    'gcm.cache/usr/include/c++/16/vector.gcm'.
+
+    Scan edges carry no mapper -- one would disable default naming for named
+    modules too, whose names only the scan itself supplies -- so a scan reaches a
+    unit only here. The backend builds the unit's first-declaring class's BMI at
+    this path and names the other classes' outright (--header-unit-bmi); both
+    sides derive the path from this function.
     """
     parts = [',' * len(p) if p in ('.', '..') else p
              for p in logical_name.split('/')]
@@ -358,7 +361,14 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--flat-bmi-dir', default=None,
                         help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
                              'imports resolve in; mappers reproduce the compiler\'s '
-                             'default header-unit CMI naming under it.')
+                             'default header-unit CMI naming under it for any unit not '
+                             'named by --header-unit-bmi.')
+    parser.add_argument('--header-unit-bmi', action='append', default=[], nargs=2,
+                        dest='header_unit_bmis', metavar=('NAME', 'BMI'),
+                        help="A header unit built for this target's own BMI class, as its "
+                             "resolved name (the scan's logical-name) and its BMI path. Two "
+                             "arguments, not one joined pair: a system unit's name is an "
+                             'absolute path, which on Windows carries a colon. Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
     args = parser.parse_args(argv)
 
@@ -368,6 +378,7 @@ def run_p1689(argv: T.List[str]) -> int:
     # effective for MSVC; GCC fails earlier, at the scan itself.
     declared_units = {tuple(hu.split(':', 1)) for hu in args.header_units}
     interface_sources = {_source_key(p) for p in args.interface_sources}
+    class_units = {name: bmi for name, bmi in args.header_unit_bmis}
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -474,8 +485,12 @@ def run_p1689(argv: T.List[str]) -> int:
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
                     if args.flat_bmi_dir is not None:
-                        maplines.append(f'{req["logical-name"]} ' + _flat_cmi_path(
-                            req['logical-name'], args.flat_bmi_dir, args.bmi_suffix))
+                        # A unit built for this TU's own class is named outright;
+                        # one left at the default-named path is reconstructed.
+                        name = req['logical-name']
+                        bmi = class_units.get(name) or flat_cmi_path(
+                            name, args.flat_bmi_dir, args.bmi_suffix)
+                        maplines.append(f'{name} {bmi}')
                     continue
                 name = req['logical-name']
                 modfile = resolvable.get(name)
