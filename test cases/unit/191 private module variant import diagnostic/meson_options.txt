@@ -1,0 +1,7 @@
+option('mode', type: 'combo',
+       choices: ['own', 'dependency'],
+       value: 'own',
+       description: 'Whether the public interface imports its own private module or a linked dependency private module.')
+option('divergent_std', type: 'string',
+       value: 'c++23',
+       description: 'The dialect of the BMI-class-divergent consumer.')

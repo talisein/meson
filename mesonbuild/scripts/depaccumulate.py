@@ -367,6 +367,18 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='A linked dependency\'s own private-modules.json and the name of '
                              'the target that provides it, for the "provided but private" '
                              'diagnostic. Repeatable.')
+    parser.add_argument('--own-private-map', default=None, nargs=2,
+                        dest='own_private_map', metavar=('PATH', 'TARGET'),
+                        help="This rule set's own provider's private-modules.json and its "
+                             'target name. Only ever passed for a BMI-only variant\'s '
+                             "collate: a variant recompiles a public interface under another "
+                             "class's flags, and that interface may legally import the "
+                             "provider's own private module (same target, same "
+                             'unkeyed-by-class private dir) -- the unresolved-require branch '
+                             'below needs this to give a precise diagnostic instead of the '
+                             'generic "provided by no target" one. Its mere presence marks '
+                             'the collate as a variant\'s, so no separate flag is needed to '
+                             'say so. Never repeated -- a variant has exactly one provider.')
     parser.add_argument('--stamp-suffix', default=None,
                         help='BMIs reach the shared cache via harvest edges (Clang\'s '
                              'own pipeline, and BMI-only variants on any compiler): '
@@ -428,6 +440,14 @@ def run_p1689(argv: T.List[str]) -> int:
     # second requirement is the same one the public "provided by more than
     # one target reaching this link" check below enforces, and it applies to
     # private names exactly as much as public ones.
+    #
+    # The loop below raises immediately before ever overwriting an existing
+    # entry with a different owner, in the same iteration as the write --
+    # there is no separate point where a second owner is later consulted and
+    # found stale. That check-before-write ordering is what guarantees at
+    # most one owner per name can ever end up in this dict, so the singular
+    # attribution the diagnostic below gives is structurally guaranteed, not
+    # merely likely.
     private_elsewhere: T.Dict[str, str] = {}
     for path, tname in args.dep_private_maps:
         with open(path, encoding='utf-8') as f:
@@ -441,6 +461,17 @@ def run_p1689(argv: T.List[str]) -> int:
                         'undefined behavior even though each target only claims the name '
                         'privately. Rename one of the two modules.')
                 private_elsewhere[name] = tname
+
+    # This rule set's own provider's private names (a BMI-only variant's
+    # collate only) -- distinct from private_elsewhere, which is populated
+    # purely from *other*, linked targets' private-modules.json files. A
+    # variant's own provider is never one of its own dep_private_maps
+    # entries, so this needs its own map.
+    own_private_names: T.Optional[T.Tuple[T.Set[str], str]] = None
+    if args.own_private_map is not None:
+        own_path, own_tname = args.own_private_map
+        with open(own_path, encoding='utf-8') as f:
+            own_private_names = (set(json.load(f)), own_tname)
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -459,6 +490,10 @@ def run_p1689(argv: T.List[str]) -> int:
     # name -> human-readable provider (object file or dep-map path), used for
     # duplicate diagnostics.
     provider_of: T.Dict[str, str] = {}
+    # name -> a human-readable location (source-path when Clang provides
+    # one, else the object path), used only by the partition-privacy check
+    # below.
+    provide_display: T.Dict[str, str] = {}
     for rule in rules:
         obj = rule['primary-output']
         for prov in rule.get('provides', []):
@@ -470,6 +505,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     f'Module "{name}" is provided by two sources in this target '
                     f'({provider_of[name]} and {obj}). Module names must be unique.')
             src = prov.get('source-path')
+            provide_display[name] = src if src is not None else obj
             is_private = args.all_provides_private or obj in private_interface_objs
             if args.stamp_suffix is not None:
                 # A harvest edge (and thus the stamp) exists only for sources
@@ -507,6 +543,25 @@ def run_p1689(argv: T.List[str]) -> int:
                 private_names.add(name)
             else:
                 provided[name] = modfile
+
+    # A module partition inherits no privacy from its primary: a private
+    # primary's own partition must be independently listed in
+    # cpp_private_module_interfaces too, or its BMI lands in the shared
+    # public cache and its name claims the whole build tree, defeating the
+    # point of making the primary private. Two passes because `rules` order
+    # is whatever order the backend passed .ddi files in -- the primary's
+    # own provide may be visited after its partition's.
+    for name, display in provide_display.items():
+        if ':' not in name:
+            continue
+        primary = name.partition(':')[0]
+        if primary in private_names and name not in private_names:
+            raise MesonException(
+                f'Module partition "{name}" ({display}) belongs to the private module '
+                f'"{primary}" but is not itself private. List {display} in '
+                'cpp_private_module_interfaces too -- a partition of a private module '
+                "takes the module-wide claim its primary deliberately avoids.")
+
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
             imported: T.Dict[str, str] = json.load(f)
@@ -536,6 +591,13 @@ def run_p1689(argv: T.List[str]) -> int:
         dd.write('ninja_dyndep_version = 1\n\n')
         for rule in rules:
             obj = rule['primary-output']
+            # The user declared a source, not an object/BMI path -- prefer
+            # it when available for a diagnostic naming this rule. Only
+            # Clang's P1689 output ever carries a provide's source-path;
+            # GCC and MSVC fall back to obj.
+            rule_src = next((p.get('source-path') for p in rule.get('provides', [])
+                             if p.get('source-path')), None)
+            display = rule_src if rule_src is not None else obj
             maplines: T.List[str] = []
             outs: T.List[str] = []
             for prov in rule.get('provides', []):
@@ -586,6 +648,14 @@ def run_p1689(argv: T.List[str]) -> int:
                 # unless it is provided, but privately, by another target,
                 # which gets a much more direct diagnostic naming that target.
                 if modfile is None:
+                    if own_private_names is not None and name in own_private_names[0]:
+                        raise MesonException(
+                            f'{display}, recompiled for another BMI class, imports '
+                            f'module "{name}", which target {own_private_names[1]!r} '
+                            'provides privately. A public module interface consumed '
+                            'across BMI classes cannot import a private module; move '
+                            f'the import into an implementation unit, or make "{name}" '
+                            'public.')
                     if name in private_elsewhere:
                         raise MesonException(
                             f'{obj} requires module "{name}", which target '

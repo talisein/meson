@@ -1207,6 +1207,26 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                              f'{name} must not be in the shared BMI cache')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_cpp_private_module_interfaces_unlisted_partition(self):
+        # hidden is a private primary; its internal partition hidden-impl
+        # must independently be listed in cpp_private_module_interfaces too,
+        # or its BMI lands in the shared public cache and its name
+        # (hidden:impl) takes the whole-build-tree public-name claim the
+        # private primary was trying to avoid in the first place.
+        testdir = os.path.join(self.unit_test_dir, '187 cpp private module interfaces')
+        self.init(testdir, extra_args=['-Dmode=unlisted-partition'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('Module partition "hidden:impl" (', cm.exception.stdout)
+        self.assertIn(
+            ') belongs to the private module "hidden" but is not itself private. List ',
+            cm.exception.stdout)
+        self.assertIn(
+            ' in cpp_private_module_interfaces too -- a partition of a private module '
+            'takes the module-wide claim its primary deliberately avoids.',
+            cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_direct_import(self):
         # A target outside the providing library imports its private module
         # directly: rejected with a diagnostic naming both the module and the
@@ -1307,6 +1327,49 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # 'priv.gcm'/'priv.cppm.o' (its outputs).
         self.assertFalse(any('priv.' in line for line in variant_lines),
                          'a BMI-only variant must never compile a private interface')
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_cpp_private_module_interfaces_variant_own_import(self):
+        # api is public but its own interface imports mylib's own private
+        # module priv -- legal within mylib itself (same target, same
+        # unkeyed-by-class private dir), but prog23 forces a BMI-only variant
+        # of api under a diverging dialect, whose recompile's scan reports
+        # requiring priv too. The variant collate must recognize priv as
+        # mylib's own private module and raise a precise diagnostic, not the
+        # generic (and here actively misleading, since priv IS in this
+        # build) "provided by no target in this build" one.
+        testdir = os.path.join(self.unit_test_dir, '191 private module variant import diagnostic')
+        self.init(testdir)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            ', recompiled for another BMI class, imports module "priv", which '
+            "target 'mylib' provides privately. A public module interface "
+            'consumed across BMI classes cannot import a private module; move '
+            'the import into an implementation unit, or make "priv" public.',
+            cm.exception.stdout)
+        self.assertNotIn('provided by no target in this build', cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_cpp_private_module_interfaces_variant_dependency_import(self):
+        # apia (public, in liba) imports libb's private module privb -- an
+        # illegal cross-target private import, exactly like the stage-8
+        # direct-import case, except here a divergent consumer also forces a
+        # BMI-only variant of apia. Both liba's own normal collate and its
+        # variant's collate now carry libb's private-module map, so no
+        # matter which of the two edges a parallel ninja schedule happens to
+        # run first, the failure is the precise private_elsewhere message,
+        # never the generic one.
+        testdir = os.path.join(self.unit_test_dir, '191 private module variant import diagnostic')
+        self.init(testdir, extra_args=['-Dmode=dependency'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'requires module "privb", which target \'libb\' provides privately '
+            "(it is listed in that target's cpp_private_module_interfaces). A "
+            'private module can only be imported inside the target that provides it.',
+            cm.exception.stdout)
+        self.assertNotIn('provided by no target in this build', cm.exception.stdout)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='clang')
     def test_clang_bmi_classes(self):

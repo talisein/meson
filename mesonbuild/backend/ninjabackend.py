@@ -1759,6 +1759,12 @@ class NinjaBackend(backends.Backend):
         or every interface of a module-providing executable -- has no consumer
         outside its own target, so a variant of it would be pure waste, and it is
         never published for a cross-target consumer to reach in the first place.
+        A recompiled public interface may still legally *import* a private module
+        (the provider's own, or a linked dependency's), so the variant's collate is
+        told about both via --own-private-map/--dep-private-map: not to resolve
+        the import (a private interface is never recompiled into a variant, so it
+        still can't), but so an illegal cross-class import of one gets a precise
+        diagnostic instead of a misleading "provided by no target" one.
         """
         memo_key = (provider.get_id(), class_key)
         existing = self._bmi_variants.get(memo_key)
@@ -1849,12 +1855,29 @@ class NinjaBackend(backends.Backend):
 
         # The variant's own imports must resolve in its class too: a linked
         # provider in the same class keeps its original provmap, a divergent
-        # one gets (or reuses) a variant, recursively.
-        dep_provmaps = sorted({self._provmap_for_class(t, class_key)
-                               for t in provider.get_all_linked_targets()
-                               if isinstance(t, build.BuildTarget)
-                               and self.target_uses_p1689_cpp_modules(t)
-                               and t.provides_cpp_modules()})
+        # one gets (or reuses) a variant, recursively. A linked provider's
+        # private names are never routed through a variant of their own
+        # (private-modules.json is names-only and class-independent, always
+        # a dependency's own file -- the same asymmetry the normal collate's
+        # dep_private_maps relies on), so this mirrors that loop directly
+        # rather than going through _provmap_for_class for the private side.
+        dep_provmaps: T.List[str] = []
+        dep_private_maps: T.List[T.Tuple[str, str]] = []
+        for t in provider.get_all_linked_targets():
+            if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
+                    and t.provides_cpp_modules():
+                dep_provmaps.append(self._provmap_for_class(t, class_key))
+                dep_private_maps.append((self.get_private_modules_file_for(t), t.name))
+        dep_provmaps = sorted(set(dep_provmaps))
+        dep_private_maps = sorted(set(dep_private_maps))
+        # The provider's own private-modules.json: a recompiled public
+        # interface may legally import the provider's own private module
+        # (same target, same unkeyed-by-class private dir). Always exists --
+        # every target satisfying target_uses_p1689_cpp_modules()
+        # unconditionally gets its own cpp_module_collate edge elsewhere in
+        # generate(), which always declares this file as an output, empty
+        # JSON list or not.
+        own_private_map = self.get_private_modules_file_for(provider)
         elem = NinjaBuildElement(self.all_outputs, [variant.dyndep, variant.provmap],
                                  'cpp_module_collate', sorted(ddis))
         if cpp.get_id() == 'gcc':
@@ -1864,11 +1887,16 @@ class NinjaBackend(backends.Backend):
             elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
+        if dep_private_maps:
+            elem.add_dep([p for p, _ in dep_private_maps])
+        elem.add_dep(own_private_map)
         elem.add_item('DYNDEP', variant.dyndep)
         elem.add_item('PROVMAP', variant.provmap)
         elem.add_item('BMIDIR', cpp.get_module_cache_dir(info.subdir))
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
-        depargs: T.List[str] = []
+        depargs: T.List[str] = ['--own-private-map', own_private_map, provider.name]
+        for path, tname in dep_private_maps:
+            depargs += ['--dep-private-map', path, tname]
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']

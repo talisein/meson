@@ -263,6 +263,36 @@ kwargs:
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
+  cpp_internal_partitions:
+    type: array[str | file]
+    since: 1.12.0
+    default: []
+    description: |
+      Names which of this target's C++ sources are *internal* (implementation)
+      module partitions -- a `module pkg:impl;` unit with no `export`. Each
+      entry is one of the target's own sources (a string or a [[files]]
+      object); a path that names no source is an error, not a silent no-op.
+
+      An internal partition is still a BMI-producing, importable module unit,
+      compiled and ordered like any other module unit on every compiler.
+      Declaring it here only changes behavior on MSVC: cl compiles a declared
+      source with `/internalPartition` instead of `/interface`, and rejects an
+      interface file extension (`.ixx`) for it, so a portable `meson.build`
+      should give an internal partition's source a plain implementation
+      extension such as `.cpp`. GCC (which infers the unit kind from the
+      source itself) and Clang (`-x c++-module`, kind-agnostic) both treat
+      this keyword as a portable no-op, so a GCC- or Clang-only project may
+      leave an internal partition undeclared.
+
+      Listing a source in both `cpp_internal_partitions` and
+      `cpp_private_module_interfaces` is fine, and is in fact how a partition
+      of a *private* primary module is itself marked private: see
+      `cpp_private_module_interfaces` below, since a partition does not
+      automatically inherit privacy from its primary.
+
+      Currently supported with GCC (>= 14), MSVC, and Clang (needs a
+      P1689-capable `clang-scan-deps`) on the Ninja backend only.
+
   cpp_private_module_interfaces:
     type: array[str | file]
     since: 1.12.0
@@ -296,7 +326,9 @@ kwargs:
       `cpp_private_module_interfaces` is fine, and is in fact how a partition
       itself is marked private -- **a partition does not automatically
       inherit privacy from its primary module**, and must be listed here on
-      its own if it too should be private.
+      its own if it too should be private. Meson enforces this: leaving a
+      private primary's partition out of `cpp_private_module_interfaces` is a
+      build-time error, not a silently-accepted gap.
 
       Declaring this on an `executable()` is accepted, not an error, even
       though every module an executable provides is already private (nothing
