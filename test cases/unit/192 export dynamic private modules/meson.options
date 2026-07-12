@@ -1,0 +1,8 @@
+option('mode', type: 'combo',
+       choices: ['ok', 'import-private', 'divergent'],
+       value: 'ok',
+       description: 'What the plugin imports, and in which BMI class it is compiled.')
+
+# The divergent plugin's dialect. MSVC has no cpp_std=c++23, so the Windows
+# driver runs the divergent mode at -Ddivergent_std=c++latest.
+option('divergent_std', type: 'string', value: 'c++23')
