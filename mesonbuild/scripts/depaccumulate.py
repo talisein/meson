@@ -183,18 +183,21 @@ def _is_header_unit(req: Require) -> bool:
     return '/' in name or '\\' in name
 
 
-def _check_module_cycle(rules: T.List[Rule], provided: T.Dict[str, str]) -> None:
+def _check_module_cycle(rules: T.List[Rule]) -> None:
     """Raise on a dependency cycle among this target's own modules.
 
-    Nodes are the module names provided in this target; an edge goes from a
-    provided module to each module (also provided here) that its translation
-    unit requires. A back-edge in a DFS is a cycle; report it before ninja's own
-    generic cycle detector would.
+    Nodes are the module names provided in this target -- public or private,
+    derived straight from `rules` rather than passed in, since a cycle
+    running through a private module is exactly as real a cycle -- and an
+    edge goes from a provided module to each module (also provided here) that
+    its translation unit requires. A back-edge in a DFS is a cycle; report it
+    before ninja's own generic cycle detector would.
     """
+    local_names = {prov['logical-name'] for rule in rules for prov in rule.get('provides', [])}
     deps: T.Dict[str, T.List[str]] = {}
     for rule in rules:
         local_reqs = [r['logical-name'] for r in rule.get('requires', [])
-                      if r['logical-name'] in provided]
+                      if r['logical-name'] in local_names]
         for prov in rule.get('provides', []):
             deps.setdefault(prov['logical-name'], []).extend(local_reqs)
 
@@ -298,13 +301,24 @@ def run_p1689(argv: T.List[str]) -> int:
     its dependency targets, emitting a Ninja dyndep that orders each object
     against the BMIs it requires/provides, plus this target's own map. The BMI
     directory and suffix (--bmi-dir/--bmi-suffix) come from the compiler so the
-    logical-name -> BMI mapping matches the compiler's own. --dep-bmi-dir names
-    a second directory a *required* module not provided by this target is
-    found in, when it differs from --bmi-dir (a module-providing executable's
-    own BMIs are private, in a directory of their own, but a linked
-    dependency's public module still lives in the shared class cache).
-    Defaults to --bmi-dir, matching every target that has no private directory
-    of its own.
+    logical-name -> BMI mapping matches the compiler's own; --bmi-dir always
+    names the shared class-cache directory, whether a name is this target's
+    own public provide or reached through a linked dependency.
+
+    A provide whose object is named by --private-interface (or, for a
+    module-providing executable where every module is private by
+    construction, --all-provides-private) is instead named at
+    --private-bmi-dir: it is resolvable within this target's own compiles but
+    never published to --provmap, never globally claimed, and its name is
+    published separately, by name only, to --private-map -- so a dependent
+    can recognize (via --dep-private-map) that a module it's missing is
+    private rather than absent, without ever being able to resolve it.
+    "Never globally claimed" narrows the uniqueness requirement to one link's
+    own transitive closure rather than the whole build tree; it does not
+    remove it: two dependencies of one link privately providing the same
+    name still collide at the linkage-symbol level (a module's exported
+    entities are mangled from its bare name, private or not), so
+    --dep-private-map is also checked for that cross-target collision here.
 
     With --mapper-suffix it also writes a GCC module mapper per translation
     unit (<primary-output><suffix>, an implicit input of the compile edge)
@@ -321,16 +335,38 @@ def run_p1689(argv: T.List[str]) -> int:
                         help="Output provided-module map for this target.")
     parser.add_argument('--bmi-dir', required=True,
                         help='Directory the compiler names BMIs in (e.g. gcm.cache).')
-    parser.add_argument('--dep-bmi-dir', default=None,
-                        help='Directory a required module not provided by this target '
-                             'is named in, when it differs from --bmi-dir (e.g. a '
-                             "module-providing executable's own --bmi-dir is private, "
-                             "but a linked dependency's public module is still in the "
-                             'shared class cache). Defaults to --bmi-dir.')
     parser.add_argument('--bmi-suffix', required=True,
                         help='BMI file suffix including the dot (e.g. .gcm).')
     parser.add_argument('--dep-provmap', action='append', default=[],
                         help='Provided-module map of a dependency target. Repeatable.')
+    parser.add_argument('--private-bmi-dir', default=None,
+                        help='Directory a provide named by --private-interface (or, '
+                             'under --all-provides-private, any provide) is named in '
+                             'instead of --bmi-dir.')
+    parser.add_argument('--private-interface', action='append', default=[],
+                        dest='private_interface_objs',
+                        help='The *object* path (a P1689 rule\'s primary-output, not its '
+                             'source-path) of a private interface compile '
+                             '(cpp_private_module_interfaces): its provide is named at '
+                             '--private-bmi-dir, resolvable only within this target, never '
+                             'published to --provmap. Matched by object rather than source: '
+                             "only Clang's P1689 output carries a source-path for a provide at "
+                             'all, so it is not a compiler-agnostic key here (unlike '
+                             '--interface-source, which is a Clang-only concern). Repeatable.')
+    parser.add_argument('--all-provides-private', action='store_true',
+                        help='Every provide in this target is private (a module-providing '
+                             "executable: nothing can ever link it, so all of its modules "
+                             'are private by construction). Overrides --private-interface.')
+    parser.add_argument('--private-map', default=None,
+                        help="Output a JSON list of this target's own private module names "
+                             '(names only, never paths, so a consumer can recognize one but '
+                             'never resolve it). Omitted for a BMI-only variant\'s collate, '
+                             'which never has private provides of its own.')
+    parser.add_argument('--dep-private-map', action='append', default=[], nargs=2,
+                        dest='dep_private_maps', metavar=('PATH', 'TARGET'),
+                        help='A linked dependency\'s own private-modules.json and the name of '
+                             'the target that provides it, for the "provided but private" '
+                             'diagnostic. Repeatable.')
     parser.add_argument('--stamp-suffix', default=None,
                         help='BMIs reach the shared cache via harvest edges (Clang\'s '
                              'own pipeline, and BMI-only variants on any compiler): '
@@ -369,7 +405,42 @@ def run_p1689(argv: T.List[str]) -> int:
     # effective for MSVC; GCC fails earlier, at the scan itself.
     declared_units = {tuple(hu.split(':', 1)) for hu in args.header_units}
     interface_sources = {_source_key(p) for p in args.interface_sources}
+    # Matched by object path (a rule's primary-output) verbatim, not
+    # _source_key: these already are exact primary-output strings, the same
+    # ones the .ddi itself uses, and (unlike a source-path) that field is
+    # always present, on every compiler.
+    private_interface_objs = set(args.private_interface_objs)
     class_units = {name: bmi for name, bmi in args.header_unit_bmis}
+
+    # name -> owning target's name, for every private module of a linked
+    # dependency: the "provided but private" diagnostic below. Two different
+    # dependencies privately providing the same name is a hard error here,
+    # not just a bookkeeping conflict: a module's exported entities are
+    # mangled from its bare module name alone (verified on GCC: two
+    # unrelated "export module detail;" translation units emit the
+    # identical symbol for a same-named function, e.g. detail_value@detail()),
+    # so linking two same-named private modules into one binary is a
+    # silent ODR violation -- the linker picks one definition arbitrarily,
+    # regardless of which target's collate ever tried to claim the name.
+    # Privacy removes the *global*, whole-build-tree uniqueness requirement
+    # (_claim_module_provider), not the requirement that one link's own
+    # transitive closure never contains two same-named modules -- that
+    # second requirement is the same one the public "provided by more than
+    # one target reaching this link" check below enforces, and it applies to
+    # private names exactly as much as public ones.
+    private_elsewhere: T.Dict[str, str] = {}
+    for path, tname in args.dep_private_maps:
+        with open(path, encoding='utf-8') as f:
+            for name in json.load(f):
+                owner = private_elsewhere.get(name)
+                if owner is not None and owner != tname:
+                    raise MesonException(
+                        f'Module "{name}" is privately provided by more than one target '
+                        f'reaching this link ({owner!r} and {tname!r}); both would emit '
+                        'the same linkage symbol for its exported entities, which is '
+                        'undefined behavior even though each target only claims the name '
+                        'privately. Rename one of the two modules.')
+                private_elsewhere[name] = tname
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -379,8 +450,12 @@ def run_p1689(argv: T.List[str]) -> int:
 
     # name -> BMI path for everything resolvable here (local + linked deps).
     resolvable: T.Dict[str, str] = {}
-    # name -> BMI path for what this target provides (the map we publish).
+    # name -> BMI path for what this target provides publicly (the map we
+    # publish to --provmap).
     provided: T.Dict[str, str] = {}
+    # Names of this target's own private provides: resolvable here, but never
+    # published to --provmap and never globally claimed.
+    private_names: T.Set[str] = set()
     # name -> human-readable provider (object file or dep-map path), used for
     # duplicate diagnostics.
     provider_of: T.Dict[str, str] = {}
@@ -388,11 +463,14 @@ def run_p1689(argv: T.List[str]) -> int:
         obj = rule['primary-output']
         for prov in rule.get('provides', []):
             name = prov['logical-name']
-            # A module name may be provided only once within a target.
-            if name in provided:
+            # A module name may be provided only once within a target,
+            # public or private.
+            if name in provided or name in private_names:
                 raise MesonException(
                     f'Module "{name}" is provided by two sources in this target '
                     f'({provider_of[name]} and {obj}). Module names must be unique.')
+            src = prov.get('source-path')
+            is_private = args.all_provides_private or obj in private_interface_objs
             if args.stamp_suffix is not None:
                 # A harvest edge (and thus the stamp) exists only for sources
                 # the backend compiled as interface units, decided by extension
@@ -400,7 +478,9 @@ def run_p1689(argv: T.List[str]) -> int:
                 # A provider outside that set would advertise a stamp nothing
                 # produces, and consumers would only fail later with the
                 # compiler's "module not found" -- reject it here instead.
-                src = prov.get('source-path')
+                # interface_sources already includes private interfaces (the
+                # backend unions them into --interface-source too), so no
+                # separate private check is needed here.
                 if src is not None \
                         and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'} \
                         and _source_key(src) not in interface_sources:
@@ -414,19 +494,27 @@ def run_p1689(argv: T.List[str]) -> int:
                         '(cpp_modules: true only covers consumers).')
                 # Consumers order against the provider's harvest stamp; the
                 # cache BMI itself stays out of Ninja's graph (its name is
-                # only known at build time).
+                # only known at build time). The harvest destination for a
+                # private interface is already resolved per-source by the
+                # backend, so the stamp alone is enough here regardless.
                 modfile = obj + args.stamp_suffix
             else:
-                modfile = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
-            provided[name] = modfile
+                bmidir = args.private_bmi_dir if is_private else args.bmi_dir
+                modfile = module_to_filename(name, bmidir, args.bmi_suffix)
             resolvable[name] = modfile
             provider_of[name] = obj
+            if is_private:
+                private_names.add(name)
+            else:
+                provided[name] = modfile
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
             imported: T.Dict[str, str] = json.load(f)
         for name, modfile in imported.items():
             # Two targets providing the same module name into one link is
-            # IFNDR in GCC (the name is the linkage discriminator).
+            # IFNDR in GCC (the name is the linkage discriminator). A private
+            # module never reaches here: it never enters a dependency's
+            # published --provmap in the first place.
             if name in resolvable:
                 raise MesonException(
                     f'Module "{name}" is provided by more than one target reaching '
@@ -438,8 +526,11 @@ def run_p1689(argv: T.List[str]) -> int:
     # A module dependency cycle must be reported here rather than left to
     # ninja. Cycles can only occur among modules provided within this target --
     # the target link graph is a DAG -- so the local provides/requires subgraph
-    # is enough.
-    _check_module_cycle(rules, provided)
+    # is enough. Derived straight from `rules` (every name, public or private,
+    # this target's own P1689 output provides) rather than from `provided`,
+    # which excludes private names and would otherwise miss a cycle running
+    # through one.
+    _check_module_cycle(rules)
 
     with open(args.dyndep, 'w', encoding='utf-8') as dd:
         dd.write('ninja_dyndep_version = 1\n\n')
@@ -457,7 +548,12 @@ def run_p1689(argv: T.List[str]) -> int:
                     # that declared output, the rule's primary-output.
                     maplines.append(f'{name} {obj}')
                 else:
-                    bmi = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
+                    # Same private/shared choice as the provides loop above,
+                    # by name rather than re-deriving from source-path: this
+                    # is the second, independent place a provide's BMI path is
+                    # computed, and the two must never disagree.
+                    bmidir = args.private_bmi_dir if name in private_names else args.bmi_dir
+                    bmi = module_to_filename(name, bmidir, args.bmi_suffix)
                     outs.append(bmi)
                     maplines.append(f'{name} {bmi}')
             reqs: T.List[str] = []
@@ -486,8 +582,17 @@ def run_p1689(argv: T.List[str]) -> int:
                 name = req['logical-name']
                 modfile = resolvable.get(name)
                 # A required module provided by nothing in the build is an
-                # error naming the requiring TU and the missing module.
+                # error naming the requiring TU and the missing module --
+                # unless it is provided, but privately, by another target,
+                # which gets a much more direct diagnostic naming that target.
                 if modfile is None:
+                    if name in private_elsewhere:
+                        raise MesonException(
+                            f'{obj} requires module "{name}", which target '
+                            f'{private_elsewhere[name]!r} provides privately (it is '
+                            "listed in that target's cpp_private_module_interfaces). "
+                            'A private module can only be imported inside the target '
+                            'that provides it.')
                     if name in {'std', 'std.compat'}:
                         hint = " (add dependency('std') to this target)"
                     else:
@@ -499,13 +604,13 @@ def run_p1689(argv: T.List[str]) -> int:
                 # The compiler must be pointed at the class-cache BMI itself;
                 # `modfile` is the ordering handle, which under --stamp-suffix
                 # is a harvest stamp rather than a readable BMI. A name this
-                # target provides itself is named at --bmi-dir, same as in the
-                # provides loop above; anything from a linked dependency is
-                # named at --dep-bmi-dir, which differs from --bmi-dir only for
-                # a target whose own BMIs are private (a module-providing
-                # executable) but which still imports a dependency's public
-                # module.
-                req_dir = args.bmi_dir if name in provided else (args.dep_bmi_dir or args.bmi_dir)
+                # target provides itself privately is named at
+                # --private-bmi-dir; everything else -- this target's own
+                # public provides, and anything reached through a linked
+                # dependency -- is named at --bmi-dir, the one shared
+                # class-cache directory every target in this class resolves
+                # public modules through.
+                req_dir = args.private_bmi_dir if name in private_names else args.bmi_dir
                 maplines.append(f'{name} {module_to_filename(name, req_dir, args.bmi_suffix)}')
                 reqs.append(modfile)
             out = formatter(outs)
@@ -517,9 +622,16 @@ def run_p1689(argv: T.List[str]) -> int:
 
     with open(args.provmap, 'w', encoding='utf-8') as pm:
         json.dump(provided, pm)
+    if args.private_map is not None:
+        with open(args.private_map, 'w', encoding='utf-8') as pm:
+            json.dump(sorted(private_names), pm)
 
     # Claim the provided names only after publishing the map, so a concurrent
-    # collate that loses the claim race always finds a live claimant.
+    # collate that loses the claim race always finds a live claimant. A
+    # private name is never claimed: its BMI lives in this target's own
+    # private directory, physically unreachable from any other target's
+    # private directory regardless of name reuse, so there is nothing to
+    # arbitrate.
     for name in provided:
         _claim_module_provider(
             name, module_to_filename(name, args.bmi_dir, args.bmi_suffix), args.provmap)

@@ -1,0 +1,4 @@
+option('mode', type: 'combo',
+       choices: ['direct-import', 'missing', 'cycle', 'both-kwargs'],
+       value: 'direct-import',
+       description: 'Which private-module diagnostic to provoke.')
