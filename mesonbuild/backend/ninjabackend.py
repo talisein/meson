@@ -1065,6 +1065,7 @@ class NinjaBackend(backends.Backend):
             self.generate_run_target(target)
             return
         assert isinstance(target, build.BuildTarget)
+        self.check_cpp_modules_fortran_mix(target)
         self.check_cpp_modules_std(target)
         self.check_clang_cpp_modules_scanner(target)
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
@@ -1413,6 +1414,51 @@ class NinjaBackend(backends.Backend):
         elem.add_item('name', target.name)
         self.add_build(elem)
 
+    @classmethod
+    def _has_cpp_source(cls, target: build.BuildTarget) -> bool:
+        # Whether the target compiles a C++ source of its own. Not the same
+        # question as 'cpp' in target.compilers: process_compilers also adds a
+        # language a target merely *links* (to pick the linker), so a Fortran
+        # program linking a C++ library carries a cpp compiler and no C++ TU.
+        for src in target.get_sources():
+            if cls.source_scan_language(src) == 'cpp' and not compilers.is_header(src):
+                return True
+        for gen in target.get_generated_sources():
+            for out in gen.get_outputs():
+                if cls.source_scan_language(out) == 'cpp' and not compilers.is_header(out):
+                    return True
+        return False
+
+    def check_cpp_modules_fortran_mix(self, target: build.BuildTarget) -> None:
+        # A target with Fortran sources is scanned by the Fortran module
+        # scanner, and a target gets one scanner: cpp_module_scanner_for_target
+        # returns 'none' for it, so its C++ sources are compiled with no module
+        # flags, no scan and no dyndep. A C++ module in such a target cannot
+        # work, and left alone it fails at build time with a raw compiler error
+        # about `export module` needing -fmodules. Say so at setup instead, and
+        # name the shape that does work: the C++ modules go in a C++ library
+        # the Fortran target links.
+        if not target.uses_fortran():
+            return
+        if target.provides_cpp_modules():
+            raise MesonException(
+                f'Target {target.name!r} has both Fortran sources and C++ module '
+                'sources, which Meson does not support in one target: a target '
+                'gets a single module scanner, and a Fortran target uses the '
+                'Fortran one, so its C++ modules would never be compiled as '
+                'modules. Move the C++ module sources into a C++ library and '
+                'link it from this target.')
+        if target.uses_cpp_modules() and self._has_cpp_source(target):
+            # It links a module provider and has C++ TUs of its own. Those TUs
+            # are not module-enabled, so an `import` in one of them fails at
+            # compile time; if none imports anything, the build is fine, so
+            # this is a warning rather than an error.
+            mlog.warning(
+                f'Target "{target.name}" has both Fortran and C++ sources and links a '
+                'C++ module provider. C++ modules are not supported in a mixed '
+                'Fortran/C++ target, so its C++ sources cannot import those modules. '
+                'Move the C++ sources into a C++ library and link it from this target.')
+
     def check_cpp_modules_std(self, target: build.BuildTarget) -> None:
         # C++ modules need C++20 or later; with an older cpp_std the compiler
         # rejects `export module` / `import` at build time, so fail during setup
@@ -1440,11 +1486,18 @@ class NinjaBackend(backends.Backend):
         # compiler errors, so report the missing tool at setup instead. The
         # legacy -fmodules/-fmodules-ts regex escape hatch is exempt (it does
         # not need the scanner), as are builds whose ninja lacks dyndep, which
-        # never scan on any compiler, and preprocess-only targets, which are
-        # never scanned (see cpp_module_scanner_for_target).
+        # never scan on any compiler.
+        #
+        # Only a target the P1689 pipeline would otherwise claim can be missing
+        # the tool: the other ways to reach 'none' are structural, and blaming
+        # clang-scan-deps for them sends the reader hunting a tool that is
+        # installed and fine. A preprocess-only target is never scanned, and a
+        # Fortran target uses the Fortran scanner -- so a Fortran program
+        # linking a C++ module library is not a scanner problem at all
+        # (check_cpp_modules_fortran_mix has already had its say about the mix).
         if not self.ninja_has_dyndeps or 'cpp' not in target.compilers:
             return
-        if isinstance(target, build.CompileTarget):
+        if isinstance(target, build.CompileTarget) or target.uses_fortran():
             return
         cpp = target.compilers['cpp']
         if cpp.get_id() != 'clang' or not target.uses_cpp_modules():
