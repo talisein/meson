@@ -507,6 +507,63 @@ class InternalTests(unittest.TestCase):
         f = File(False, 'sub', 'hdr.h')
         self.assertEqual(parse(f, 'bld2src'), ('user', f.rel_to_builddir('bld2src')))
 
+    def test_header_probe_strips_forced_includes(self):
+        # The -H probe asks where a header resolves, which the include search
+        # path alone decides. A forced include cannot move that answer but can
+        # hide it -- a header the prelude already pulled in is skipped by its own
+        # guard and opens no file for -H to report -- so the probe drops
+        # -include/-imacros, in both the spellings the compiler takes, and keeps
+        # everything that does shape the search path.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        strip = NinjaBackend._without_forced_includes
+        args = ['-std=c++20', '-include', 'a.h', '-I', 'inc', '-includeb.h',
+                '-Iinc2', '-imacros', 'c.h', '-isystem', 'sys', '-imacrosd.h',
+                '-isystemsys2', '-D', 'FOO', '-DBAR', 'plain']
+        untouched = list(args)
+        self.assertEqual(strip(args),
+                         ['-std=c++20', '-I', 'inc', '-Iinc2', '-isystem', 'sys',
+                          '-isystemsys2', '-D', 'FOO', '-DBAR', 'plain'])
+        # The caller's list is its own: the probe strips a copy, and the args it
+        # was handed go on to build the unit unchanged.
+        self.assertEqual(args, untouched)
+        # A flag whose argument never arrived must not take a token that is not
+        # there (nor anything else with it).
+        self.assertEqual(strip(['-Iinc', '-include']), ['-Iinc'])
+
+    def test_header_probe_memo_ignores_forced_includes(self):
+        # Two targets whose args differ only in their forced includes ask the
+        # same question of the compiler, so they must share the one answer:
+        # the memo is keyed on the stripped list, and the probe spawns once.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        be._probed_header_units = {}
+        be.environment = mock.MagicMock()
+        be.environment.get_build_dir.return_value = '/nonexistent'
+        cpp = mock.MagicMock()
+        cpp.get_id.return_value = 'gcc'
+        cpp.get_exelist.return_value = ['g++']
+
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        stderr = '. /usr/include/c++/16/vector\n.. /usr/include/c++/16/bits/stl_algobase.h\n'
+        with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.Popen_safe',
+                        return_value=(proc, '', stderr)) as popen:
+            first = be._probe_header_unit_path(
+                cpp, ['-Iinc', '-include', 'prelude.h'], 'system', 'vector')
+            second = be._probe_header_unit_path(
+                cpp, ['-Iinc', '-imacrosother.h'], 'system', 'vector')
+
+        self.assertEqual(first, '/usr/include/c++/16/vector')
+        self.assertEqual(second, first)
+        self.assertEqual(popen.call_count, 1)
+        # And the compiler was asked without them: a prelude reaching the probed
+        # header is exactly what would have made it answer nothing.
+        cmd = popen.call_args[0][0]
+        self.assertNotIn('-include', cmd)
+        self.assertNotIn('prelude.h', cmd)
+        self.assertNotIn('-imacrosother.h', cmd)
+        self.assertIn('-Iinc', cmd)
+
     def test_header_unit_dedup_shared_by_spelling(self):
         # On a single-class machine (an empty BMI class registry) a header
         # unit is deduped globally by (mode, spelling) for both compilers: the

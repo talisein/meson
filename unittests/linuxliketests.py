@@ -1871,6 +1871,61 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                             for line in mapper),
                         f'no absolute flat-cache unit mapping in {mapper}')
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_forced_include(self):
+        # A target that forces an include (-include prelude.h) and declares a
+        # system header unit. The unit's name comes from a -H probe of the
+        # compiler, and the probe must ask its question with the forced includes
+        # taken off: they cannot move where <vector> resolves, and can only stop
+        # -H from reporting it. So the mapper names the resolved <vector>, and
+        # the unit builds and imports like any other.
+        self.build_and_check_modules('197 header unit forced include',
+                                     setup_not_contains=['force-include'],
+                                     ninja_args_not_contains=())
+        with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
+            mapper = f.read().splitlines()
+        self.assertTrue(any(re.fullmatch(r'(/\S+/vector) gcm\.cache\1\.gcm', line)
+                            for line in mapper),
+                        f'the probe did not resolve <vector>: {mapper}')
+        # Only the probe drops the forced include. The unit itself is compiled
+        # under the target's real preprocessor state, or its BMI would freeze
+        # macros its importers do not have.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            ninja = f.read()
+        self.assertIn('-include prelude.h', ninja)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_preincluded_warns(self):
+        # A forced include that pulls in the very header the target declares as
+        # a unit. The unit is compiled from that header as a main file, by which
+        # point its include guard is spent, so there is nothing left to build a
+        # BMI from -- and Meson cannot drop the forced include from the unit's
+        # edge to make room, since a unit built under other macros than its
+        # importers is what the BMI classes exist to prevent. Setup warns.
+        testdir = os.path.join(self.unit_test_dir, '197 header unit forced include')
+        # A system unit: the probe resolves <vector>, then finds the target's own
+        # args open no file for it. The unit's BMI comes out empty; this one
+        # still links, and only because the same forced include hands every TU
+        # the declarations as text -- so the warning is all the diagnosis there
+        # is, and it must not depend on a failing build to be worth making.
+        out = self.init(testdir, extra_args=['-Dmode=clash-system'])
+        self.assertIn("declares the C++ header unit 'vector'", out)
+        self.assertIn('force-include a header that already includes it', out)
+
+        # A project-local unit, which resolves on the include path with no probe
+        # needed: the other half of the check. Here the clash is fatal, and the
+        # unit's own edge is what dies -- GCC either reads util.h twice (once as
+        # the prelude's text, once as the unit) and collides with itself, or
+        # translates the prelude's #include into an import of the unit it is that
+        # moment building. Which of the two it says is a matter of version, so
+        # pin the edge rather than the wording.
+        self.new_builddir()
+        out = self.init(testdir, extra_args=['-Dmode=clash-user'])
+        self.assertIn("declares the C++ header unit 'util.h'", out)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('Building C++ header unit util.h', cm.exception.output)
+
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='clang')
     def test_clang_stl_header_units(self):
         # Same fixture on clang: the unit BMI is built from the absolute

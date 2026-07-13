@@ -639,12 +639,18 @@ class NinjaBackend(backends.Backend):
         # cannot name. Keyed by the unit, not the importer: the unit is what is
         # unnameable, and every target importing it fails the same way.
         self._warned_unmappable_header_units: T.Set[str] = set()
+        # (target id, spelling) already warned about for a header unit the
+        # target's own forced includes pull in ahead of it. Keyed by the
+        # importer too, unlike the unnameable warning: it is the target's args
+        # that are wrong, and another target declaring the same unit is fine.
+        self._warned_preincluded_header_units: T.Set[T.Tuple[str, str]] = set()
         # Real directory -> space-free build-relative alias (None if the
         # platform could not make one), for GCC header-unit naming.
         self._dir_aliases: T.Dict[str, T.Optional[str]] = {}
         # Where the compiler resolves a header unit to, memoised: the probe
-        # spawns the compiler, and a unit is declared by many targets.
-        self._probed_header_units: T.Dict[T.Tuple[T.Any, ...], T.Optional[str]] = {}
+        # spawns the compiler, and a unit is declared by many targets. The
+        # value is (resolved path or None, whether the compiler exited clean).
+        self._probed_header_units: T.Dict[T.Tuple[T.Any, ...], T.Tuple[T.Optional[str], bool]] = {}
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC, plus the declarer's BMI
         # class where the compiler builds units per class -> the edge output (the
@@ -2347,6 +2353,35 @@ class NinjaBackend(backends.Backend):
                     break
         return dirs
 
+    @staticmethod
+    def _without_forced_includes(args: T.Iterable[str]) -> T.List[str]:
+        """A compile command with its forced includes (-include, -imacros) and
+        their arguments dropped, in both the detached ('-include', 'x.h') and
+        joined ('-includex.h') spellings the compiler accepts.
+
+        Where a header resolves is a question about the include search path
+        alone, so a forced include cannot move the answer the -H probe is
+        after -- but it can hide it. Its text is preprocessed ahead of the
+        probe's own #include, so a forced include that reaches the probed
+        header (directly or through another header) leaves that #include
+        skipped by the header's own include guard, and -H then reports it
+        nowhere. Dropping them leaves the trace with exactly one entry at
+        depth one -- the header asked for -- which is what makes taking the
+        first such line safe.
+        """
+        out: T.List[str] = []
+        it = iter(args)
+        for arg in it:
+            for flag in ('-include', '-imacros'):
+                if arg == flag:
+                    next(it, None)
+                    break
+                if arg.startswith(flag):
+                    break
+            else:
+                out.append(arg)
+        return out
+
     def _header_unit_mapper_key(self, args: T.Union['CompilerArgs', T.List[str]],
                                 spelling: str) -> T.Optional[str]:
         """The path a GCC module mapper would have to name a header unit by:
@@ -2393,14 +2428,20 @@ class NinjaBackend(backends.Backend):
             key = key[2:]
         return './' + key
 
-    def _probe_header_unit_path(self, compiler: Compiler,
-                                args: T.Union['CompilerArgs', T.List[str]],
-                                mode: str, spelling: str) -> T.Optional[str]:
-        """Ask the compiler where a header resolves: -H reports each header it
-        opens, and the first '. ' line is the one asked for, spelled as the lookup
-        found it. Memoised on the args, which an -isystem entry can move.
+    def _run_header_probe(self, compiler: Compiler, arglist: T.List[str],
+                          mode: str, spelling: str) -> T.Tuple[T.Optional[str], bool]:
+        """Preprocess an #include of `spelling` under `arglist` and report
+        (where -H says it resolved, whether the compiler exited clean).
+
+        -H names each header opened, prefixed by a dot per level of nesting, so
+        the first '. ' line is the header asked for, spelled as the lookup found
+        it -- there is nothing else at depth one to confuse it with. None where
+        no such line came back, which is not on its own an error: a header the
+        args already pulled in is skipped by its own include guard and opens no
+        file. The exit status tells those apart from a run that never got that
+        far, and both callers need to know which they got. Memoised on the args
+        it is handed, an -isystem entry being enough to move the answer.
         """
-        arglist = list(args)
         cache_key = (compiler.get_id(), tuple(compiler.get_exelist()), tuple(arglist), mode, spelling)
         if cache_key in self._probed_header_units:
             return self._probed_header_units[cache_key]
@@ -2411,17 +2452,34 @@ class NinjaBackend(backends.Backend):
             # From the build directory: the -I entries are relative to it, and so
             # is the answer. stderr is read whatever the exit status, since -H
             # prints what it opened before reporting any error inside it.
-            _, _, stderr = mesonlib.Popen_safe(cmd, write=f'#include {include}\n',
+            p, _, stderr = mesonlib.Popen_safe(cmd, write=f'#include {include}\n',
                                                cwd=self.environment.get_build_dir())
+            ok = p.returncode == 0
         except OSError:
             stderr = ''
+            ok = False
         for line in stderr.splitlines():
             if line.startswith('. '):
                 found = line[2:].strip()
                 break
+        self._probed_header_units[cache_key] = (found, ok)
+        return found, ok
+
+    def _probe_header_unit_path(self, compiler: Compiler,
+                                args: T.Union['CompilerArgs', T.List[str]],
+                                mode: str, spelling: str) -> T.Optional[str]:
+        """Where the compiler resolves a header unit that no -I entry of ours
+        accounts for: a system header, or a quote-form spelling falling through
+        to the compiler's own search path.
+
+        Probed without the target's forced includes (_without_forced_includes),
+        which cannot change where a header resolves and can only hide it -- so
+        two targets whose args differ in nothing else also share the one answer.
+        """
+        found, _ = self._run_header_probe(
+            compiler, self._without_forced_includes(args), mode, spelling)
         if found is None:
             mlog.debug(f'Could not probe the path of header unit {spelling!r}.')
-        self._probed_header_units[cache_key] = found
         return found
 
     def warn_on_unmappable_header_units(self, target: build.BuildTarget,
@@ -2457,6 +2515,54 @@ class NinjaBackend(backends.Backend):
                 'a space-free alias, but could not create one here (creating it needs '
                 'symlink support, which Windows does not give unprivileged builds). '
                 'Move the source tree to a path without spaces.', fatal=False)
+
+    def warn_on_preincluded_header_units(self, target: build.BuildTarget,
+                                         args: T.Union['CompilerArgs', T.List[str]]) -> None:
+        """Warn when a target's forced includes (-include, -imacros) already
+        pull in a header the same target declares as a header unit.
+
+        A header unit is compiled as its own main file, so a forced include that
+        reaches the same header first leaves nothing for the unit to be built
+        from: the compiler either rejects it (a '#pragma once' header, read once
+        as text and once as the unit, collides with itself) or accepts an empty
+        one, whose importers then find none of the declarations they came for. A
+        header cannot be both text and a unit in one compile, and the unit's
+        edge cannot drop the forced include to make room -- a unit built under
+        different preprocessor state than its consumers is what the BMI classes
+        exist to prevent.
+
+        Asked of the compiler rather than guessed at: an #include that opens no
+        file under the target's own args is one the args had already opened. A
+        run that failed outright says nothing either way -- a forced include may
+        name a header generated later in the build, which does not exist at setup
+        time -- so only a clean run is read.
+        """
+        arglist = list(args)
+        stripped = self._without_forced_includes(arglist)
+        if stripped == arglist:
+            return
+        compiler = target.compilers['cpp']
+        for hu in target.cpp_header_units:
+            mode, spelling = self._header_unit_spelling(hu, compiler)
+            if self._header_unit_gcc_name(compiler, args, mode, spelling) is None:
+                # Resolves nowhere even without the forced includes: a different
+                # complaint, and not this one's to make.
+                continue
+            found, ok = self._run_header_probe(compiler, arglist, mode, spelling)
+            if not ok or found is not None:
+                continue
+            pair = (target.get_id(), spelling)
+            if pair in self._warned_preincluded_header_units:
+                continue
+            self._warned_preincluded_header_units.add(pair)
+            mlog.warning(
+                f'Target {target.name!r} declares the C++ header unit {spelling!r}, '
+                'but its own arguments force-include a header that already includes '
+                'it. The unit is compiled from that header as a main file, and its '
+                'include guard has been tripped by then: the compiler will either '
+                'reject the unit or build an empty one, whose importers see none of '
+                'its declarations. Drop the forced include, or stop declaring the '
+                'header as a unit.', fatal=False)
 
     def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
         cpp = target.compilers['cpp']
@@ -4408,6 +4514,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # a successful respelling leaves no whitespace in the resolved
                 # path, which is exactly what the warning tests for.
                 self.warn_on_unmappable_header_units(target, args)
+                # Costs a probe only on a target that forces includes at all.
+                self.warn_on_preincluded_header_units(target, args)
             outputs, consumer_args, bmis = self._provision_header_unit_edges(
                 compiler, target.cpp_header_units, args, class_key, class_subdir,
                 target.name, target)
