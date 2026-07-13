@@ -515,6 +515,42 @@ class CppModulesTestMixin:
                     outputs.add(out.replace('\\', '/'))
         return outputs
 
+    def header_unit_edge_orderdeps(self, basename: str) -> T.Tuple[T.Optional[str], T.List[str]]:
+        """The (output, order-only deps) of the header-unit edge for `basename`.
+        A ninja build line's order-only inputs follow the '||'; the header
+        basename here contains no space, so a plain split is enough."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if not line.startswith('build ') or 'HEADER_UNIT' not in line:
+                    continue
+                out, _, rest = line[len('build '):].partition(': ')
+                if basename not in os.path.basename(out.strip()):
+                    continue
+                _, _, orderonly = rest.partition('||')
+                return out.strip(), orderonly.split()
+        return None, []
+
+    def check_generated_header_unit_ordered(self) -> None:
+        """A header unit whose header a custom_target writes during the build.
+        GCC cannot name such a unit (it is named by the path it resolves to,
+        which does not exist yet) and rejects it at setup; cl and clang have no
+        such gate and build it. The unit edge reads the header off disk but
+        names no source, so it must order behind the generator -- the bug this
+        covers is an edge with no input at all, which ninja is free to run
+        before the generator, failing to open the header."""
+        testdir = os.path.join(self.unit_test_dir, '198 unresolvable header unit')
+        self.init(testdir, extra_args=['-Dmode=generated'])
+        out, orderdeps = self.header_unit_edge_orderdeps('generated.h')
+        self.assertIsNotNone(out, 'no header-unit edge emitted for generated.h')
+        self.assertIn('generated.h', orderdeps,
+                      'the header-unit edge does not order behind its generator')
+        # Building just the unit from a clean tree must run the generator
+        # first: the deterministic form of the race a full -j build only
+        # sometimes lost (the generator usually beat the compiler's startup).
+        self.build(target=out)
+        self.assertTrue(os.path.isfile(os.path.join(self.builddir, 'generated.h')),
+                        'building the unit did not run its generator first')
+
     def assert_alias_mapper_key(self, target: str, obj: str, alias: bool = True) -> str:
         """The BMI a GCC TU resolves header.hpp to, checking its mapper key is the
         spelling that TU resolved -- textually, '..' and all, since that is what
