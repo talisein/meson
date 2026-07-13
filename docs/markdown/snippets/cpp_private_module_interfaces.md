@@ -29,6 +29,20 @@ primary module; list the partition's own source here too if it should be
 private as well. Meson enforces this: leaving a private primary's partition
 undeclared is a build-time error, not a silently-accepted gap.
 
+Keep a *public* module's interface out of its private ones, though. A
+translation unit that imports a module has an interface dependency on
+everything that module's interface unit imports, and transitively on
+everything those import in turn, so it may have to read the BMI of a
+partition — or of any other module — the interface is built out of, and
+privacy is exactly what keeps that BMI inside the target. Whether an importer
+really needs it is unspecified: one compiler builds such a project happily,
+another fails it at the importer, naming a module the project never wrote.
+Meson therefore warns and lets the build proceed rather than refusing it,
+and never publishes the BMI behind the declaration's back. The fix is usually
+to import the private module from a module *implementation* unit
+(`module pkg;`) rather than from `pkg`'s interface, which keeps it private
+and needed nowhere else.
+
 Declaring this on an ordinary `executable()` is accepted but redundant:
 nothing can link one, so all of its modules are already private. On an
 `export_dynamic` executable it is meaningful — a `shared_module` can link

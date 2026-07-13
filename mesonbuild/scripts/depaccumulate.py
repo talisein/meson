@@ -15,6 +15,7 @@ import shutil
 import textwrap
 import typing as T
 
+from .. import mlog
 from ..utils.core import MesonException, flat_cmi_path
 
 if T.TYPE_CHECKING:
@@ -236,6 +237,122 @@ def _check_module_cycle(rules: T.List[Rule]) -> None:
     for name in deps:
         if color[name] == WHITE:
             visit(name)
+
+
+def _private_reach_warning(name: str, display: str, public: str,
+                           through: T.Tuple[str, ...], is_interface: bool) -> str:
+    noun = 'Module partition' if ':' in name else 'Module'
+    if through:
+        chain = '" -> "'.join(through)
+        via = f' (through "{chain}")'
+    else:
+        via = ''
+    if is_interface:
+        reach = (f'it is itself a module interface unit, so an importer of "{public}" '
+                 'necessarily reaches it ([module.reach]/1)')
+    else:
+        reach = 'whether an importer may reach it is unspecified ([module.reach]/2)'
+    if is_interface and ':' in name:
+        # An interface partition is one its primary is *required* to export
+        # ([module.unit]), so moving the import is not enough on its own: it
+        # has to stop being an interface partition first.
+        keep = (f'Make "{name}" an internal partition ("module {name};") imported from '
+                f'a module implementation unit ("module {public};"), rather than an '
+                f'interface partition "{public}" must export')
+    else:
+        keep = (f'Import "{name}" from a module implementation unit ("module {public};") '
+                f'rather than from "{public}"\'s interface')
+    return (
+        f'{noun} "{name}" ({display}) is private, but the public module "{public}" '
+        f'reaches it from its interface{via}: an importer in another target has an '
+        f'interface dependency on "{name}" ([module.import]), and {reach}. Its BMI '
+        'stays inside this target, so an importer that does need it cannot be built. '
+        f'{keep}, and it stays private and reachable only here; or list "{public}" in '
+        'cpp_private_module_interfaces too, if nothing outside this target should '
+        'import it; or drop that source from cpp_private_module_interfaces, publishing '
+        f'its BMI as part of what importers of "{public}" read.')
+
+
+def _warn_private_interface_reach(rules: T.List[Rule], provided: T.Dict[str, str],
+                                  private_names: T.Set[str],
+                                  provide_display: T.Dict[str, str]) -> None:
+    """Warn when a public module's interface reaches into a private module.
+
+    A private module's BMI stays inside the target providing it. But a
+    translation unit importing a module has an interface dependency on
+    everything that module's interface unit imports, and transitively on
+    everything those import in turn ([module.import]) -- so it may have to read
+    their BMIs: it necessarily reaches any of them that is itself a module
+    interface unit ([module.reach]/1), and whether it reaches the rest (an
+    implementation partition, say) is unspecified ([module.reach]/2), which
+    conforming implementations answer both ways. So an interface that leaves
+    the target reaching into a BMI that does not is a contradiction between two
+    declarations in one meson.build, and this warns at the target that made
+    them both.
+
+    It cannot be an error: where the compiler declines to need the withheld
+    BMI, the build is correct and completes, and refusing it would break a
+    working project over an unspecified reachability. Where the compiler does
+    need it, the build fails in the compiler with a "module not found" naming a
+    module the project never wrote -- and this warning is what makes that error
+    legible. Neither is it fixed by publishing the BMI after all: privacy would
+    then mean "private unless something needs it".
+
+    Only a name that is not a partition seeds the walk: those are the names
+    another target can write in an import. A partition may be imported only
+    from a module unit of its own module ([module.import]), so no other target
+    can name one, and a partition reaches outside the target only through its
+    primary's interface -- where this walk finds it anyway. A
+    module implementation unit (`module pkg;`) provides nothing at all, so it
+    never seeds the walk and its imports are never followed from outside: that
+    is what leaves the sound shape -- a private partition imported only from an
+    implementation unit -- alone.
+    """
+    if not private_names:
+        return
+    # A provided module name -> the named modules its translation unit imports,
+    # plus which provides are interface units. Every P1689 scanner on this path
+    # reports is-interface; one that did not would cost the message its
+    # stronger wording, never its warning.
+    imports_of: T.Dict[str, T.List[str]] = {}
+    interfaces: T.Set[str] = set()
+    for rule in rules:
+        reqs = sorted(r['logical-name'] for r in rule.get('requires', [])
+                      if not _is_header_unit(r))
+        for prov in rule.get('provides', []):
+            name = prov['logical-name']
+            imports_of[name] = reqs
+            if prov.get('is-interface'):
+                interfaces.add(name)
+
+    reported: T.Set[str] = set()
+    for seed in sorted(n for n in provided if ':' not in n):
+        # Breadth-first, so a name is reported with the shortest chain of
+        # modules reaching it; each private name is reported once, against the
+        # first public module found reaching it.
+        queue: T.List[T.Tuple[str, T.Tuple[str, ...]]] = [(seed, ())]
+        seen = {seed}
+        i = 0
+        while i < len(queue):
+            name, through = queue[i]
+            i += 1
+            # The modules between the seed and anything this unit imports: the
+            # seed itself is named separately in the message, so it is not one
+            # of them.
+            inter = through if name == seed else through + (name,)
+            for req in imports_of.get(name, []):
+                # Anything this target does not provide itself is public by
+                # construction: a linked dependency's private module is never
+                # resolvable here at all.
+                if req not in imports_of:
+                    continue
+                if req in private_names and req not in reported:
+                    reported.add(req)
+                    mlog.warning(_private_reach_warning(
+                        req, provide_display[req], seed, inter, req in interfaces))
+                if req not in seen:
+                    seen.add(req)
+                    queue.append((req, inter))
 
 
 def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
@@ -609,6 +726,11 @@ def run_p1689(argv: T.List[str]) -> int:
                 f'"{primary}" but is not itself private. List {display} in '
                 'cpp_private_module_interfaces too -- a partition of a private module '
                 "takes the module-wide claim its primary deliberately avoids.")
+
+    # The mirror case, and a warning rather than an error: a private module (or
+    # private partition) that this target's own *public* interface is built out
+    # of.
+    _warn_private_interface_reach(rules, provided, private_names, provide_display)
 
     # One of this target's own private names colliding with a linked
     # dependency's private name is the same silent ODR violation as two
