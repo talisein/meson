@@ -584,6 +584,7 @@ class InternalTests(unittest.TestCase):
             be._target_header_unit_outputs = {}
             be._target_header_unit_consumer_args = {}
             be._target_header_unit_bmis = {}
+            be._target_generated_outputs = {}
             be._warned_header_unit_divergence = set()
             be._warned_header_unit_names = set()
             be._probed_header_units = {}
@@ -608,6 +609,7 @@ class InternalTests(unittest.TestCase):
                 target.get_id.return_value = tid
                 target.cpp_header_units = ['util.h']
                 target.compilers = {'cpp': cpp}
+                target.get_generated_sources.return_value = []
                 be._generate_single_compile = mock.MagicMock(return_value=args)
                 return be.provision_header_units(target, cpp)[0]
 

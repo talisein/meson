@@ -662,6 +662,10 @@ class NinjaBackend(backends.Backend):
         self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_bmis: T.Dict[str, T.List[T.Tuple[str, str]]] = {}
+        # Per-target build-relative paths every generator (custom_target,
+        # generator) of the target writes, so a unit exporting a generated
+        # header can order behind the edge that produces it.
+        self._target_generated_outputs: T.Dict[str, T.List[str]] = {}
         # (mode, resolved file) -> the spelling of it that builds the BMI, so
         # declared spellings of one file share it; and the alias spellings'
         # default-named paths already linked to a group's BMI.
@@ -1945,7 +1949,7 @@ class NinjaBackend(backends.Backend):
         hu_outputs, hu_args, hu_bmis = self._provision_header_unit_edges(
             cpp, provider.cpp_header_units, args.copy(), class_key,
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
-            vid, None)
+            vid, None, provider)
         modargs = cpp.get_module_compile_args(info.subdir)
         if cpp.get_id() == 'clang' and '-fmodules' in args:
             # Same shape as the compile-edge dance in generate_single_compile.
@@ -4562,11 +4566,48 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 self.warn_on_preincluded_header_units(target, args)
             outputs, consumer_args, bmis = self._provision_header_unit_edges(
                 compiler, target.cpp_header_units, args, class_key, class_subdir,
-                target.name, target)
+                target.name, target, target)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         self._target_header_unit_bmis[tid] = bmis
         return outputs
+
+    def _target_generated_output_paths(self, target: build.BuildTarget) -> T.List[str]:
+        """Build-relative paths of every file this target's generators
+        (custom_target, generator) will write. A header unit exporting one of
+        them must order behind the edge that produces it, exactly as the
+        target's own compiles and scans already do.
+        """
+        tid = target.get_id()
+        cached = self._target_generated_outputs.get(tid)
+        if cached is not None:
+            return cached
+        outs: T.List[str] = []
+        for gensrc in target.get_generated_sources():
+            for s in gensrc.get_outputs():
+                outs.append(self.get_target_generated_dir(target, gensrc, s))
+        self._target_generated_outputs[tid] = outs
+        return outs
+
+    def _header_unit_generated_deps(self, owner: T.Optional[build.BuildTarget],
+                                    spelling: str) -> T.List[str]:
+        """The owner's generated outputs that a header unit's spelling names.
+
+        A HEADER_UNIT edge reads the header off disk at run time but names no
+        input, so a build-time-generated header must be wired in as an
+        order-only dep or the edge can run before its generator does. Only cl
+        and clang reach here for such a unit: GCC cannot name a header that
+        resolves nowhere at setup and drops it before any edge is emitted.
+        """
+        if owner is None:
+            return []
+        want = os.path.normpath(spelling).replace('\\', '/')
+        deps: T.List[str] = []
+        for out in self._target_generated_output_paths(owner):
+            norm = os.path.normpath(out).replace('\\', '/')
+            if norm == want or norm.endswith('/' + want):
+                deps.append(out)
+        return deps
 
     def _provision_header_unit_edges(self, compiler: Compiler,
                                      header_units: T.List[T.Union[File, str]],
@@ -4574,11 +4615,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                      class_key: T.Tuple[str, ...],
                                      class_subdir: T.Optional[str],
                                      declarer: str,
-                                     warn_target: T.Optional[build.BuildTarget]
+                                     warn_target: T.Optional[build.BuildTarget],
+                                     owner: T.Optional[build.BuildTarget] = None
                                      ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
         """The edge-emitting half of provision_header_units, also used by
         BMI-only module variants to build their class's units (with no
-        warn_target: reuse there is same-class by construction). Returns
+        warn_target: reuse there is same-class by construction). `owner` is the
+        target whose generators may supply a declared header, used to order a
+        unit edge behind a build-time-generated header. Returns
         (unit outputs, per-unit consumer args, per-unit (GCC name, BMI) pairs).
         """
         if not header_units:
@@ -4669,6 +4713,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
                     if mapper is not None:
                         elem.add_dep(mapper)
+                # The command reads the header off disk; a generated one must be
+                # written first. Order-only, like the consumers' own dep on it:
+                # the header's content reaches the compile through the BMI's
+                # rebuild, not through this edge re-firing on every touch.
+                elem.add_orderdep(self._header_unit_generated_deps(owner, canon))
                 self.add_build(elem)
                 self._header_units[key] = output
             outputs.append(output)

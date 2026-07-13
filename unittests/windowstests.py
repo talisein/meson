@@ -552,6 +552,13 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertTrue(saw, 'no consumer named the configured.h header unit')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
+    def test_msvc_generated_header_unit_orders_behind_generator(self):
+        # cl builds a header unit whose header a custom_target writes during the
+        # build (GCC refuses to name one; cl names it by the import spelling, not
+        # a resolved path). The unit edge must order behind the generator.
+        self.check_generated_header_unit_ordered()
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_unit_aliasing(self):
         # The same header imported from TUs in different directories. With the
         # include-path spelling every importer resolves the one declared unit:

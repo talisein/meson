@@ -2053,6 +2053,14 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      ninja_args_not_contains=(),
                                      ninja_not_contains=['nope.h'])
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
+    def test_clang_generated_header_unit_orders_behind_generator(self):
+        # Clang, like cl, has no setup gate against a build-time-generated
+        # header unit (that is GCC-only, whose naming needs the resolved path),
+        # so it builds the unit -- and the unit edge must order behind the
+        # custom_target that writes the header.
+        self.check_generated_header_unit_ordered()
+
     @requires_cpp_module_caps('modules', 'header_units', compiler=('gcc', 'clang'))
     def test_header_unit_configure_file(self):
         # The line between a generated header that can be a unit and one that
