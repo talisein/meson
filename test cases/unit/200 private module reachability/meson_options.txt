@@ -1,0 +1,5 @@
+option('mode', type: 'combo',
+       choices: ['interface-import', 'interface-partition', 'indirect',
+                 'private-module', 'impl-unit-import'],
+       value: 'interface-import',
+       description: 'Which unit of the public module pkg imports the private one.')

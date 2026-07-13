@@ -897,6 +897,82 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             self.assertFalse(os.path.isfile(self.bmi_path(name)),
                              f'{name} must not be in the shared BMI cache')
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
+    def test_msvc_cpp_private_module_reachability_warns(self):
+        # A private module the target's own public interface reaches: importers
+        # of the public module have an interface dependency on it
+        # ([module.import]) but its BMI stays inside this target, so Meson warns
+        # at the provider and lets the build proceed. cl demands the BMI only of
+        # a unit that is part of the imported module's own exported interface
+        # (an interface partition; see the build-failure test below); a private
+        # implementation partition -- reachable-or-not is unspecified
+        # ([module.reach]/2) -- and a separate private module the importer never
+        # names are both BMIs cl declines to load, so these three shapes warn
+        # and still build and run, exactly as on gcc.
+        for mode, needles in [
+            # A private internal partition the interface imports.
+            ('interface-import', ['Module partition "pkg:impl"',
+                                  'the public module "pkg" reaches it from its interface:',
+                                  'unspecified ([module.reach]/2)']),
+            # Two edges away, through a public partition: the walk is transitive.
+            ('indirect', ['Module partition "pkg:impl"',
+                          'reaches it from its interface (through "pkg:part")']),
+            # Not a partition at all -- a separate private module.
+            ('private-module', ['Module "detail"',
+                                'necessarily reaches it ([module.reach]/1)']),
+        ]:
+            with self.subTest(mode=mode):
+                # The warning comes from the collate, so it is in the *build*
+                # output, not setup's; the program still builds and runs.
+                self.new_builddir()
+                self.build_and_check_modules('200 private module reachability',
+                                             extra_args=[f'-Dmode={mode}'],
+                                             build_contains=needles)
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
+    def test_msvc_cpp_private_module_reachability_interface_partition_build_failure(self):
+        # The one bad shape cl does not merely warn about: a private *interface*
+        # partition, which the primary must export, so it is part of the module's
+        # own exported interface and an importer necessarily reaches it
+        # ([module.reach]/1). cl loads every interface partition of an imported
+        # module eagerly; privacy withholds this one's BMI, so -- like clang, but
+        # not gcc -- Meson still only warns (it never refuses the build) and the
+        # compiler then fails at the importer, naming a partition the project
+        # withheld. The warning is what makes cl's error legible, so it must
+        # precede it rather than replace it.
+        testdir = os.path.join(self.unit_test_dir, '200 private module reachability')
+        self.init(testdir, extra_args=['-Dmode=interface-partition'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('Module partition "pkg:part"', cm.exception.stdout)
+        self.assertIn('necessarily reaches it ([module.reach]/1)', cm.exception.stdout)
+        # cl's own diagnostic, after Meson's warning: C7621, the withheld
+        # partition named as not found.
+        self.assertIn("module partition 'part' for module unit 'pkg' was not found",
+                      cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
+    def test_msvc_cpp_private_module_reachability_impl_unit_import(self):
+        # The sound shape, and the regression guard on the whole design: the
+        # private internal partition is imported only from a module
+        # *implementation* unit (module pkg;), which provides nothing and which
+        # nothing outside the target can import or have an interface dependency
+        # on. No importer can ever need its BMI, so privacy costs nothing -- this
+        # must build, run, and warn nowhere. On cl an internal partition compiles
+        # with /internalPartition, so its flags differ from the Linux run; its
+        # BMI stays in the target's own private dir and never in the shared cache.
+        self.build_and_check_modules('200 private module reachability',
+                                     extra_args=['-Dmode=impl-unit-import'],
+                                     build_not_contains=['reaches it from its interface'])
+        dirs = self.private_bmi_dirs()
+        self.assertEqual(len(dirs), 1)
+        # cl writes BMIs by /ifcOutput directory, so confirm on disk that the
+        # private partition landed in the target's private dir...
+        self.assertEqual(self._private_bmi_names(next(iter(dirs))), {'pkg-impl'})
+        # ...and never in the shared cache.
+        self.assertFalse(os.path.isfile(self.bmi_path('pkg:impl')),
+                         'a private partition must not be in the shared BMI cache')
+
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_cpp_private_module_interfaces_direct_import(self):
         # A target outside the providing library imports its private module

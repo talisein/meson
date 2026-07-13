@@ -302,6 +302,15 @@ kwargs:
       is an error: a source is an interface unit or an internal partition, not
       both.
 
+      A partition of a *public* module should only be made private if no
+      interface unit of that module imports it -- import it from a module
+      implementation unit (`module pkg;`) instead. An importer of a module has
+      an interface dependency on everything that module's interface imports, so
+      it may need to read the BMI of any such partition; whether it actually
+      does is not portable between compilers. Meson warns about this rather
+      than refusing it, so a project that has measured its compilers can keep
+      the declaration: see `cpp_private_module_interfaces` below.
+
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
@@ -341,6 +350,23 @@ kwargs:
       its own if it too should be private. Meson enforces this: leaving a
       private primary's partition out of `cpp_private_module_interfaces` is a
       build-time error, not a silently-accepted gap.
+
+      A partition of a *public* module, by contrast, should only be listed here
+      if no interface unit of that module imports it -- import it from a module
+      implementation unit (`module pkg;`) instead, and its BMI is needed nowhere
+      outside the target. A translation unit importing a module has an interface
+      dependency on everything that module's interface unit imports, and
+      transitively on everything those import in turn, so it may have to read
+      the BMI of a partition (or of any other module) the interface is built
+      out of -- which privacy is exactly what keeps inside this target.
+      Whether an importer really does need it is unspecified: one compiler
+      builds such a project happily and another fails it at the importer,
+      naming a module the project never wrote. Since neither answer is wrong,
+      Meson **warns** and builds rather than refusing, and a project that has
+      measured the compilers it supports may keep the declaration as written --
+      the BMI is never published behind the declaration's back. The same
+      applies to a private module that is not a partition at all: a public
+      interface that imports it has the same problem.
 
       Declaring this on an `executable()` is accepted, not an error. On an
       ordinary executable it is simply redundant -- nothing can link an

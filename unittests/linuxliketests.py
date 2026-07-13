@@ -1361,6 +1361,79 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         out = self.init(testdir, allow_fail=True)
         self.assertIn('in both cpp_module_interfaces and cpp_internal_partitions', out)
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
+    def test_cpp_private_module_reachability_warns(self):
+        # A private module that the target's own *public* interface is built
+        # out of: importers of the public module have an interface dependency
+        # on it ([module.import]), so they may have to read a BMI privacy keeps
+        # inside this target. That reachability is unspecified, not
+        # ill-formed -- GCC declines to need the BMI and builds the program
+        # correctly, which is why this warns and lets the build proceed rather
+        # than refusing it. Each shape reaches the private module a different
+        # way, and all four must be found.
+        for mode, needles in [
+            # A private internal partition the interface imports: reachable or
+            # not is unspecified.
+            ('interface-import', ['Module partition "pkg:impl"',
+                                  'the public module "pkg" reaches it from its interface:',
+                                  'unspecified ([module.reach]/2)']),
+            # A private *interface* partition, which the primary is required to
+            # export: importers reach it necessarily, not maybe.
+            ('interface-partition', ['Module partition "pkg:part"',
+                                     'necessarily reaches it ([module.reach]/1)',
+                                     'Make "pkg:part" an internal partition']),
+            # Two edges away, not one: the walk is transitive.
+            ('indirect', ['Module partition "pkg:impl"',
+                          'reaches it from its interface (through "pkg:part")']),
+            # Not a partition at all -- the same interface dependency on a
+            # withheld BMI, reported in the same voice.
+            ('private-module', ['Module "detail"',
+                                'necessarily reaches it ([module.reach]/1)']),
+        ]:
+            with self.subTest(mode=mode):
+                # The warning comes from the collate, so it is in the *build*
+                # output, not setup's; the program still builds and runs.
+                self.new_builddir()
+                self.build_and_check_modules('200 private module reachability',
+                                             extra_args=[f'-Dmode={mode}'],
+                                             build_contains=needles)
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler=('gcc', 'clang'))
+    def test_cpp_private_module_reachability_impl_unit_import(self):
+        # The sound shape, and the regression guard on the whole design: the
+        # private partition is imported only from a module *implementation*
+        # unit (module pkg;), which provides nothing and which nothing outside
+        # the target can import or have an interface dependency on. No importer
+        # can ever need its BMI, so privacy costs nothing here -- this must
+        # build and run on every compiler, and must not warn. A blunt "a
+        # partition of a public primary may not be private" rule would reject
+        # it, and a walk seeded from the target's sources rather than from the
+        # names another target can import would warn about it spuriously.
+        self.build_and_check_modules('200 private module reachability',
+                                     extra_args=['-Dmode=impl-unit-import'],
+                                     build_not_contains=['reaches it from its interface'])
+        # Private means private: the partition's BMI stays in the target's own
+        # private dir and never reaches the shared cache.
+        self.assertEqual(len(self.private_bmi_dirs()), 1)
+        self.assertFalse(os.path.isfile(self.bmi_path('pkg:impl')),
+                         'a private partition must not be in the shared BMI cache')
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
+    def test_cpp_private_module_reachability_clang_build_failure(self):
+        # The same fixture on the compiler that does materialize the
+        # unspecified reachability: Meson still only warns -- it does not
+        # refuse the build -- and the compiler then fails at the importer,
+        # naming a module the project never wrote ('pkg:impl'). The warning is
+        # what makes that error legible, so it must precede it rather than
+        # replace it.
+        testdir = os.path.join(self.unit_test_dir, '200 private module reachability')
+        self.init(testdir, extra_args=['-Dmode=interface-import'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('Module partition "pkg:impl"', cm.exception.stdout)
+        self.assertIn('the public module "pkg" reaches it from its interface',
+                      cm.exception.stdout)
+
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_name_collision(self):
         # Two libraries each privately export a module literally named
