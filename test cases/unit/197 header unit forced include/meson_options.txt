@@ -1,0 +1,2 @@
+option('mode', type: 'combo',
+       choices: ['ok', 'clash-system', 'clash-user'], value: 'ok')
