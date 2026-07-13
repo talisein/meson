@@ -225,6 +225,13 @@ kwargs:
       header units that only `#include` their prerequisites, which are absorbed
       textually). Implies module handling for the target.
 
+      On GCC a declared header unit must exist at setup time, since GCC names a
+      unit by the path its header resolves to and Meson has to work that out
+      while configuring: a header written *during* the build (a `custom_target`
+      or `generator` output) cannot be a header unit there and is reported at
+      configure time, while a `configure_file` output can, existing by the time
+      configuration ends.
+
       Currently supported with GCC (>= 14), MSVC (>= VS 2022 17.2, cl 19.32)
       and Clang (needs a P1689-capable `clang-scan-deps`, the same requirement
       as `cpp_modules`) on the Ninja backend only; declaring it on any other

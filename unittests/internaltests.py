@@ -573,26 +573,27 @@ class InternalTests(unittest.TestCase):
         # covered by the bmi_classes fixture tests.
         from mesonbuild.backend.ninjabackend import NinjaBackend
 
-        def outputs_for(cid, suffix):
+        def outputs_for(cid, suffix, builddir):
             be = NinjaBackend.__new__(NinjaBackend)
             be.build_to_src = '..'
             be.all_outputs = set()
             be._bmi_classes = {}
             be._header_units = {}
             be._header_unit_class = {}
+            be._header_unit_group = {}
             be._target_header_unit_outputs = {}
             be._target_header_unit_consumer_args = {}
             be._target_header_unit_bmis = {}
             be._warned_header_unit_divergence = set()
-            be._warned_unmappable_header_units = set()
+            be._warned_header_unit_names = set()
             be._probed_header_units = {}
             be._dir_aliases = {}
-            # No build tree on disk, so nothing names the unit: neither the
-            # include-path walk nor the probe, which cannot even chdir there. It
-            # keeps GCC's own default naming, and the unmappable-header-unit
-            # check stays quiet.
+            # A real build tree holding the header on the -I path: GCC names a
+            # unit by the path it resolves to, so a unit that resolves nowhere is
+            # not built at all and has no output to dedup. The walk finds it here
+            # without asking the compiler, so no probe runs.
             be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = '/nonexistent'
+            be.environment.get_build_dir.return_value = builddir
             be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
             be.add_build = mock.MagicMock()
             cpp = mock.MagicMock()
@@ -610,12 +611,16 @@ class InternalTests(unittest.TestCase):
                 be._generate_single_compile = mock.MagicMock(return_value=args)
                 return be.provision_header_units(target, cpp)[0]
 
-            return (provision('a', ['-DFOO']),
-                    provision('b', ['-DBAR']),
-                    provision('c', ['-DFOO']))
+            return (provision('a', ['-Iinc', '-DFOO']),
+                    provision('b', ['-Iinc', '-DBAR']),
+                    provision('c', ['-Iinc', '-DFOO']))
 
         for cid, suffix in (('msvc', '.ifc'), ('gcc', '.gcm')):
-            a, b, c = outputs_for(cid, suffix)
+            with tempfile.TemporaryDirectory() as builddir:
+                os.makedirs(os.path.join(builddir, 'inc'))
+                with open(os.path.join(builddir, 'inc', 'util.h'), 'w', encoding='utf-8') as f:
+                    f.write('#pragma once\n')
+                a, b, c = outputs_for(cid, suffix, builddir)
             # Differing args (-DFOO vs -DBAR) never split the BMI: one shared
             # edge per spelling, regardless of compiler.
             self.assertEqual(a, b)

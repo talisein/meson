@@ -635,10 +635,10 @@ class NinjaBackend(backends.Backend):
         # On GCC that class is also the unit's designated one, whose BMI stands
         # at the flat default-named path (see _provision_header_unit_edges).
         self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
-        # Spellings already warned about for a header unit GCC's module mapper
-        # cannot name. Keyed by the unit, not the importer: the unit is what is
-        # unnameable, and every target importing it fails the same way.
-        self._warned_unmappable_header_units: T.Set[str] = set()
+        # Spellings already warned about for a header unit GCC cannot name.
+        # Keyed by the unit, not the importer: the unit is what is unnameable,
+        # and every target importing it fails the same way.
+        self._warned_header_unit_names: T.Set[str] = set()
         # (target id, spelling) already warned about for a header unit the
         # target's own forced includes pull in ahead of it. Keyed by the
         # importer too, unlike the unnameable warning: it is the target's args
@@ -2190,7 +2190,7 @@ class NinjaBackend(backends.Backend):
         target on a network share -- then falls back to an NTFS junction, which
         any user can make on a local volume. A platform that can do neither
         (FAT/exFAT, or a junction target off the local volume) leaves the header
-        unit unnameable, and warn_on_unmappable_header_units reports it.
+        unit unnameable, and check_header_unit_names reports it.
         """
         if not mesonlib.is_windows():
             try:
@@ -2216,7 +2216,7 @@ class NinjaBackend(backends.Backend):
     def _space_free_dir_alias(self, real_dir: str) -> T.Optional[str]:
         """A space-free build-relative alias for a directory whose path
         contains whitespace, or None when the platform cannot express one (the
-        caller then falls back to warn_on_unmappable_header_units).
+        caller then falls back to check_header_unit_names).
 
         GCC names a header unit by the *text* of the path it was resolved
         through, and a module mapper cannot quote whitespace, so a unit under a
@@ -2482,30 +2482,75 @@ class NinjaBackend(backends.Backend):
             mlog.debug(f'Could not probe the path of header unit {spelling!r}.')
         return found
 
-    def warn_on_unmappable_header_units(self, target: build.BuildTarget,
-                                        args: T.Union['CompilerArgs', T.List[str]]) -> None:
-        """Warn when a GCC module mapper cannot name a declared header unit.
+    def check_header_unit_names(self, target: build.BuildTarget,
+                                args: T.Union['CompilerArgs', T.List[str]]) -> None:
+        """Report the declared header units GCC cannot name.
 
-        A unit's mapper key is its resolved header path, and a mapper file's
-        key ends at the first space or tab with no quoting or escape form, so a
-        header under a path containing whitespace is unnameable and the import
-        fails at compile. Such a header is normally reached through a space-free
-        alias (_respell_dir), which leaves no whitespace in the key at all; this
-        fires only where that alias was needed and the platform could not make
-        one, or where the path is the compiler's own and no -I of ours can
-        respell it. Reported once per unit -- every target importing it fails the
-        same way, and the unit itself keeps the one build-wide BMI it can still
-        be given.
+        GCC names a unit by its resolved header path: that path is both the key
+        an importer's module mapper looks the unit up by and the stem of the CMI
+        path GCC writes it to by default. Two things can leave a unit without a
+        usable name, and each gets its own diagnosis.
+
+        The header resolves nowhere (no name at all). Nothing can be built for
+        it -- a name is what both halves of the naming scheme are a function of --
+        so _provision_header_unit_edges emits no edge, and the unit is only ever
+        reported here. A *user* unit is answered first by walking the target's own
+        -I/-isystem entries for the file, which is a filesystem fact and asks no
+        compiler: failing that walk means the header is on none of them, and the
+        compiler probe that follows is a courtesy for a quote-form spelling
+        falling through to the compiler's own search path. Nothing about the
+        resulting build can work, so it is an error. A *system* spelling has no
+        such offline answer -- only the probe, a compiler run that also comes back
+        empty when the target's own args fail to preprocess, when a sysroot cannot
+        be entered, or when the compiler cannot be spawned at all. A probe that
+        misses must not take the build down with it: the unit is dropped with a
+        warning, which costs nothing where it was declared but never imported, and
+        where it *is* imported the compiler reports the missing header itself, at
+        the importer's own scan.
+
+        The resolved path holds whitespace. A mapper key ends at the first space
+        or tab and has no quoting or escape form, so the unit cannot be named in
+        one. Such a header is normally reached through a space-free alias
+        (_respell_dir), which leaves no whitespace in the key at all; this fires
+        only where that alias was needed and the platform could not make one, or
+        where the path is the compiler's own and no -I of ours can respell it.
+        The unit still builds, at the one default-named path a mapper-less edge
+        can give it, so this stays a warning.
+
+        Reported once per unit: every target importing it fails the same way.
         """
         compiler = target.compilers['cpp']
         for hu in target.cpp_header_units:
             mode, spelling = self._header_unit_spelling(hu, compiler)
             key = self._header_unit_gcc_name(compiler, args, mode, spelling)
-            if key is None or not self._has_space(key):
+            if key is not None and not self._has_space(key):
                 continue
-            if spelling in self._warned_unmappable_header_units:
+            if key is None and mode == 'user':
+                raise MesonException(
+                    f'Cannot resolve the C++ header unit {spelling!r} declared by '
+                    f'target {target.name!r}: no such header on its include path. '
+                    'A header unit is named by the path it resolves to, which GCC '
+                    'needs before anything can be built for it, so a header that '
+                    'does not exist yet cannot be one: a header generated during '
+                    'the build (a custom_target or generator output) is not usable '
+                    'as a header unit here. Generate it at configure time '
+                    '(configure_file), add the include directory that holds it, or '
+                    'drop it from cpp_header_units and #include it instead.')
+            if spelling in self._warned_header_unit_names:
                 continue
-            self._warned_unmappable_header_units.add(spelling)
+            self._warned_header_unit_names.add(spelling)
+            if key is None:
+                mlog.warning(
+                    f'Cannot resolve the C++ header unit {spelling!r} declared by '
+                    f'target {target.name!r}: the compiler finds no such header. It '
+                    'is on no include path, or it is generated during the build -- a '
+                    'header unit is named by the path it resolves to, which GCC needs '
+                    'at configure time, so a header that does not exist yet cannot be '
+                    'one. Meson builds no BMI for it: a source importing it fails to '
+                    'build, the compiler reporting the missing header itself. Fix the '
+                    'spelling or the dependency that provides the header, or drop it '
+                    'from cpp_header_units.', fatal=False)
+                continue
             mlog.warning(
                 f'Target {target.name!r} imports the C++ header unit {spelling!r}, '
                 f'which resolves to {key!r} -- a path containing whitespace. GCC '
@@ -4510,10 +4555,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
             if cid == 'gcc':
-                # Fires only where an alias was needed and could not be made:
-                # a successful respelling leaves no whitespace in the resolved
-                # path, which is exactly what the warning tests for.
-                self.warn_on_unmappable_header_units(target, args)
+                # The only place a unit GCC cannot name is reported. The edges
+                # below just skip such a unit; what it means is decided here.
+                self.check_header_unit_names(target, args)
                 # Costs a probe only on a target that forces includes at all.
                 self.warn_on_preincluded_header_units(target, args)
             outputs, consumer_args, bmis = self._provision_header_unit_edges(
@@ -4566,13 +4610,26 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             mappable = flat = False
             if is_gcc:
                 name = self._header_unit_gcc_name(compiler, args, mode, canon)
+                if name is None:
+                    # A header that resolves nowhere has no name, and GCC derives
+                    # both halves of a unit's identity from the name: the mapper
+                    # key its importers look it up by, and the default CMI path it
+                    # writes the BMI to. An edge for it could only declare an
+                    # output GCC will not write -- with no name there is no mapper
+                    # to send it elsewhere, so it falls back to that default path --
+                    # leaving the output permanently missing and the edge, plus
+                    # every scan and compile ordered on it, dirty on every ninja
+                    # run. So the unit is not built at all, and nothing waits on a
+                    # BMI that will not appear. check_header_unit_names has already
+                    # said so at setup (fatally, for a user unit).
+                    continue
                 owner_key, _ = self._header_unit_class.setdefault(base, (class_key, declarer))
                 if warn_target is not None:
                     self.warn_on_header_unit_divergence(warn_target, class_key, base, canon)
-                # A mapper key holds no whitespace, and an unresolved header has
-                # no key at all; either way the unit keeps default naming and
-                # takes no mapper (warn_on_unmappable_header_units reports it).
-                mappable = name is not None and not self._has_space(name)
+                # A mapper key holds no whitespace, so a unit under a spaced path
+                # keeps GCC's default naming and takes no mapper of its own
+                # (check_header_unit_names reports it).
+                mappable = not self._has_space(name)
                 # Scan edges carry no mapper, so a scan of any class reaches a
                 # unit only at its default-named path. The class that declared it
                 # first therefore builds its BMI there -- not a copy of one -- and
@@ -4587,7 +4644,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             output = self._header_units.get(key)
             if output is None:
                 mapper: T.Optional[str] = None
-                if is_gcc and flat and name is not None:
+                if is_gcc and flat:
+                    assert name is not None, 'a unit GCC cannot name is skipped above'
                     output = flat_cmi_path(name, flat_dir, suffix)
                 else:
                     output = self._class_header_unit_path(key, canon, suffix)

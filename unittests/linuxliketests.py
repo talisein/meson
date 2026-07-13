@@ -1926,6 +1926,54 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             self.build()
         self.assertIn('Building C++ header unit util.h', cm.exception.output)
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_generated_at_build_time_errors(self):
+        # A header a custom_target writes during the build, declared as a header
+        # unit. GCC names a unit by the path its header resolves to, and derives
+        # both the importer's mapper key and the default CMI path from that name,
+        # so a header that does not exist while Meson is deciding what to build
+        # cannot be given a unit at all. Setup must say so: the alternative is an
+        # edge whose declared BMI GCC never writes (having no mapper, it writes
+        # its own default path instead), leaving that edge and everything ordered
+        # behind it dirty on every ninja run, forever.
+        testdir = os.path.join(self.unit_test_dir, '198 unresolvable header unit')
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir)
+        self.assertIn("Cannot resolve the C++ header unit 'generated.h'", cm.exception.output)
+        self.assertIn('custom_target', cm.exception.output)
+        # Distinct from the two other header-unit diagnostics.
+        self.assertNotIn('cannot name a header unit', cm.exception.output)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_unresolvable_system_warns(self):
+        # The same unnameable unit, reached the other way: an angle spelling that
+        # resolves nowhere. Only a probe of the compiler can answer for one of
+        # those, and a probe comes back empty for reasons that are not a missing
+        # header, so this warns rather than failing setup -- and the unit is
+        # dropped, not built. Nothing imports it here, so the build must succeed
+        # and, the sharp part, be a clean no-op afterwards (noop_check): the bug
+        # this covers is an edge declaring a BMI nothing writes, which ninja
+        # rebuilds forever.
+        self.build_and_check_modules('198 unresolvable header unit',
+                                     extra_args=['-Dmode=system-missing'],
+                                     setup_contains=["Cannot resolve the C++ header unit "
+                                                     "'nosuchpkg/nope.h'"],
+                                     setup_not_contains=['cannot name a header unit'],
+                                     ninja_args_not_contains=(),
+                                     ninja_not_contains=['nope.h'])
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler=('gcc', 'clang'))
+    def test_header_unit_configure_file(self):
+        # The line between a generated header that can be a unit and one that
+        # cannot: configure_file writes this one while Meson is still running, so
+        # it resolves on the include path like any other header and its unit is
+        # built, imported and run. Pins the documented limitation to
+        # build-time generation alone.
+        self.build_and_check_modules('198 unresolvable header unit',
+                                     extra_args=['-Dmode=configure'],
+                                     setup_not_contains=['Cannot resolve'],
+                                     ninja_args_not_contains=())
+
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='clang')
     def test_clang_stl_header_units(self):
         # Same fixture on clang: the unit BMI is built from the absolute

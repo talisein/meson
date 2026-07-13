@@ -528,6 +528,30 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertIn('not declared in this target', cm.exception.stdout)
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
+    def test_msvc_header_unit_configure_file(self):
+        # A header written by configure_file is on disk before any of the build
+        # is decided, so it is a header unit like any other -- the counterpart to
+        # the build-time-generated header GCC cannot name (which does not apply to
+        # cl, whose unit is named by its /headerName: import spelling, not a
+        # resolved path). The unit's .ifc is pre-built to the class ifc cache and
+        # its importer resolves it through a /headerUnit:quote mapping.
+        self.build_and_check_modules('198 unresolvable header unit',
+                                     extra_args=['-Dmode=configure'],
+                                     setup_not_contains=['Cannot resolve'],
+                                     ninja_args_not_contains=())
+        hudir = os.path.join(self.builddir, 'meson-private', 'header-units')
+        self.assertEqual(len(glob(os.path.join(hudir, 'configured.h.*.ifc'))), 1)
+        # The one command-line surface for a cl header unit: the consumer names
+        # the unit .ifc only as a /headerUnit mapping, never a named-module BMI.
+        saw = False
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('ARGS =') and 'configured.h' in line and '.ifc' in line:
+                    self.assertIn('/headerUnit:quote', line)
+                    saw = True
+        self.assertTrue(saw, 'no consumer named the configured.h header unit')
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_unit_aliasing(self):
         # The same header imported from TUs in different directories. With the
         # include-path spelling every importer resolves the one declared unit:
