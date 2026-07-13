@@ -266,6 +266,8 @@ kwargs:
       For an internal (implementation) module partition -- `module pkg:impl;`
       with no export -- use `cpp_internal_partitions` instead: cl compiles it
       with `/internalPartition` and rejects an interface file extension for it.
+      Listing a source in both keywords is an error: a source is an interface
+      unit or an internal partition, not both.
 
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
@@ -295,7 +297,10 @@ kwargs:
       `cpp_private_module_interfaces` is fine, and is in fact how a partition
       of a *private* primary module is itself marked private: see
       `cpp_private_module_interfaces` below, since a partition does not
-      automatically inherit privacy from its primary.
+      automatically inherit privacy from its primary. Listing one in both
+      `cpp_internal_partitions` and `cpp_module_interfaces`, on the other hand,
+      is an error: a source is an interface unit or an internal partition, not
+      both.
 
       Currently supported with GCC (>= 14), MSVC, and Clang (needs a
       P1689-capable `clang-scan-deps`) on the Ninja backend only.

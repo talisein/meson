@@ -1343,6 +1343,24 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         out = self.init(testdir, extra_args=['-Dmode=both-kwargs'], allow_fail=True)
         self.assertIn('in both cpp_module_interfaces and cpp_private_module_interfaces', out)
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler=('gcc', 'clang'))
+    def test_cpp_internal_partitions_interface_overlap_error(self):
+        # Listing a source in both cpp_module_interfaces and
+        # cpp_internal_partitions is a configure-time error: a source is an
+        # interface unit or an internal partition, not both. Only the partition
+        # declaration would be acted on (on MSVC the source would compile with
+        # /internalPartition), so the module the user declared an interface
+        # would never be produced as one, and its importers would fail at build
+        # time with a puzzling error instead. The neighbouring cell of that
+        # matrix -- a partition that is also private -- stays allowed, and
+        # test_cpp_private_module_interfaces above (whose library lists a
+        # partition in both cpp_internal_partitions and
+        # cpp_private_module_interfaces, alongside a public interface) is the
+        # positive control that this check does not reach it.
+        testdir = os.path.join(self.unit_test_dir, '199 module internal partition diagnostics')
+        out = self.init(testdir, allow_fail=True)
+        self.assertIn('in both cpp_module_interfaces and cpp_internal_partitions', out)
+
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_name_collision(self):
         # Two libraries each privately export a module literally named

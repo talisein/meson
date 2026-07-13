@@ -4193,6 +4193,17 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'Target {name!r} uses C++ modules, which are only supported '
                 f'with the Ninja backend (current backend: {self.backend.name}).')
 
+        # Every entry of the three module-source kwargs must name one of the
+        # target's own sources, and each pair of them is either a contradiction
+        # or a meaningful combination. The full matrix, since only the checks
+        # below know it:
+        #   cpp_module_interfaces x cpp_internal_partitions:         an error, a
+        #     source is an interface unit or an internal partition, not both.
+        #   cpp_module_interfaces x cpp_private_module_interfaces:   an error,
+        #     being private already implies being an interface.
+        #   cpp_internal_partitions x cpp_private_module_interfaces: allowed --
+        #     that is how a partition is itself marked private, since privacy is
+        #     not inherited from the primary module.
         self._check_cpp_header_units_supported(name, target)
         self._check_cpp_module_interfaces(name, target)
         self._check_cpp_internal_partitions(name, target)
@@ -4235,20 +4246,34 @@ class Interpreter(InterpreterBase, HoldableObject):
 
     def _check_cpp_internal_partitions(self, name: str, target: build.BuildTarget) -> None:
         # An internal (implementation) partition entry must name one of the
-        # target's own sources, like cpp_module_interfaces. MSVC additionally
-        # rejects an interface file extension for an internal partition (a .ixx
-        # is a module-interface extension and is incompatible with
-        # /internalPartition), so the source should carry a plain implementation
-        # extension (.cpp); use a .cpp there for a portable meson.build.
+        # target's own sources, like cpp_module_interfaces. A source may not be
+        # listed in both: a C++ source is one or the other, an interface unit or
+        # an internal partition, and only the partition kwarg would be acted on
+        # (MSVC would compile the declared interface with /internalPartition, so
+        # its module is never produced as an interface at all).
+        #
+        # MSVC additionally rejects an interface file extension for an internal
+        # partition (a .ixx is a module-interface extension and is incompatible
+        # with /internalPartition), so the source should carry a plain
+        # implementation extension (.cpp); use a .cpp there for a portable
+        # meson.build.
         if not target.cpp_internal_partitions:
             return
         sources = set(target.sources)
+        public_interfaces = {
+            entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
+            for entry in target.cpp_module_interfaces}
         for entry in target.cpp_internal_partitions:
             f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
             if f not in sources:
                 raise InvalidArguments(
                     f'Target {name!r} lists {entry!s} in cpp_internal_partitions, but '
                     "it is not one of the target's sources.")
+            if f in public_interfaces:
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in both cpp_module_interfaces and '
+                    'cpp_internal_partitions; a C++ source is one or the other (an '
+                    'interface unit or an internal partition), so list it in exactly one.')
 
     def _check_cpp_private_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
         # Every cpp_private_module_interfaces entry must name one of the
