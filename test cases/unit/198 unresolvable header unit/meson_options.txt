@@ -1,0 +1,2 @@
+option('mode', type: 'combo',
+       choices: ['generated', 'system-missing', 'configure'], value: 'generated')

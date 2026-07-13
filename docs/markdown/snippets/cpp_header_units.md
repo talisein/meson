@@ -38,6 +38,15 @@ Current limitations:
   their prerequisites (absorbed textually) are fine.
 - Every header unit a source imports must be declared on its target; the
   declaration does not propagate through dependencies.
+- **GCC: a header unit must exist when Meson runs.** GCC names a header unit by
+  the path its header resolves to — that name is both the key an importer looks
+  the unit up by and the path the BMI is written to — so Meson has to resolve it
+  at configure time. A header produced *during* the build (a `custom_target` or
+  `generator` output) therefore cannot be declared as a header unit on GCC;
+  Meson reports it at configure time and builds no unit for it. A
+  `configure_file` output is fine: it exists by the time configuration ends and
+  resolves on the include path like any other header. Otherwise, `#include` the
+  generated header instead of importing it.
 - **Spelling discipline.** An importer-relative spelling that traverses
   directories (`import "../hdr.h";` from a subdirectory source) is fragile and
   handled differently by each compiler, so **prefer one include-path spelling
