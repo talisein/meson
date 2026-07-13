@@ -1233,7 +1233,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             be.environment = mock.MagicMock()
             be.environment.get_build_dir.return_value = build
 
-            rel = be._space_free_dir_alias(real)
+            rel = be._dir_alias_root(real)
             if rel is None:
                 raise SkipTest('platform can make neither a symlink nor a junction here')
             self.assertRegex(rel, r'^meson-private/imap/[0-9a-f]+$')
@@ -1247,7 +1247,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             # (a junction's readlink carries a '\\?\' prefix that must compare
             # equal to the plain target, so it is not recreated every time).
             be._dir_aliases = {}
-            self.assertEqual(be._space_free_dir_alias(real), rel)
+            self.assertEqual(be._dir_alias_root(real), rel)
 
             # Force the junction fallback: an unprivileged build cannot make a
             # symlink, but a junction still names the unit on local NTFS.
@@ -1257,7 +1257,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 f.write('#pragma once\n')
             be._dir_aliases = {}
             with mock.patch.object(nb.os, 'symlink', side_effect=OSError):
-                rel2 = be._space_free_dir_alias(real2)
+                rel2 = be._dir_alias_root(real2)
             if rel2 is not None:
                 with open(os.path.join(build, rel2, 'hdr.h'), encoding='utf-8') as f:
                     self.assertIn('pragma once', f.read())

@@ -491,6 +491,49 @@ class InternalTests(unittest.TestCase):
         self.assertIn('$HUMAPPER', command_str)
         self.assertIn('-fmodule-only', command_str)
 
+    def test_dir_alias_root_keying(self):
+        # An alias root is a pure function of (real_dir, class_tag): the same
+        # keying must land on the same root across calls (idempotent
+        # regeneration), two tags over one directory must get two roots (that
+        # is what gives two BMI classes two unit names), and a None tag must
+        # produce exactly the legacy space-free path -- same digest input,
+        # same imap/<12hex> shape -- so existing spaced-path builds regenerate
+        # byte-identically.
+        import hashlib
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        with tempfile.TemporaryDirectory() as d:
+            build = os.path.join(d, 'build')
+            real = os.path.join(d, 'src dir')
+            os.makedirs(build)
+            os.makedirs(real)
+            be = NinjaBackend.__new__(NinjaBackend)
+            be._dir_aliases = {}
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = build
+
+            legacy = be._dir_alias_root(real)
+            if legacy is None:
+                raise unittest.SkipTest('platform cannot make a directory link here')
+            # The None keying is pinned to the digest of the directory alone.
+            digest = hashlib.sha256(real.encode()).hexdigest()[:12]
+            self.assertEqual(legacy, f'meson-private/imap/{digest}')
+
+            tagged = be._dir_alias_root(real, 'aaaabbbbcccc')
+            other = be._dir_alias_root(real, 'ddddeeeeffff')
+            self.assertIsNotNone(tagged)
+            self.assertIsNotNone(other)
+            # Distinct roots per keying, all in the same imap namespace.
+            self.assertEqual(len({legacy, tagged, other}), 3)
+            for rel in (tagged, other):
+                self.assertRegex(rel, r'^meson-private/imap/[0-9a-f]{12}$')
+                # Each root reaches the same real directory.
+                self.assertTrue(os.path.samefile(os.path.join(build, rel), real))
+            # Same dir + same tag -> the same root, including across a fresh
+            # backend (the on-disk link readback, not just the memo).
+            self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
+            be._dir_aliases = {}
+            self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
+
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both
         # parse a declared header unit into (mode, spelling); they share

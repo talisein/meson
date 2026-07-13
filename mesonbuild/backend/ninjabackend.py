@@ -644,9 +644,11 @@ class NinjaBackend(backends.Backend):
         # importer too, unlike the unnameable warning: it is the target's args
         # that are wrong, and another target declaring the same unit is fine.
         self._warned_preincluded_header_units: T.Set[T.Tuple[str, str]] = set()
-        # Real directory -> space-free build-relative alias (None if the
-        # platform could not make one), for GCC header-unit naming.
-        self._dir_aliases: T.Dict[str, T.Optional[str]] = {}
+        # (real directory, class tag) -> build-relative alias root (None if the
+        # platform could not make one), for GCC header-unit naming. The class
+        # tag is None for a space-free mapper key and a BMI-class digest for a
+        # per-class unit name; the two keyings never share a root.
+        self._dir_aliases: T.Dict[T.Tuple[str, T.Optional[str]], T.Optional[str]] = {}
         # Where the compiler resolves a header unit to, memoised: the probe
         # spawns the compiler, and a unit is declared by many targets. The
         # value is (resolved path or None, whether the compiler exited clean).
@@ -2217,27 +2219,43 @@ class NinjaBackend(backends.Backend):
         except OSError:
             return False
 
-    def _space_free_dir_alias(self, real_dir: str) -> T.Optional[str]:
-        """A space-free build-relative alias for a directory whose path
-        contains whitespace, or None when the platform cannot express one (the
-        caller then falls back to check_header_unit_names).
+    def _dir_alias_root(self, real_dir: str,
+                        class_tag: T.Optional[str] = None) -> T.Optional[str]:
+        """A build-relative alias root for a directory, reached through a link
+        that does not move the files under it, or None when the platform cannot
+        express one (the caller then falls back to check_header_unit_names).
 
         GCC names a header unit by the *text* of the path it was resolved
-        through, and a module mapper cannot quote whitespace, so a unit under a
-        spaced path is unnameable. GCC does not resolve the link in that text
-        either, so routing the include path through a space-free link renames
-        the unit without moving the header.
+        through, and does not resolve the link in that text, so routing an
+        include path through an alias root renames every unit under it without
+        moving a header. This serves two unrelated needs:
 
-        The link is a symlink on POSIX; on Windows a directory symlink where the
-        build has the privilege for it, else an NTFS junction (see
-        _make_dir_link).
+        - class_tag is None: a space-free spelling of a spaced directory. A
+          module mapper cannot quote whitespace, so a unit under a spaced path
+          is otherwise unnameable.
+        - class_tag is a BMI-class digest: a per-class name for a unit, so that
+          each BMI class reaches a header through its own root and so earns its
+          own default-named CMI.
+
+        The root is a pure function of (real_dir, class_tag): two classes over
+        one directory get two roots, and one class across reconfigures gets the
+        same root. The link is a symlink on POSIX; on Windows a directory
+        symlink where the build has the privilege for it, else an NTFS junction
+        (see _make_dir_link).
         """
         try:
-            return self._dir_aliases[real_dir]
+            return self._dir_aliases[(real_dir, class_tag)]
         except KeyError:
             pass
         alias: T.Optional[str] = None
-        digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
+        # The None keying hashes the directory alone -- its path is the whole
+        # identity. A class tag folds in so one directory yields a distinct root
+        # per class; the separator keeps two (tag, dir) splits from colliding.
+        if class_tag is None:
+            digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
+        else:
+            digest = hashlib.sha256(
+                (class_tag + '\0' + real_dir).encode()).hexdigest()[:12]
         rel = f'meson-private/imap/{digest}'
         abs_alias = os.path.join(self.environment.get_build_dir(), rel)
         try:
@@ -2253,11 +2271,11 @@ class NinjaBackend(backends.Backend):
                 if self._make_dir_link(real_dir, abs_alias):
                     alias = rel
         except OSError:
-            mlog.debug(f'Could not create a space-free alias for {real_dir!r}.')
-        self._dir_aliases[real_dir] = alias
+            mlog.debug(f'Could not create an alias root for {real_dir!r}.')
+        self._dir_aliases[(real_dir, class_tag)] = alias
         return alias
 
-    def _respell_dir(self, d: str) -> T.Optional[str]:
+    def _respell_dir(self, d: str, class_tag: T.Optional[str] = None) -> T.Optional[str]:
         """A space-free spelling of a build-relative directory.
 
         A directory under the source tree is respelled by substituting the
@@ -2278,15 +2296,16 @@ class NinjaBackend(backends.Backend):
         # on its own -- exactly the two-names-for-one-BMI outcome above warns
         # against.
         if d == root or d.replace('\\', '/').startswith(root.replace('\\', '/') + '/'):
-            alias = self._space_free_dir_alias(self.environment.get_source_dir())
+            alias = self._dir_alias_root(self.environment.get_source_dir(), class_tag)
             return None if alias is None else alias + d[len(root):]
         # Outside the source tree (an absolute include dir, or a generated
         # source under a spaced build subdirectory): nothing traverses out of
         # it, so it needs no prefix preserved and can be aliased whole.
-        return self._space_free_dir_alias(
-            os.path.normpath(os.path.join(self.environment.get_build_dir(), d)))
+        return self._dir_alias_root(
+            os.path.normpath(os.path.join(self.environment.get_build_dir(), d)),
+            class_tag)
 
-    def _respell_path(self, p: str) -> T.Optional[str]:
+    def _respell_path(self, p: str, class_tag: T.Optional[str] = None) -> T.Optional[str]:
         # Only the directory matters: a quote-form import searches the
         # includer's directory first, spelled as the source was spelled on the
         # command line, so that is what lands in the key. A spaced basename is
@@ -2294,10 +2313,11 @@ class NinjaBackend(backends.Backend):
         head, tail = os.path.split(p)
         if not head:
             return p
-        alias = self._respell_dir(head)
+        alias = self._respell_dir(head, class_tag)
         return None if alias is None else os.path.join(alias, tail)
 
-    def _respell_include_args(self, args: T.List[str]) -> T.List[str]:
+    def _respell_include_args(self, args: T.List[str],
+                              class_tag: T.Optional[str] = None) -> T.List[str]:
         out: T.List[str] = []
         it = iter(args)
         for arg in it:
@@ -2306,18 +2326,19 @@ class NinjaBackend(backends.Backend):
                     out.append(arg)
                     nxt = next(it, None)
                     if nxt is not None:
-                        out.append(self._respell_dir(nxt) or nxt)
+                        out.append(self._respell_dir(nxt, class_tag) or nxt)
                     break
                 if arg.startswith(flag):
                     d = arg[len(flag):]
-                    out.append(flag + (self._respell_dir(d) or d))
+                    out.append(flag + (self._respell_dir(d, class_tag) or d))
                     break
             else:
                 out.append(arg)
         return out
 
     def _header_unit_spelling(self, hu: T.Union[File, str],
-                              compiler: Compiler) -> T.Tuple[str, str]:
+                              compiler: Compiler,
+                              class_tag: T.Optional[str] = None) -> T.Tuple[str, str]:
         """(mode, spelling) of a declared header unit as the edges spell it.
 
         A File-declared unit carries a path, which on GCC is respelled through
@@ -2326,7 +2347,7 @@ class NinjaBackend(backends.Backend):
         """
         mode, spelling = self._parse_header_unit(hu, self.build_to_src)
         if compiler.get_id() == 'gcc' and self._has_space(spelling):
-            spelling = self._respell_path(spelling) or spelling
+            spelling = self._respell_path(spelling, class_tag) or spelling
         return mode, spelling
 
     def _target_needs_path_aliases(self, target: build.BuildTarget, compiler: Compiler) -> bool:
