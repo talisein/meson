@@ -817,6 +817,17 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                            'kwmod', 'genmod', 'dot.mod.sub'])
         self.check_gcc_module_mappers()
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
+    def test_gcc_generated_module_sources(self):
+        # The module surface built entirely from generated sources: a primary
+        # interface, an interface partition it re-exports, an implementation
+        # unit, a consumer that only imports, a re-exporting interface, and two
+        # private-by-construction modules sharing a name. Each test() links a
+        # producer/consumer pair, so a wrong BMI (or a private-module collision)
+        # makes a program exit nonzero.
+        self.build_and_check_modules('201 generated module sources',
+                                     bmis=['pkg', 'pkg:part', 'wrap'])
+
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
     def test_gcc_cpp_module_interfaces(self):
         # A .cc source declared a module interface via cpp_module_interfaces
@@ -912,6 +923,16 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                     self.assertIn('-fmodules -fno-modules', line)
                     saw_ccache_pair = True
         self.assertTrue(saw_ccache_pair, 'no module compile carried the ccache-defeating pair')
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
+    def test_clang_generated_module_sources(self):
+        # The generated-source module surface on clang: primary interface,
+        # re-exported interface partition, implementation unit, import-only
+        # consumer, a re-exporting interface, and two private-by-construction
+        # modules of the same name. See test_gcc_generated_module_sources.
+        self.build_and_check_modules('201 generated module sources',
+                                     bmis=['pkg', 'pkg:part', 'wrap'],
+                                     ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='clang')
     def test_clang_cpp_module_interfaces(self):

@@ -465,6 +465,15 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 if line.startswith('build '):
                     self.assertNotIn('COMPILER_RSP', line)
 
+    @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
+    def test_msvc_generated_module_sources(self):
+        # The generated-source module surface on cl: primary interface,
+        # re-exported interface partition, implementation unit, import-only
+        # consumer, a re-exporting interface, and two private-by-construction
+        # modules of the same name. See test_gcc_generated_module_sources.
+        self.build_and_check_modules('201 generated module sources',
+                                     bmis=['pkg', 'pkg:part', 'wrap'])
+
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
     def test_msvc_cpp_module_interfaces(self):
         # A .cc source declared a module interface via cpp_module_interfaces gets
