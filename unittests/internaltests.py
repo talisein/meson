@@ -142,6 +142,48 @@ class InternalTests(unittest.TestCase):
             with open(dyndep, encoding='utf-8') as f:
                 self.assertIn('ninja_dyndep_version = 1', f.read())
 
+    def test_depaccumulate_header_unit_mapline_join(self):
+        # The GCC collate emits every declared name of a header unit's BMI into
+        # each importer's mapper: a scan reports one name (an alias spelling)
+        # while the compile asks the mapper for another (the real one), and a
+        # mapper disables default naming outright, so a name missing from it is
+        # a hard "no such module". A reverse map bmi -> [names] joins them; a
+        # build with no --header-unit-bmi pairs is unchanged.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import flat_cmi_path
+
+        def mapper_lines(reported, pairs):
+            with tempfile.TemporaryDirectory() as d:
+                obj = os.path.join(d, 'a.o')
+                ddi = obj + '.ddi'
+                with open(ddi, 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': obj, 'provides': [],
+                                          'requires': [{'logical-name': reported}]}]}, f)
+                argv = ['--dyndep', os.path.join(d, 'out.dd'),
+                        '--provmap', os.path.join(d, 'pm.json'),
+                        '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
+                        '--mapper-suffix', '.mapper', '--flat-bmi-dir', 'gcm.cache']
+                for name, bmi in pairs:
+                    argv += ['--header-unit-bmi', name, bmi]
+                argv.append(ddi)
+                self.assertEqual(run_p1689(argv), 0)
+                with open(obj + '.mapper', encoding='utf-8') as f:
+                    return [ln for ln in f.read().splitlines() if 'util.h' in ln]
+
+        # Two names bound to one BMI: a require reporting either name gets both
+        # maplines, pointing at that BMI.
+        bmi = flat_cmi_path('./a/util.h', 'gcm.cache', '.gcm')
+        pairs = [('./a/util.h', bmi), ('./b/util.h', bmi)]
+        self.assertEqual(sorted(mapper_lines('./a/util.h', pairs)),
+                         sorted([f'./a/util.h {bmi}', f'./b/util.h {bmi}']))
+        self.assertEqual(sorted(mapper_lines('./b/util.h', pairs)),
+                         sorted([f'./a/util.h {bmi}', f'./b/util.h {bmi}']))
+
+        # No pairs: the scan-reported name reconstructs to its own default path,
+        # and nothing joins in -- one mapline, unchanged from before the join.
+        recon = flat_cmi_path('./c/util.h', 'gcm.cache', '.gcm')
+        self.assertEqual(mapper_lines('./c/util.h', []), [f'./c/util.h {recon}'])
+
     def test_supports_cpp_modules_p1689(self):
         # The P1689 pipeline (P1689 scan/collate, header units) needs
         # GCC >= 14 or MSVC >= 19.32; an older but modules-capable compiler
@@ -508,6 +550,7 @@ class InternalTests(unittest.TestCase):
             os.makedirs(real)
             be = NinjaBackend.__new__(NinjaBackend)
             be._dir_aliases = {}
+            be._alias_root_real = {}
             be.environment = mock.MagicMock()
             be.environment.get_build_dir.return_value = build
 

@@ -191,10 +191,11 @@ def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
 
     Scan edges carry no mapper -- one would disable default naming for named
     modules too, whose names only the scan itself supplies -- so a scan reaches a
-    unit only here. The backend builds the unit's first-declaring class's BMI at
-    this path and names the other classes' outright (--header-unit-bmi); both
-    sides derive the path from this function, which is why it lives here rather
-    than in either of them.
+    unit only here, at the path its own class-embedded name mangles to. The
+    backend builds each class's BMI at its own such path and, where a compile
+    computes a different name than the scan reports, pairs that name with the BMI
+    (--header-unit-bmi); both sides derive the path from this function, which is
+    why it lives here rather than in either of them.
     """
     parts = logical_name.split('/')
     if len(parts) > 1 and len(parts[0]) == 2 and parts[0][1] == ':' and parts[0][0].isalpha():

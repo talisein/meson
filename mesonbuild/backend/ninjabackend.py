@@ -631,9 +631,10 @@ class NinjaBackend(backends.Backend):
         # shared across dialects, so each divergence is reported once; the class
         # that first declared each unit is recorded at edge creation.
         self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
-        # (mode, spelling) -> the BMI class and target that first declared it.
-        # On GCC that class is also the unit's designated one, whose BMI stands
-        # at the flat default-named path (see _provision_header_unit_edges).
+        # (mode, spelling) -> the BMI class and target that first declared it,
+        # for the divergence warning on a unit that still shares one flat BMI:
+        # a system-mode unit, or the degraded path where per-class naming is
+        # unavailable (see warn_on_header_unit_divergence).
         self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
         # Spellings already warned about for a header unit GCC cannot name.
         # Keyed by the unit, not the importer: the unit is what is unnameable,
@@ -649,6 +650,14 @@ class NinjaBackend(backends.Backend):
         # tag is None for a space-free mapper key and a BMI-class digest for a
         # per-class unit name; the two keyings never share a root.
         self._dir_aliases: T.Dict[T.Tuple[str, T.Optional[str]], T.Optional[str]] = {}
+        # Inverse of the above for the roots that exist: alias root ->
+        # real directory, so an already-aliased path can be re-aliased to
+        # another class (a BMI-only variant re-targets the provider's spelling).
+        self._alias_root_real: T.Dict[str, str] = {}
+        # Whether this build tree can make directory links at all, decided once
+        # (a canary link) so every target agrees: two same-class targets that
+        # disagreed would compute two names for one BMI. None until probed.
+        self._aliasing_available: T.Optional[bool] = None
         # Where the compiler resolves a header unit to, memoised: the probe
         # spawns the compiler, and a unit is declared by many targets. The
         # value is (resolved path or None, whether the compiler exited clean).
@@ -835,6 +844,12 @@ class NinjaBackend(backends.Backend):
                         captured_compile_args_per_target[target.get_id()] = self.generate_common_compile_args_per_src_type(target)
 
             self._compute_bmi_class_registry()
+            # Freezing the registry itself calls _generate_single_compile, which
+            # caches each target's compile args -- but a spaced multi-class GCC
+            # target respells those through its BMI-class root, a class the
+            # registry only knows once frozen. Drop that pre-freeze cache so
+            # generation recomputes the args against the finished registry.
+            self._generate_single_compile_target_args.cache_clear()
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
@@ -1614,7 +1629,8 @@ class NinjaBackend(backends.Backend):
                                  header_deps: T.Optional[T.List[FileOrString]] = None,
                                  order_deps: T.Optional[T.List[File] | T.List[FileOrString]] = None,
                                  header_unit_override: T.Optional[T.List[str]] = None,
-                                 pch_dep: T.Optional[T.List[str]] = None) -> None:
+                                 pch_dep: T.Optional[T.List[str]] = None,
+                                 class_tag: T.Optional[str] = None) -> None:
         if not self.source_uses_p1689_cpp_modules(target, compiler, rel_src):
             return
         if compiler.get_id() == 'clang':
@@ -1622,6 +1638,20 @@ class NinjaBackend(backends.Backend):
             # the clang-scan-deps feature probe, which projects without module
             # targets must not pay for.
             self.generate_cpp_module_scan_rule(compiler)
+        if compiler.get_id() == 'gcc' and target.cpp_header_units:
+            # A GCC scan carries no mapper, so it reaches a header unit only at
+            # its default-named path -- the one its own include spelling
+            # mangles to. Respell the scan's include path and source through the
+            # class root (the variant's when a BMI-only variant scan passes one,
+            # else the target's own) so each class scans, and reads, its own
+            # class's unit BMI. The compile keeps its spelling: only the scan
+            # ever sees the alias, so a non-spaced unit's CMI stays alias-free.
+            tag = class_tag if header_unit_override is not None else \
+                self._header_unit_class_subdir_for(target.for_machine, compiler,
+                                                   self._bmi_class_key_of(target))
+            if tag is not None and self._header_unit_aliasing_available():
+                commands = self._reclass_include_args(list(commands), tag)
+                rel_src = self._reclass_path(rel_src, tag)
         ddi = self.get_ddi_file_for(rel_obj)
         depfile = ddi + '.d'
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
@@ -1803,11 +1833,10 @@ class NinjaBackend(backends.Backend):
         also writes the per-TU module mappers (--mapper-suffix, in lockstep
         with the compile edges' get_module_mapper_args paths) its BMI lookups
         go through. A mapper disables GCC's default module->CMI naming
-        outright, so it must also name every header unit the TU imports: the
-        ones built for this target's own BMI class outright (--header-unit-bmi),
-        and the rest -- those left at the default-named path their
-        first-declaring class builds them at -- by reproducing that naming
-        (--flat-bmi-dir).
+        outright, so it must also name every header unit the TU imports: the one
+        the compile computes a name for that differs from the scan's, paired
+        outright (--header-unit-bmi), and the scan-reported names by reproducing
+        the default naming under the shared cache (--flat-bmi-dir).
 
         --private-map (this target's own private module names) is always
         passed; --private-bmi-dir/--private-interface/--all-provides-private
@@ -1872,9 +1901,13 @@ class NinjaBackend(backends.Backend):
 
     def _header_unit_bmi_args(self, cpp: Compiler,
                               bmis: T.List[T.Tuple[str, str]]) -> T.List[str]:
-        # Only the units this class built its own BMI of. One left at the
-        # default-named path is what --flat-bmi-dir already reconstructs, so a
-        # single-class build emits none of these.
+        # The compile-computed name of each unit paired with its BMI. A pair
+        # whose name is the BMI's own stem is dropped: --flat-bmi-dir already
+        # reconstructs it, so the pair would be redundant (which covers a whole
+        # spaced or single-class build, where the scan and compile names
+        # coincide with the stem). What survives is a BMI sitting at a name
+        # other than its own -- a real-spelling compile whose BMI stands at the
+        # scan's alias-named path -- so the collate learns that name too.
         flat_dir = cpp.get_module_cache_dir()
         suffix = cpp.get_module_bmi_suffix()
         depargs: T.List[str] = []
@@ -1944,6 +1977,15 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
+        if cpp.get_id() == 'gcc' and provider.cpp_header_units \
+                and self._header_unit_aliasing_available():
+            # The provider's include path is spelled through its *own* class
+            # root (a spaced tree) or its real directories (otherwise); either
+            # way a header unit it imports must resolve to this variant's class,
+            # so re-alias the whole include path through the variant's root.
+            # Every edge below -- unit provisioning, scan, compile -- then names
+            # the unit identically and reaches this class's BMI.
+            args = self._reclass_include_args(args, info.subdir)
         # An interface's `import <hdr>;` must resolve this class's unit BMI,
         # reusing a class-mate target's edges when they exist. Built from the
         # same pre-module args as a target's own units. `args` keeps growing
@@ -1983,12 +2025,22 @@ class NinjaBackend(backends.Backend):
             vpcm = self.get_bmi_file_for(cpp, os.path.join(private_dir, rec.obj_basename))
             header_deps = list(rec.header_deps)
             order_deps: T.List[FileOrString] = list(rec.order_deps)
-            self.generate_cpp_module_scan(provider, cpp, rec.rel_src, vpcm,
+            # The source is spelled through the provider's own class root (a
+            # spaced tree); a quote-form `import "h";` searches the includer's
+            # own directory first, so the source must be re-aliased to this
+            # variant's class too or it resolves the unit to the provider's
+            # name. Same re-aliasing the scan does internally, applied here so
+            # the compile edge agrees.
+            vsrc = self._reclass_path(rec.rel_src, info.subdir) \
+                if cpp.get_id() == 'gcc' and provider.cpp_header_units \
+                and self._header_unit_aliasing_available() else rec.rel_src
+            self.generate_cpp_module_scan(provider, cpp, vsrc, vpcm,
                                           args + iface_args,
                                           header_deps=header_deps, order_deps=order_deps,
-                                          header_unit_override=hu_outputs)
+                                          header_unit_override=hu_outputs,
+                                          class_tag=info.subdir)
             ddis.append(self.get_ddi_file_for(vpcm))
-            elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
+            elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, vsrc)
             # cl's BMI_VARIANT rule no longer bakes /interface: the per-unit
             # interface/internalPartition flag rides ARGS, as on the compile
             # edge. clang/gcc carry their unit flag in the rule itself.
@@ -2125,12 +2177,15 @@ class NinjaBackend(backends.Backend):
         """Warn when targets declaring one header unit disagree on the dialect,
         once per (unit, consumer).
 
-        Divergent classes otherwise each get their own BMI of the unit. Not this
-        one: GCC checks the dialect when it *reads* a CMI, the P1689 scan
-        included, and a scan can only reach the unit at its default-named path --
-        the first-declaring class's. No per-class BMI can rescue it. Warned about
-        here because GCC's own error names a CMI path and a language level, not
-        the two targets that disagree.
+        Reached only where a unit still shares one flat BMI across classes: a
+        system-mode unit (import <h>;, whose per-class naming lands in a later
+        step), or the degraded path where the build tree cannot make the
+        directory links a per-class user unit is named through. There a scan can
+        only reach the unit at its one default-named path, whichever class built
+        it, and GCC rejects a CMI whose dialect differs from the reader's. A
+        user unit on a link-capable tree earns a BMI per class instead and never
+        arrives here. Warned about because GCC's own error names a CMI path and a
+        language level, not the two targets that disagree.
         """
         owner_key, owner_name = self._header_unit_class[unit_key]
         if self._dialect_of(class_key) == self._dialect_of(owner_key):
@@ -2273,10 +2328,13 @@ class NinjaBackend(backends.Backend):
         except OSError:
             mlog.debug(f'Could not create an alias root for {real_dir!r}.')
         self._dir_aliases[(real_dir, class_tag)] = alias
+        if alias is not None:
+            self._alias_root_real[alias.replace('\\', '/')] = real_dir
         return alias
 
-    def _respell_dir(self, d: str, class_tag: T.Optional[str] = None) -> T.Optional[str]:
-        """A space-free spelling of a build-relative directory.
+    def _respell_dir(self, d: str, class_tag: T.Optional[str] = None,
+                     force_all: bool = False) -> T.Optional[str]:
+        """A respelled build-relative directory, reached through an alias root.
 
         A directory under the source tree is respelled by substituting the
         source root's alias for its prefix, keeping the tail intact. That
@@ -2286,8 +2344,20 @@ class NinjaBackend(backends.Backend):
         separately would give the importer 'foo_alias/../hdr.h' and the unit
         'root_alias/foo/../hdr.h' -- two names for one BMI, and neither finds
         the other's.
+
+        Two callers with different needs: a space-free spelling of a spaced
+        directory (the default), and a per-class spelling that embeds the BMI
+        class in every unit name reached through the directory (force_all,
+        which respells even a space-free directory since the class part must
+        ride regardless of whitespace).
         """
-        if not self._has_space(d):
+        # Already an alias root: respelling it again would alias a symlink and
+        # (outside the source tree) collapse the tail. The first pass is
+        # authoritative, so a compile respelled through the class root and its
+        # scan respelled again land on one spelling.
+        if d.replace('\\', '/').startswith('meson-private/imap/'):
+            return d
+        if not force_all and not self._has_space(d):
             return d
         root = self.build_to_src
         # Separator-insensitive: build_to_src and d are OS-joined (backslash on
@@ -2305,7 +2375,8 @@ class NinjaBackend(backends.Backend):
             os.path.normpath(os.path.join(self.environment.get_build_dir(), d)),
             class_tag)
 
-    def _respell_path(self, p: str, class_tag: T.Optional[str] = None) -> T.Optional[str]:
+    def _respell_path(self, p: str, class_tag: T.Optional[str] = None,
+                      force_all: bool = False) -> T.Optional[str]:
         # Only the directory matters: a quote-form import searches the
         # includer's directory first, spelled as the source was spelled on the
         # command line, so that is what lands in the key. A spaced basename is
@@ -2313,11 +2384,12 @@ class NinjaBackend(backends.Backend):
         head, tail = os.path.split(p)
         if not head:
             return p
-        alias = self._respell_dir(head, class_tag)
+        alias = self._respell_dir(head, class_tag, force_all)
         return None if alias is None else os.path.join(alias, tail)
 
     def _respell_include_args(self, args: T.List[str],
-                              class_tag: T.Optional[str] = None) -> T.List[str]:
+                              class_tag: T.Optional[str] = None,
+                              force_all: bool = False) -> T.List[str]:
         out: T.List[str] = []
         it = iter(args)
         for arg in it:
@@ -2326,19 +2398,97 @@ class NinjaBackend(backends.Backend):
                     out.append(arg)
                     nxt = next(it, None)
                     if nxt is not None:
-                        out.append(self._respell_dir(nxt, class_tag) or nxt)
+                        out.append(self._respell_dir(nxt, class_tag, force_all) or nxt)
                     break
                 if arg.startswith(flag):
                     d = arg[len(flag):]
-                    out.append(flag + (self._respell_dir(d, class_tag) or d))
+                    out.append(flag + (self._respell_dir(d, class_tag, force_all) or d))
                     break
             else:
                 out.append(arg)
         return out
 
+    def _reclass_dir(self, d: str, new_tag: T.Optional[str]) -> str:
+        """A build-relative directory respelled through the alias root of
+        `new_tag`'s BMI class, whatever class it currently carries.
+
+        A directory not yet aliased is respelled outright (force_all, so a
+        space-free directory still picks up the class part). One already routed
+        through an alias root -- a BMI-only variant inherits the provider's
+        class-respelled include path -- is un-aliased back to its real
+        directory first (the inverse map), then re-aliased through the new
+        class's root, so the variant reaches its own class's unit BMI rather
+        than the provider's.
+        """
+        norm = d.replace('\\', '/')
+        prefix = 'meson-private/imap/'
+        if norm.startswith(prefix):
+            # The alias root is the single component after imap/; the rest is
+            # the tail a source-tree alias preserves. Recover the real
+            # directory the root stands for and re-alias it through new_tag.
+            first = norm[len(prefix):].split('/', 1)[0]
+            rel = prefix + first
+            tail = d[len(rel):]
+            real_dir = self._alias_root_real.get(rel)
+            if real_dir is None:
+                return d
+            new_alias = self._dir_alias_root(real_dir, new_tag)
+            return d if new_alias is None else new_alias + tail
+        return self._respell_dir(d, new_tag, force_all=True) or d
+
+    def _reclass_path(self, p: str, new_tag: T.Optional[str]) -> str:
+        head, tail = os.path.split(p)
+        if not head:
+            return p
+        return os.path.join(self._reclass_dir(head, new_tag), tail)
+
+    def _reclass_include_args(self, args: T.List[str], new_tag: T.Optional[str]) -> T.List[str]:
+        out: T.List[str] = []
+        it = iter(args)
+        for arg in it:
+            for flag in ('-I', '-isystem'):
+                if arg == flag:
+                    out.append(arg)
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        out.append(self._reclass_dir(nxt, new_tag))
+                    break
+                if arg.startswith(flag):
+                    out.append(flag + self._reclass_dir(arg[len(flag):], new_tag))
+                    break
+            else:
+                out.append(arg)
+        return out
+
+    def _header_unit_aliasing_available(self) -> bool:
+        """Whether this build tree can make the directory links a per-class GCC
+        header unit is named through, decided once for the whole build.
+
+        Degrade the whole machine, not one target: two same-class targets that
+        disagreed on whether they alias would compute two names for one BMI. A
+        FAT/exFAT tree, or a Windows junction target off the volume, cannot
+        express a link, and then the class fork falls back to the shared-flat
+        naming plus the divergence warning.
+        """
+        if self._aliasing_available is None:
+            rel = 'meson-private/imap/.canary'
+            abs_canary = os.path.join(self.environment.get_build_dir(), rel)
+            try:
+                os.makedirs(os.path.dirname(abs_canary), exist_ok=True)
+                if self._read_dir_link(abs_canary) is not None:
+                    self._remove_dir_link(abs_canary)
+                ok = self._make_dir_link(self.environment.get_build_dir(), abs_canary)
+                if ok:
+                    self._remove_dir_link(abs_canary)
+                self._aliasing_available = ok
+            except OSError:
+                self._aliasing_available = False
+        return self._aliasing_available
+
     def _header_unit_spelling(self, hu: T.Union[File, str],
                               compiler: Compiler,
-                              class_tag: T.Optional[str] = None) -> T.Tuple[str, str]:
+                              class_tag: T.Optional[str] = None,
+                              force_all: bool = False) -> T.Tuple[str, str]:
         """(mode, spelling) of a declared header unit as the edges spell it.
 
         A File-declared unit carries a path, which on GCC is respelled through
@@ -2346,15 +2496,21 @@ class NinjaBackend(backends.Backend):
         the unit identically or they name two different units.
         """
         mode, spelling = self._parse_header_unit(hu, self.build_to_src)
-        if compiler.get_id() == 'gcc' and self._has_space(spelling):
-            spelling = self._respell_path(spelling, class_tag) or spelling
+        if compiler.get_id() == 'gcc' and (force_all or self._has_space(spelling)):
+            spelling = self._respell_path(spelling, class_tag, force_all) or spelling
         return mode, spelling
 
-    def _target_needs_path_aliases(self, target: build.BuildTarget, compiler: Compiler) -> bool:
-        """Whether this target's include path and sources must be respelled
-        through space-free aliases: only GCC module targets that declare header
+    def _compile_needs_space_free_respell(self, target: build.BuildTarget, compiler: Compiler) -> bool:
+        """Whether this target's compile include path and sources are respelled
+        through an alias root: only GCC module targets that declare header
         units. A named module's mapper key is its module name, which cannot
         contain whitespace, so nothing else needs it.
+
+        Only spaced entries actually move -- a mapper key cannot hold a space --
+        so a target with no spaced path is respelled to itself and keeps the
+        real spelling on its compile. The per-class scan respell is separate
+        (generate_cpp_module_scan): a non-spaced unit's class rides its scan
+        name, never its compile, so no alias reaches the CMI.
         """
         return (compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc'
                 and bool(target.cpp_header_units)
@@ -4664,6 +4820,61 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # key the first edge's args build the unit for every consumer.
             canon = self._canonical_header_unit(args, mode, spelling)
             base = f'{mode}:{canon}'
+            if is_gcc and mode == 'user' and class_subdir is not None \
+                    and self._header_unit_aliasing_available():
+                # The supported per-class path: every class aliases symmetrically,
+                # with no designated owner class. The scan resolves the unit
+                # under the class root (its name embeds the class, hence a
+                # class-specific default CMI path a mapper-less scan can read);
+                # the compile keeps its own spelling and a per-unit mapper writes
+                # the CMI to that scan-named path. On a non-spaced tree the two
+                # spellings differ and the CMI records the real path; on a spaced
+                # tree both are the space-free alias and coincide.
+                scan_args = self._reclass_include_args(list(args), class_subdir)
+                scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
+                compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
+                if scan_name is None or compile_name is None:
+                    continue
+                key = f'{base}:{class_subdir}'
+                output = self._header_units.get(key)
+                if output is None:
+                    output = flat_cmi_path(scan_name, flat_dir, suffix)
+                    mapper = self._class_header_unit_path(key, canon, '.mapper')
+                    self._write_header_unit_mapper(mapper, compile_name, output)
+                    elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
+                    elem.add_item('ARGS', args)
+                    elem.add_item('SPELLING', canon)
+                    elem.add_item('HULANG', f'c++-{mode}-header')
+                    elem.add_item('DEPFILE', output + '.d')
+                    elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'])
+                    elem.add_dep(mapper)
+                    elem.add_orderdep(self._header_unit_generated_deps(owner, canon))
+                    self.add_build(elem)
+                    self._header_units[key] = output
+                outputs.append(output)
+                # The pair carries the compile-computed name; the collate joins
+                # every name of this BMI into each importer's mapper, so a scan
+                # reporting the alias name and a compile asking the real one both
+                # resolve. A pair whose name is the BMI's own stem is redundant
+                # with --flat-bmi-dir reconstruction and suppressed there.
+                bmis.append((compile_name, output))
+                if spelling != canon:
+                    # An extra declared spelling of the same file: one BMI, an
+                    # extra name for it. A scan through the alias reaches the unit
+                    # only at that spelling's own default path, so link the BMI
+                    # there; the compile resolves it through the mapper.
+                    alias_scan = self._header_unit_gcc_name(compiler, scan_args, mode, spelling)
+                    alias_compile = self._header_unit_gcc_name(compiler, args, mode, spelling)
+                    if alias_scan is not None:
+                        link = self._alias_header_unit_link(alias_scan, output, flat_dir, suffix)
+                        if link not in outputs:
+                            outputs.append(link)
+                        # The compile resolves the alias spelling to the one BMI
+                        # through the mapper; the link only serves the mapper-less
+                        # scan. So the pair names that BMI, not the link.
+                        if alias_compile is not None:
+                            bmis.append((alias_compile, output))
+                continue
             key = base if class_subdir is None else f'{base}:{class_subdir}'
             name: T.Optional[str] = None
             mappable = flat = False
@@ -5226,12 +5437,20 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Finally add the private dir for the target to the include path. This
         # must override everything else and must be the final path added.
         commands += compiler.get_include_args(self.get_target_private_dir(target), False)
-        if self._target_needs_path_aliases(target, compiler):
+        if self._compile_needs_space_free_respell(target, compiler):
             # A header unit is named by the text of the include-path entry it
             # was resolved through, so a spaced entry must be respelled here --
             # the one place every consumer (compile, scan, header-unit edge and
-            # BMI variant) draws its include path from.
-            return self._respell_include_args(list(commands))
+            # BMI variant) draws its include path from. Through the target's own
+            # class root when the machine is multi-class, so a spaced unit's
+            # name embeds its class the way a non-spaced unit's scan name does;
+            # None (a space-free spelling) otherwise. force_all is off: a
+            # non-spaced entry keeps its real spelling here and is aliased only
+            # on the scan.
+            class_key = compiler.get_bmi_class_key(
+                list(target.get_single_compile_base_args(compiler)) + list(commands))
+            tag = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
+            return self._respell_include_args(list(commands), tag)
         return list(commands)
 
     # Returns a dictionary, mapping from each compiler src type (e.g. 'c', 'cpp', etc.) to a list of compiler arg strings
@@ -5425,13 +5644,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             raise AssertionError(f'BUG: broken generated source file handling for {src!r}')
         else:
             raise InvalidArguments(f'Invalid source type: {src!r}')
-        if self._target_needs_path_aliases(target, compiler):
+        if self._compile_needs_space_free_respell(target, compiler):
             # Respelling the include path is not enough: a quote-form import
             # searches the includer's own directory first, spelled the way the
             # source was spelled here, and that spelling becomes the unit's
             # name. Respell before the edge is built, so the compile's $in, the
-            # scan and the recorded interface source all agree.
-            rel_src = self._respell_path(rel_src) or rel_src
+            # scan and the recorded interface source all agree. Same class root
+            # as the include respell above; a non-spaced source is untouched.
+            tag = self._header_unit_class_subdir_for(
+                target.for_machine, compiler, self._bmi_class_key_of(target))
+            rel_src = self._respell_path(rel_src, tag) or rel_src
         obj_basename = self.object_filename_from_source(target, compiler, src)
         rel_obj = os.path.join(self.get_target_private_dir(target), obj_basename)
         dep_file = compiler.depfile_for_object(rel_obj)
