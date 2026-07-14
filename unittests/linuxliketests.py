@@ -1117,6 +1117,80 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if self.host_cpp_compiler().get_id() == 'gcc':
             self.check_gcc_module_mappers()
 
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_system_header_unit_dialect_divergence(self):
+        # The system-unit twin of test_header_unit_dialect_divergence: two
+        # classes both import <vector>, a header unit named through GCC's own
+        # built-in chain rather than any -I. Its per-class BMI is reached by
+        # aliasing that whole chain on the scan, so prog20 (c++20) and prog23
+        # (c++23) each scan and compile against their own <vector> CMI. A shared
+        # one would hard-error at the scan on the dialect mismatch, so building
+        # at all is most of the proof; the two-BMI assertions pin the mechanism.
+        self.build_and_check_modules('202 system header unit dialect divergence',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('vector')
+        self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
+        # The scan resolves <vector> through a build-relative alias root, so its
+        # CMI path is mangled from a colon-free name -- the Windows drive-letter
+        # mangling flat_cmi_path performs never applies to a gated system unit.
+        for u in units:
+            self.assertNotIn(':', u, f'gated system unit BMI path must be colon-free: {u}')
+        per_prog = {p: self.header_unit_bmis_of(p, 'vector') for p in ('prog20', 'prog23')}
+        for prog, bmis in per_prog.items():
+            self.assertEqual(len(bmis), 1, f'{prog} must resolve one <vector> BMI, got {bmis}')
+        self.assertNotEqual(per_prog['prog20'], per_prog['prog23'],
+                            'divergent dialect classes must not share a system unit BMI')
+        # The mixed case: <cstdint> has one declaring class, but the chain
+        # aliases are per target -- prog20's one scan resolves every system
+        # header through the aliased chain -- so its BMI must sit at the
+        # class-aliased path that scan resolves, not the flat real-named one.
+        cstdint = self.header_unit_bmis('cstdint')
+        self.assertEqual(len(cstdint), 1, f'expected one <cstdint> BMI, got {cstdint}')
+        self.assertIn('imap/', next(iter(cstdint)),
+                      'a single-declarer system unit on a multi-class machine '
+                      'must still be class-alias-named')
+        self.check_gcc_module_mappers()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_system_header_unit_alias_root_occupied(self):
+        # The build root's imap/ is not exclusively ours: a project with a
+        # source directory named imap mirrors real entries into it, and a
+        # stray file can sit at the path outright. An occupied root must
+        # degrade system units machine-wide with a diagnostic naming the
+        # path -- never a stack trace, and never a silent misbuild. First a
+        # healthy configure, then imap replaced by a plain file (occupying
+        # every root at once) and a reconfigure over it.
+        testdir = os.path.join(self.unit_test_dir,
+                               '202 system header unit dialect divergence')
+        self.init(testdir)
+        imap = os.path.join(self.builddir, 'imap')
+        windows_proof_rmtree(imap)
+        with open(imap, 'w', encoding='utf-8') as f:
+            f.write('occupied\n')
+        out = self.init(testdir, extra_args=['--reconfigure'])
+        self.assertIn('Cannot create the directory link', out)
+        self.assertIn('imap', out)
+        # The degraded build is the old shared-flat shape: the owner class's
+        # BMI at the real-named flat path every scan reads (the divergent
+        # class keeps a class-keyed copy its own compiles resolve), no alias
+        # naming anywhere, plus the divergence warning saying why that cannot
+        # work across these dialects.
+        self.assertIn('divergent dialects', out)
+        units = self.header_unit_bmis('vector')
+        self.assertTrue(any(re.fullmatch(r'gcm\.cache(/\S+)*/vector\.gcm', u)
+                            and 'imap' not in u for u in units),
+                        f'no real-named flat <vector> BMI among {units}')
+        for u in units:
+            self.assertNotIn('imap', u,
+                             f'degraded unit BMI must not be alias-named: {u}')
+        # GCC rejects the shared CMI under the other dialect at the scan --
+        # the failing build the warning predicts, as opposed to a quiet
+        # miscompile against the wrong class's BMI.
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('vector', cm.exception.output)
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence_builds(self):
         # What Stage 1 could only warn about must now work: prog's -pthread
@@ -1952,22 +2026,23 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # A real standard-library header unit (<vector> resolves to an
-        # absolute system path) in a two-class build: the importing TU's
-        # mapper maps its named imports per class but the unit at GCC's
-        # default mangled flat-cache path -- the absolute resolved path
-        # appended under the cache root, where units stay build-wide.
-        # It resolves out of the compiler's own search path, so its key has
-        # no space and the mapper can name it. A system unit keeps this
-        # build-wide flat naming for now, unlike the per-class user units of
-        # test_header_unit_dialect_divergence.
+        # absolute system path) in a two-class build (progfoo's -DFOO splits
+        # the class): the machine is multi-class, so the unit is class-alias-
+        # named -- prog's scan resolves <vector> through its class's chain
+        # aliases and the BMI sits at the alias name's mangled path. The
+        # compile still asks the real absolute name, so the TU's mapper must
+        # carry that name joined onto the class-aliased BMI. The flat
+        # absolute-path naming survives only on single-class machines
+        # (test_gcc_header_unit_forced_include pins it there).
         self.build_and_check_modules('171 stl header units',
-                                     setup_not_contains=['cannot name a header unit'])
+                                     setup_not_contains=['cannot name a header unit',
+                                                         'divergent dialects'])
         self.check_gcc_module_mappers()
         with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
             mapper = f.read().splitlines()
-        self.assertTrue(any(re.fullmatch(r'(/\S+/vector) gcm\.cache\1\.gcm', line)
+        self.assertTrue(any(re.fullmatch(r'/\S+/vector gcm\.cache/,/imap/[0-9a-f]+/vector\.gcm', line)
                             for line in mapper),
-                        f'no absolute flat-cache unit mapping in {mapper}')
+                        f'no real-name mapping onto a class-aliased unit BMI in {mapper}')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_forced_include(self):

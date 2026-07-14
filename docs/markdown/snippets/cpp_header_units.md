@@ -92,10 +92,17 @@ Current limitations:
   that declare the same header unit with divergent module-affecting flags get a
   BMI of it each, one per flag equivalence class, on every supported compiler.
   Sharing a unit across targets with different `cpp_args` is therefore fine.
-  - The exception is GCC and the **dialect**: `cpp_std`, `cpp_eh` and `cpp_rtti`.
-    GCC records these in a header unit and refuses to read it back under any
-    other, and it enforces that while *scanning* — before any per-class BMI can
-    be selected. Declaring one header unit from targets whose dialects differ
-    therefore cannot work on GCC; Meson warns at configure time and the build
-    fails at the scan. Give those targets the same dialect, or stop sharing the
-    unit between them.
+  - GCC needs one more trick for the **dialect** (`cpp_std`, `cpp_eh`,
+    `cpp_rtti`): it records the dialect in a header unit and refuses to read
+    it back under any other, and it enforces that while *scanning* — before
+    anything could select a per-class BMI by flag. Meson therefore renames the
+    unit per class instead: each class's dependency scan resolves the header
+    through its own directory alias (for a system unit, aliases of the
+    compiler's whole built-in include chain), so the unit's *name* — and with
+    it the BMI the scan reads — embeds the class, while compiles keep the real
+    paths. Only where the build tree cannot hold the directory links this
+    needs (the FAT/exFAT and privilege limits above, or a project's own files
+    occupying the build root's `imap/` path) do units fall back to one shared
+    BMI; Meson then warns at configure time, and a dialect-divergent build
+    fails at the scan. Give those targets the same dialect there, or stop
+    sharing the unit between them.
