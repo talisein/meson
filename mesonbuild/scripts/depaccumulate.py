@@ -362,8 +362,12 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
     linked dependencies), but every provider's BMI lands in the shared module
     cache at a path keyed by the module name within its machine-and-flag class
     subdir, so two exporters landing on one BMI path would silently fight over
-    the same file and wedge the build. The same module name on two machines, or
-    in two divergent flag classes, lands at two distinct paths and coexists.
+    the same file and wedge the build. The same module name on two machines
+    lands at two distinct paths and coexists unconditionally (consumers never
+    cross machines). Two divergent flag classes likewise land apart, but only
+    conditionally: a BMI-only variant recompiled for a consumer's class can
+    still meet a same-named provider in that class's subdir, and this claim is
+    what catches the meeting.
     Record the owning target's provmap path next to the would-be BMI; a second
     claimant errors. A claim is stale -- and taken over -- when its provmap is
     gone (target removed; meson reconfigure runs `ninja -t cleandead`) or no

@@ -347,12 +347,11 @@ kwargs:
       Names which of this target's C++ sources are module interfaces that are
       *private*: importable only by this target's own sources, never
       published to anything that links this target, and not subject to the
-      rule that a module name have only one providing target per module cache
-      path -- itself already scoped to one machine and flag class, so a public
-      module can share a name with one built for a different machine or a
-      different flag class without being made private. A private module goes
-      further: two unrelated targets may each declare their own private
-      module of the same name even within one cache path. This does not
+      rule that a module name have only one providing target per machine --
+      a public module already shares a name freely with one built for the
+      other machine of a cross build, but within a machine privacy is what
+      permits the reuse: two unrelated targets may each declare their own
+      private module of the same name. This does not
       relax the rule *within one link*: a module's exported entities are
       mangled from its bare module name alone, so two same-named modules --
       private or not -- reaching the same link is still a hard error, exactly
