@@ -503,8 +503,8 @@ class CppModulesTestMixin:
     def header_unit_bmis(self, basename: str) -> T.Set[str]:
         """Every header-unit BMI the build declares for `basename`, from the
         outputs of the header-unit rule. Unlike header_unit_digests this sees
-        GCC's too, whose first-declaring class builds its BMI at the compiler's
-        default-named path rather than under meson-private/header-units."""
+        GCC's too, whose per-class BMIs stand at the compiler's default-named
+        paths under the shared cache rather than under meson-private/header-units."""
         outputs: T.Set[str] = set()
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:
@@ -552,9 +552,12 @@ class CppModulesTestMixin:
                         'building the unit did not run its generator first')
 
     def assert_alias_mapper_key(self, target: str, obj: str, alias: bool = True) -> str:
-        """The BMI a GCC TU resolves header.hpp to, checking its mapper key is the
-        spelling that TU resolved -- textually, '..' and all, since that is what
-        the compiler keys a unit by. Returns the BMI it names."""
+        """The BMI a GCC TU resolves header.hpp to, checking the mapper carries a
+        line keyed by the spelling that TU's compile computes -- textually, '..'
+        and all, since that is what the compiler keys a unit by. The collate
+        joins every name of one BMI into the mapper, so other header.hpp lines
+        (the file's other spellings, pointing at the same BMI) may sit alongside;
+        this asserts the one the TU asks for is present and returns the BMI."""
         # The private dir carries the target's output suffix (prog.p on POSIX,
         # prog.exe.p on Windows) and so does the object (.o vs .obj) -- glob
         # rather than hardcode either. The dot before each wildcard keeps
@@ -565,31 +568,37 @@ class CppModulesTestMixin:
         self.assertEqual(len(matches), 1,
                          f'{" or ".join(patterns)}: expected one mapper, got {matches}')
         path = matches[0]
+        keyre = re.compile(r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$'
+                           if alias else r'^\./meson-private/imap/[0-9a-f]+/header\.hpp$')
         with open(path, encoding='utf-8') as f:
             lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
-        self.assertEqual(len(lines), 1, f'{path}: expected one header.hpp line, got {lines}')
-        key, _, bmi = lines[0].partition(' ')
-        self.assertRegex(key, r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$'
-                         if alias else r'^\./meson-private/imap/[0-9a-f]+/header\.hpp$')
+        keyed = [ln for ln in lines if keyre.match(ln.partition(' ')[0])]
+        self.assertEqual(len(keyed), 1,
+                         f'{path}: expected one line keyed by the compile spelling, got {lines}')
+        _, _, bmi = keyed[0].partition(' ')
         self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
                         f'mapper names {bmi}, which nothing produced')
         return bmi
 
-    def assert_header_unit_alias_link(self, canonical_bmi: str) -> None:
-        """The alias spelling's default-named path holds the canonical BMI itself,
-        not a second build of it. Scans carry no mapper, so a TU importing through
-        the alias reaches the unit only there."""
+    def assert_header_unit_alias_link(self, canonical_bmi: str, count: int = 1) -> None:
+        """An alias spelling's own default-named path holds the class's BMI
+        itself, not a second build of it: scans carry no mapper, so a TU
+        importing through the alias reaches the unit only there. One link edge
+        per aliased spelling per class, so `count` is the total; the given
+        canonical BMI must be the target of one of them."""
         outs = []
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:
                 if line.startswith('build ') and 'cpp_header_unit_alias' in line:
                     outs.append(line[len('build '):].partition(': ')[0].strip())
-        self.assertEqual(len(outs), 1, f'expected one alias link edge, got {outs}')
-        alias_path = os.path.join(self.builddir, outs[0])
-        self.assertTrue(os.path.isfile(alias_path), f'alias link {outs[0]} was not built')
+        self.assertEqual(len(outs), count, f'expected {count} alias link edge(s), got {outs}')
+        for out in outs:
+            alias_path = os.path.join(self.builddir, out)
+            self.assertTrue(os.path.isfile(alias_path), f'alias link {out} was not built')
         self.assertTrue(
-            os.path.samefile(alias_path, os.path.join(self.builddir, canonical_bmi)),
-            f'{outs[0]} must be the canonical BMI, not a second copy of it')
+            any(os.path.samefile(os.path.join(self.builddir, out),
+                                 os.path.join(self.builddir, canonical_bmi)) for out in outs),
+            f'none of {outs} is the canonical BMI {canonical_bmi}')
 
     def header_unit_bmis_of(self, target: str, basename: str) -> T.Set[str]:
         """The header-unit BMIs `target`'s own compiles resolve for `basename`.
@@ -721,8 +730,8 @@ class CppModulesTestMixin:
         That last one is load-bearing. A mapper file switches off GCC's default
         naming outright, named modules included, and their names come from the
         very scan the mapper would serve: a scan carrying one dies on the first
-        `import some_module;`. It is why a unit's first-declaring class must keep
-        the default-named BMI path, which is all a scan can reach."""
+        `import some_module;`. So a scan resolves a unit only at a default-named
+        path, and each class reaches its own by scanning through its class root."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             lines = f.read().splitlines()
         rule = out = ''

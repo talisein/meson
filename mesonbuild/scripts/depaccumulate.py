@@ -577,6 +577,15 @@ def run_p1689(argv: T.List[str]) -> int:
     # always present, on every compiler.
     private_interface_objs = set(args.private_interface_objs)
     class_units = {name: bmi for name, bmi in args.header_unit_bmis}
+    # The inverse: every declared name of one BMI. A scan reports one name of a
+    # unit (an alias spelling, say) while a compile asks the mapper for another
+    # (the real one), and a mapper disables GCC's default naming outright, so a
+    # name the compile asks for that is missing from the mapper is a hard "no
+    # such module", not a fallback. Emitting every name of the resolved BMI puts
+    # both there; a line for a name a TU never asks is inert.
+    bmi_to_names: T.Dict[str, T.List[str]] = {}
+    for name, bmi in args.header_unit_bmis:
+        bmi_to_names.setdefault(bmi, []).append(name)
 
     # name -> the target privately providing it, for every private module of a
     # linked dependency: the "provided but private" diagnostic below. Two
@@ -822,12 +831,18 @@ def run_p1689(argv: T.List[str]) -> int:
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
                     if args.flat_bmi_dir is not None:
-                        # A unit built for this TU's own class is named outright;
-                        # one left at the default-named path is reconstructed.
+                        # A unit named outright for this TU's class is looked up;
+                        # one left at the default-named path is reconstructed
+                        # (the reconstruction branch is load-bearing: the scan's
+                        # name reconstructs to the BMI, and --header-unit-bmi
+                        # carries the compile names). Then every other name of
+                        # that BMI joins in, so the reported name and the one the
+                        # compile computes both resolve.
                         name = req['logical-name']
                         bmi = class_units.get(name) or flat_cmi_path(
                             name, args.flat_bmi_dir, args.bmi_suffix)
-                        maplines.append(f'{name} {bmi}')
+                        for n in dict.fromkeys([name, *bmi_to_names.get(bmi, [])]):
+                            maplines.append(f'{n} {bmi}')
                     continue
                 name = req['logical-name']
                 modfile = resolvable.get(name)
