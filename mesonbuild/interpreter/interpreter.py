@@ -4267,9 +4267,12 @@ class Interpreter(InterpreterBase, HoldableObject):
         # Map one module-kwarg entry to canonical (key, display) pairs, one per
         # module output it declares, so validation and the cross-kwarg checks
         # can compare mixed entry forms uniformly. A static source keys on its
-        # File; a generated output keys on ('generated', output-name), the same
+        # File; a generated output keys on its generating object (an index
+        # normalized to its parent custom_target) plus the output name, the same
         # regardless of whether it was named by string or by object, so the same
-        # generated output reached two different ways collides as it should.
+        # generated output reached two different ways collides as it should --
+        # while two generated outputs that merely share a filename (produced in
+        # different subdirs) stay distinct.
         #
         # Classification is by name at setup time, and a generated source's
         # output names are static at setup even though its contents are not, so
@@ -4287,7 +4290,8 @@ class Interpreter(InterpreterBase, HoldableObject):
                     f'Target {name!r} lists the generated source {entry.get_outputs()!s} in '
                     f'{kwarg}, but none of its outputs is a compilable C++ source, so it '
                     'can declare no module unit.')
-            return [(('generated', o), o) for o in cpp_outputs]
+            gensrc = entry.target if isinstance(entry, build.CustomTargetIndex) else entry
+            return [(('generated', gensrc, o), o) for o in cpp_outputs]
 
         # A source-tree File keeps its exact meaning: it must be one of the
         # target's static sources (File equality resolves a string the same way
@@ -4322,7 +4326,9 @@ class Interpreter(InterpreterBase, HoldableObject):
                 'custom_target itself to say which one you mean.')
         if static_match:
             return [(static, entry)]
-        return [(('generated', entry), entry)]
+        g = generated_matches[0]
+        gensrc = g.target if isinstance(g, build.CustomTargetIndex) else g
+        return [(('generated', gensrc, entry), entry)]
 
     def _cpp_module_kwarg_keys(self, name: str, target: build.BuildTarget, kwarg: str,
                                entries: T.Sequence[T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]]) -> T.Dict[object, str]:
