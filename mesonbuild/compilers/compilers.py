@@ -1734,15 +1734,10 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
 
     def supports_bmi_classes(self) -> bool:
         """Whether divergent BMI equivalence classes are made to work
-        (per-class cache subdirectories plus BMI-only provider variants)
-        rather than only warned about at generate time.
-        """
-        return False
-
-    def supports_bmi_class_header_units(self) -> bool:
-        """Whether header units are built once per BMI equivalence class rather
-        than once build-wide. True wherever a consumer can be pointed at one
-        BMI among several: by explicit path on the command line
+        (per-class cache subdirectories plus BMI-only provider variants, and
+        one header-unit BMI per class) rather than only warned about at
+        generate time. A per-class unit needs a consumer pointed at one BMI
+        among several: by explicit path on the command line
         (get_header_unit_consumer_args) as cl and clang need, or through a
         module mapper as GCC does.
         """

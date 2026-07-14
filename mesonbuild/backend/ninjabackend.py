@@ -2643,10 +2643,10 @@ class NinjaBackend(backends.Backend):
         target is generated (compile args must not depend on generation order).
         A machine with one class keeps the flat cache dir; with more, every
         class gets its own subdirectory named by a digest of the class key.
-        Only compilers with supports_bmi_classes() -- or
-        supports_bmi_class_header_units(), which keys header units by the same
-        registry -- participate; the rest keep the divergence warning. The key
-        is computed from _generate_single_compile, which excludes
+        Only compilers with supports_bmi_classes() participate -- the same
+        registry keys their header units per class; the rest keep the
+        divergence warning. The key is computed from _generate_single_compile,
+        which excludes
         get_module_compile_args, so the chosen dir cannot feed back into the
         key.
         """
@@ -2655,7 +2655,7 @@ class NinjaBackend(backends.Backend):
             if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
                 continue
             cpp = t.compilers['cpp']
-            if not (cpp.supports_bmi_classes() or cpp.supports_bmi_class_header_units()):
+            if not cpp.supports_bmi_classes():
                 continue
             relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
@@ -2742,10 +2742,10 @@ class NinjaBackend(backends.Backend):
 
     def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
                                       class_key: T.Tuple[str, ...]) -> T.Optional[str]:
-        # The header-unit analogue of _bmi_class_subdir_for, gated on its own
-        # capability and keyed directly (the BMI-only variant path provisions
-        # units without a target to look the key up from).
-        if not compiler.supports_bmi_class_header_units():
+        # The header-unit analogue of _bmi_class_subdir_for, keyed directly (the
+        # BMI-only variant path provisions units without a target to look the
+        # key up from).
+        if not compiler.supports_bmi_classes():
             return None
         info = self._bmi_classes.get((for_machine, class_key))
         return info.subdir if info else None
@@ -4550,17 +4550,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         ever reaches a GCC command line.
 
         Edges are deduped by (mode, spelling) plus, for compilers with
-        supports_bmi_class_header_units(), the declarer's BMI class: each class
-        builds its own BMI (a unit is interface-only, so per-class copies are
-        purely additive) and each consumer resolves its own class's. On a
-        single-class machine the key carries no class part, keeping paths and
-        edges byte-identical to a pre-class build.
-
-        On GCC the first-declaring class keeps the default-named CMI path, which
-        is the only place a mapper-less scan can find a unit
-        (_provision_header_unit_edges). The returned outputs therefore carry that
-        BMI as well as the target's own class's, so a target in another class
-        still orders its scans behind the BMI they read.
+        supports_bmi_classes(), the declarer's BMI class: each class builds its
+        own BMI (a unit is interface-only, so per-class copies are purely
+        additive) and each consumer resolves its own class's. On a single-class
+        machine the key carries no class part, keeping paths and edges
+        byte-identical to a pre-class build.
         """
         cid = compiler.get_id()
         if cid not in ('gcc', 'msvc', 'clang'):

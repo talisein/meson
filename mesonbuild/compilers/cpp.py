@@ -462,13 +462,9 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
 
     def supports_bmi_classes(self) -> bool:
         # clang-cl never reaches the P1689 pipeline, and AppleClang inherits
-        # this deliberately.
-        return True
-
-    def supports_bmi_class_header_units(self) -> bool:
-        # Consumers name each unit's BMI with -fmodule-file= (see
-        # get_header_unit_consumer_args), so per-class units need no new
-        # resolution machinery.
+        # this deliberately. Consumers name each unit's BMI with -fmodule-file=
+        # (see get_header_unit_consumer_args), so per-class units need no new
+        # resolution machinery either.
         return True
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
@@ -859,14 +855,11 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     def supports_bmi_classes(self) -> bool:
         # Divergent classes work through the per-TU module mapper. Only
         # consulted on the P1689 path (GCC >= 14); -fmodule-mapper is far
-        # older than that.
-        return True
-
-    def supports_bmi_class_header_units(self) -> bool:
-        # The mapper names a header unit's CMI too, so it can stand at a
-        # per-class path with each consumer sent to its own class's, and no BMI
-        # path on any command line. The backend computes what GCC calls a unit
-        # (the header as resolved on the include path) to write those lines.
+        # older than that. The mapper names a header unit's CMI too, so a unit
+        # can stand at a per-class path with each consumer sent to its own
+        # class's, and no BMI path on any command line: the backend computes
+        # what GCC calls a unit (the header as resolved on the include path) to
+        # write those lines.
         return True
 
     def supports_pch_with_cpp_modules(self) -> bool:
@@ -1453,12 +1446,8 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
     def supports_bmi_classes(self) -> bool:
         # Only consulted inside the P1689 pipeline (cl >= 19.32), where
         # /ifcSearchDir and /ifcOnly are always available. clang-cl never
-        # reaches P1689.
-        return True
-
-    def supports_bmi_class_header_units(self) -> bool:
-        # Same explicit-path resolution as clang (/headerUnit above), so the
-        # backend's per-class unit path works unchanged.
+        # reaches P1689. Header units use the same explicit-path resolution as
+        # clang (/headerUnit above), so the per-class unit path works unchanged.
         return True
 
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):
