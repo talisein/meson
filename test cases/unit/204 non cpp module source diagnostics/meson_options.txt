@@ -1,0 +1,3 @@
+option('mode', type: 'combo',
+  choices: ['static-string', 'static-file', 'generated-string'],
+  value: 'static-string')

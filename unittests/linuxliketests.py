@@ -1589,6 +1589,24 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         out = self.init(testdir, extra_args=['-Dmode=typo'], allow_fail=True)
         self.assertIn("it is not one of the target's sources or generated outputs", out)
 
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_kwarg_non_cpp_source_error(self):
+        # A source a module kwarg names must be one the target compiles as C++;
+        # a C source of a mixed-language target, or a generated header, declares
+        # no module unit. Left unchecked the declaration is a silent no-op and
+        # the missing module surfaces only later as a puzzling scan failure in
+        # some importer. Every entry form is rejected the same way: a static
+        # source named by string, the same source as a files() object, and a
+        # non-C++ output of a generated source named by string (the object form
+        # already rejected an all-non-C++ custom_target, but a named output of a
+        # mixed one slipped through).
+        testdir = os.path.join(self.unit_test_dir, '204 non cpp module source diagnostics')
+        for mode in ('static-string', 'static-file', 'generated-string'):
+            with self.subTest(mode=mode):
+                self.new_builddir()
+                out = self.init(testdir, extra_args=[f'-Dmode={mode}'], allow_fail=True)
+                self.assertIn('it is not a C++ source, so it can declare no module unit', out)
+
     @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
     def test_cpp_private_module_reachability_warns(self):
         # A private module that the target's own *public* interface is built

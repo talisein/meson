@@ -4234,12 +4234,12 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'P1689-capable clang-scan-deps); got {got}.')
 
     @staticmethod
-    def _generated_output_is_cpp_source(fname: str) -> bool:
-        # A generated output declared as a module unit must be something the
-        # target actually compiles as C++: a header carried along in the same
-        # custom_target output list is harmless (it never matches a compile
-        # edge), but at least one output has to be a compilable C++ source or
-        # the declaration could never take effect.
+    def _is_cpp_module_source(fname: str) -> bool:
+        # A source declared as a module unit must be something the target
+        # compiles as C++: a header is never a compile edge, and a non-C++
+        # source (a C file in a mixed-language target) is compiled by another
+        # language's rules and never scanned, so either would make the module
+        # declaration a silent no-op -- the worst outcome for the mistake.
         if compilers.is_header(fname):
             return False
         ext = os.path.splitext(fname)[1][1:]
@@ -4288,7 +4288,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                     f'Target {name!r} lists the generated source {entry.get_outputs()!s} in '
                     f'{kwarg}, but the target does not compile it. A module kwarg can only '
                     "name one of the target's own generated sources.")
-            cpp_outputs = [o for o in entry.get_outputs() if self._generated_output_is_cpp_source(o)]
+            cpp_outputs = [o for o in entry.get_outputs() if self._is_cpp_module_source(o)]
             if not cpp_outputs:
                 raise InvalidArguments(
                     f'Target {name!r} lists the generated source {entry.get_outputs()!s} in '
@@ -4305,6 +4305,10 @@ class Interpreter(InterpreterBase, HoldableObject):
                 raise InvalidArguments(
                     f'Target {name!r} lists {entry!s} in {kwarg}, but '
                     "it is not one of the target's sources or generated outputs.")
+            if not self._is_cpp_module_source(entry.fname):
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in {kwarg}, but it is not a '
+                    'C++ source, so it can declare no module unit.')
             return [(entry, str(entry))]
 
         # A string first resolves against the static sources as before, then --
@@ -4328,6 +4332,14 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'Target {name!r} lists {entry!s} in {kwarg}, but the name is ambiguous -- '
                 f'it matches {" and ".join(where)}. Pass the files() object or the '
                 'custom_target itself to say which one you mean.')
+        # A named match (static or generated) is one specific source, so unlike
+        # the object form -- which may carry harmless non-C++ outputs alongside
+        # a C++ one -- naming a non-C++ source is unambiguously the silent-no-op
+        # mistake, and is rejected the same way for either match kind.
+        if not self._is_cpp_module_source(entry):
+            raise InvalidArguments(
+                f'Target {name!r} lists {entry!s} in {kwarg}, but it is not a '
+                'C++ source, so it can declare no module unit.')
         if static_match:
             return [(static, entry)]
         g = generated_matches[0]
