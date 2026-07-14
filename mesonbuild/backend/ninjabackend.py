@@ -631,11 +631,13 @@ class NinjaBackend(backends.Backend):
         # shared across dialects, so each divergence is reported once; the class
         # that first declared each unit is recorded at edge creation.
         self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
-        # (mode, spelling) -> the BMI class and target that first declared it,
-        # for the divergence warning on a unit that still shares one flat BMI:
-        # the degraded path where per-class naming is unavailable (see
-        # warn_on_header_unit_divergence).
-        self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str]] = {}
+        # (mode, spelling) -> the BMI class, target and machine that first
+        # declared it, for the divergence warning on a unit that still shares
+        # one flat BMI: the degraded path where per-class naming is unavailable
+        # (see warn_on_header_unit_divergence). The machine is folded in because
+        # that flat BMI is shared build-wide, so two machines declaring one unit
+        # there also collide -- across compilers whose BMIs do not interchange.
+        self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str, MachineChoice]] = {}
         # Spellings already warned about for a header unit GCC cannot name.
         # Keyed by the unit, not the importer: the unit is what is unnameable,
         # and every target importing it fails the same way.
@@ -2192,7 +2194,7 @@ class NinjaBackend(backends.Backend):
                                        class_key: T.Tuple[str, ...],
                                        unit_key: str, spelling: str) -> None:
         """Warn when targets declaring one header unit disagree on the dialect,
-        once per (unit, consumer).
+        or on the machine, once per (unit, consumer).
 
         Reached only on the degraded path: the build tree cannot make the
         directory links a per-class unit is named through (machine-wide), or a
@@ -2201,18 +2203,34 @@ class NinjaBackend(backends.Backend):
         _provision_header_unit_edges). There
         a scan can only reach the unit at its one default-named path, whichever
         class built it, and GCC rejects a CMI whose dialect differs from the
-        reader's. A user or system unit earns a BMI per class otherwise --
-        named through its class's include-path or built-in-chain aliases -- and
-        never arrives here. Warned about because GCC's own error names a CMI path
-        and a language level, not the two targets that disagree.
+        reader's. Two machines sharing that one flat path is the same hazard on
+        another axis: the build-machine and host-machine compilers write
+        incompatible BMIs to it. A user or system unit earns a BMI per class and
+        per machine otherwise -- named through its class's include-path or
+        built-in-chain aliases -- and never arrives here. Warned about because
+        GCC's own error names a CMI path and a language level, not the two
+        targets that disagree.
         """
-        owner_key, owner_name = self._header_unit_class[unit_key]
-        if self._dialect_of(class_key) == self._dialect_of(owner_key):
+        owner_key, owner_name, owner_machine = self._header_unit_class[unit_key]
+        machine_split = target.for_machine != owner_machine
+        if not machine_split and self._dialect_of(class_key) == self._dialect_of(owner_key):
             return
         pair = (unit_key, target.get_id())
         if pair in self._warned_header_unit_divergence:
             return
         self._warned_header_unit_divergence.add(pair)
+        if machine_split:
+            mlog.warning(
+                f'Targets {target.name!r} and {owner_name!r} import the same C++ '
+                f'header unit {spelling!r} but build for different machines '
+                f'({target.for_machine.get_lower_case_name()} and '
+                f'{owner_machine.get_lower_case_name()}); on this degraded path '
+                'they share one default-named header unit BMI, which the '
+                'build-machine and host-machine compilers write incompatibly, so '
+                'this build will fail when it scans. Declare the unit in only one '
+                "machine's targets, or give the tree the directory links a "
+                'per-machine unit is named through.')
+            return
         mlog.warning(
             f'Targets {target.name!r} and {owner_name!r} import the same C++ '
             f'header unit {spelling!r} but compile with divergent dialects: '
@@ -5156,7 +5174,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # BMI that will not appear. check_header_unit_names has already
                     # said so at setup (fatally, for a user unit).
                     continue
-                owner_key, _ = self._header_unit_class.setdefault(base, (class_key, declarer))
+                owner_key, _, _ = self._header_unit_class.setdefault(
+                    base, (class_key, declarer, compiler.for_machine))
                 if warn_target is not None:
                     self.warn_on_header_unit_divergence(warn_target, class_key, base, canon)
                 # A mapper key holds no whitespace, so a unit under a spaced path
