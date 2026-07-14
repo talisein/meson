@@ -1191,6 +1191,90 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             self.build()
         self.assertIn('vector', cm.exception.output)
 
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_header_unit_aliasing_unavailable_warns(self):
+        # The machine-wide capability decision, forced negative: no directory
+        # link of any kind can be made (the canary in
+        # _header_unit_aliasing_available fails the same way a FAT/exFAT tree
+        # or an off-volume Windows junction target would), so the two dialect
+        # classes of util.h fall back to one shared, first-declarer-named BMI.
+        # Configure must still say so -- the same warning
+        # test_header_unit_dialect_divergence turns green by aliasing away --
+        # naming both dialects and both targets, once. Nothing routes the
+        # scan to two BMIs here, so the build genuinely cannot work: GCC
+        # rejects the shared CMI under prog23's dialect at the scan, the
+        # failure the warning predicts rather than a silent miscompile.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        testdir = os.path.join(self.unit_test_dir, '168 header unit dialect divergence')
+        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
+            out = self.init(testdir, inprocess=True)
+        self.assertEqual(out.count('divergent dialects'), 1,
+                         f'expected exactly one divergence warning, got:\n{out}')
+        self.assertIn('prog23', out)
+        self.assertIn('prog20', out)
+        self.assertIn('-std=c++23', out)
+        self.assertIn('will fail when it scans', out)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('util.h', cm.exception.output)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_aliasing_unavailable_single_class_builds(self):
+        # The same forced-negative capability decision, but on a machine with
+        # only one BMI class: nothing needs a per-class name (there is only
+        # one class to name), and this fixture's unit is a real system header
+        # resolving to the compiler's own absolute path, which needs no
+        # space-free alias either. So an aliasing-incapable machine builds
+        # this one warning-free -- the degraded path only ever costs a build
+        # something where a divergence or a spaced path actually needed
+        # aliasing.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        testdir = os.path.join(self.unit_test_dir, '197 header unit forced include')
+        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
+            out = self.init(testdir, extra_args=['-Dmode=ok'], inprocess=True)
+        self.assertNotIn('divergent dialects', out)
+        self.assertNotIn('cannot name a header unit', out)
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('imap', f.read())
+        self.build()
+        self.run_tests()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_header_unit_alias_root_pruning(self):
+        # Alias roots are keyed by (real dir, class tag): a reconfigure that
+        # collapses the class split (here, mode 'classes' -> 'plain' drops
+        # progfoo's -DFOO divergence) computes a different, smaller root set
+        # than the one already on disk, and the difference must not linger.
+        # Reconfiguring back must reproduce exactly the original roots --
+        # each is a pure function of its (dir, tag) pair -- so nothing is
+        # rebuilt with a fresh, differently-named BMI it does not need.
+        testdir = os.path.join(self.unit_test_dir, '173 header unit aliasing')
+        imap = os.path.join(self.builddir, 'meson-private', 'imap')
+
+        self.init(testdir, extra_args=['-Dmode=classes'])
+        self.build()
+        classes_roots = set(os.listdir(imap))
+        self.assertGreater(len(classes_roots), 1,
+                           f'expected more than one alias root, got {classes_roots}')
+
+        self.init(testdir, extra_args=['--reconfigure', '-Dmode=plain'])
+        self.build()
+        plain_roots = set(os.listdir(imap))
+        self.assertTrue(plain_roots < classes_roots,
+                        f'plain-mode roots {plain_roots} should be a subset of '
+                        f'the classes-mode roots {classes_roots} it reuses')
+        gone = classes_roots - plain_roots
+        self.assertTrue(gone, 'plain mode should have orphaned some per-class roots')
+        for name in gone:
+            self.assertFalse(os.path.exists(os.path.join(imap, name)),
+                             f'stale alias root {name} was not pruned')
+
+        self.init(testdir, extra_args=['--reconfigure', '-Dmode=classes'])
+        self.build()
+        reclassed_roots = set(os.listdir(imap))
+        self.assertEqual(reclassed_roots, classes_roots,
+                         'the same class keys must reproduce the same alias roots')
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence_builds(self):
         # What Stage 1 could only warn about must now work: prog's -pthread

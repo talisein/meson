@@ -865,6 +865,11 @@ class NinjaBackend(backends.Backend):
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
+            # Every alias root this generation needs has now been placed or
+            # adopted (targets no longer generating means _alias_root_real is
+            # complete), so any stale one a prior configure left behind can be
+            # told apart from a live one and swept.
+            self._prune_stale_dir_aliases()
             self.add_build_comment(NinjaComment('Test rules'))
             self.generate_tests()
             mlog.log_timestamp("Tests generated")
@@ -2435,6 +2440,53 @@ class NinjaBackend(backends.Backend):
         if alias is not None:
             self._alias_root_real[alias.replace('\\', '/')] = real_dir
         return alias
+
+    def _prune_stale_dir_aliases(self) -> None:
+        """Remove alias-root entries this generation did not (re)place.
+
+        A root is a pure function of (real dir, class tag): a reconfigure that
+        drops a divergence, or renames a class by changing a BMI-affecting
+        option, computes a different set of roots than the one on disk from
+        the run before. The orphaned entries are harmless sitting there -- a
+        dangling or still-valid link a few bytes each -- but nothing else ever
+        reclaims them, so left alone they accumulate across every reconfigure.
+        `_alias_root_real` names exactly the roots this run placed or adopted
+        (both alias-root makers register through `_place_dir_alias`), so
+        anything else under either root directory that is itself a directory
+        link is stale and goes; a plain directory or file is never touched --
+        the build root's `imap/` is not reserved to us, and a project may
+        mirror its own source tree into a directory of that name.
+
+        Run once, after every target has been generated, so this reads the
+        finished registry rather than a partial one target order could
+        change. A depfile from an earlier build may still name a path this
+        prunes, but pruning only ever follows a changed class set, and a
+        changed class set respells the affected scans' `-I` entries (and,
+        for a user unit, its source) the same way -- their command line is
+        therefore different too, so ninja reruns those scans regardless of
+        whether the old depfile path still resolves; a missing path there
+        only makes that happen sooner, never later.
+        """
+        build_dir = self.environment.get_build_dir()
+        live = set(self._alias_root_real.keys())
+        for root in ('meson-private/imap', 'imap'):
+            abs_root = os.path.join(build_dir, root)
+            try:
+                names = os.listdir(abs_root)
+            except OSError:
+                continue
+            for name in names:
+                if name == '.canary':
+                    # Only ever a transient probe of _header_unit_aliasing_available,
+                    # never a registered root, but also never stale-scannable.
+                    continue
+                rel = f'{root}/{name}'
+                if rel in live:
+                    continue
+                abs_entry = os.path.join(abs_root, name)
+                if self._read_dir_link(abs_entry) is None:
+                    continue
+                self._remove_dir_link(abs_entry)
 
     def _respell_dir(self, d: str, class_tag: T.Optional[str] = None,
                      force_all: bool = False) -> T.Optional[str]:

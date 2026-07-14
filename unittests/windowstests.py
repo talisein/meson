@@ -1345,18 +1345,30 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             per_prog[prog] = alias_bmi
         self.assertNotEqual(per_prog['prog'], per_prog['progfoo'],
                             'divergent classes must not share a unit BMI')
-        self.assert_header_unit_alias_link(per_prog['prog'])
+        # Each class links the alias spelling's own default path to its own
+        # BMI (one link edge per class), so a mapper-less scan of either
+        # spelling in either class reaches that class's unit.
+        self.assert_header_unit_alias_link(per_prog['prog'], count=2)
+        self.assert_header_unit_alias_link(per_prog['progfoo'], count=2)
         self.assertBuildIsNoop()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # Windows counterpart of LinuxlikeTests.test_gcc_stl_header_units:
-        # <vector> resolves to a drive-letter absolute path here, and
-        # flat_cmi_path must mangle its colon (a literal one reads as an NTFS
-        # alternate-data-stream separator) the same way it mangles '.' and
-        # '..' -- nothing on Windows exercised that path before.
+        # <vector> resolves to a drive-letter absolute path here, unlike the
+        # project-local units of the other fixtures. progfoo's -DFOO makes
+        # this a two-class build, so the unit is class-alias-named -- prog's
+        # scan resolves <vector> through its class's chain aliases (a
+        # build-relative path with no drive letter, since the alias root
+        # lives under the build tree) and the BMI sits at that alias name's
+        # mangled path. The compile still asks the real drive-letter
+        # absolute name, so the TU's mapper must carry that name joined onto
+        # the class-aliased BMI. The old flat drive-letter mangling
+        # (flat_cmi_path's 'C:' -> 'C-') only ever applied to a single-class
+        # machine, and survives only on the degraded path now.
         self.build_and_check_modules('171 stl header units',
-                                     setup_not_contains=['cannot name a header unit'])
+                                     setup_not_contains=['cannot name a header unit',
+                                                         'divergent dialects'])
         self.check_gcc_module_mappers()
         import glob
         mappers = glob.glob(os.path.join(self.builddir, 'prog.*.p', 'main.cpp.*.mapper'))
@@ -1366,12 +1378,70 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         for line in mapper:
             key, _, bmi = line.partition(' ')
             if os.path.basename(key) == 'vector':
-                self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$')
-                want = f'gcm.cache/{key[0]}-{key[2:]}.gcm'
-                self.assertEqual(bmi.replace('\\', '/'), want.replace('\\', '/'))
+                self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$',
+                                 'the compile still names the real drive-letter path')
+                bmi_norm = bmi.replace('\\', '/')
+                self.assertRegex(bmi_norm, r'^gcm\.cache/,/imap/[0-9a-f]+/vector\.gcm$',
+                                 'the class-aliased BMI path must carry no drive letter')
                 break
         else:
             self.fail(f'no vector header-unit mapping in {mapper}')
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_header_unit_dialect_divergence(self):
+        # Windows mirror of LinuxlikeTests.test_header_unit_dialect_divergence:
+        # three declarers of util.h split into two dialect classes (prog20/
+        # prog20b at c++20, prog23 at c++23). A directory symlink or a
+        # junction each keep the aliased text in a unit's resolved name (no
+        # canonicalization through the reparse point), so this needs no
+        # different mechanism here, only the coverage: each class must reach
+        # its own BMI through its own class root, build, and run correctly.
+        self.build_and_check_modules('168 header unit dialect divergence',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('util.h')
+        self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
+        per_prog = {p: self.header_unit_bmis_of(p, 'util.h')
+                    for p in ('prog20', 'prog20b', 'prog23')}
+        for prog, bmis in per_prog.items():
+            self.assertEqual(len(bmis), 1, f'{prog} must resolve one util.h BMI, got {bmis}')
+        self.assertEqual(per_prog['prog20'], per_prog['prog20b'],
+                         'same-class declarers must share one unit BMI')
+        self.assertNotEqual(per_prog['prog23'], per_prog['prog20'],
+                            'divergent dialect classes must not share a unit BMI')
+        self.check_gcc_module_mappers()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_system_header_unit_dialect_divergence(self):
+        # Windows mirror of
+        # LinuxlikeTests.test_system_header_unit_dialect_divergence: two
+        # classes both import <vector>, named through GCC's own built-in
+        # include chain rather than any -I, so its per-class BMI is reached
+        # by aliasing that whole chain (a junction substitutes for a
+        # built-in directory at the same position, so include_next and
+        # search order still hold). prog20 additionally imports <cstdint>
+        # from a TU of its own -- never alongside <vector> in one TU. MinGW's
+        # libstdc++ predefines __USE_MINGW_ANSI_STDIO=1 while a bare
+        # <stdio.h> unit defaults it to 0, and GCC's cross-module
+        # macro-consistency check rejects the pair; the fixture keeps the
+        # two imports in separate translation units for exactly that reason,
+        # so it needs no Windows-specific adjustment here.
+        self.build_and_check_modules('202 system header unit dialect divergence',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('vector')
+        self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
+        # A junction alias is build-relative text, so the mangled CMI path
+        # under gcm.cache carries no drive letter -- flat_cmi_path's 'C:' ->
+        # 'C-' mangling applies only to the degraded (unaliased) path.
+        for u in units:
+            self.assertNotIn(':', u, f'gated system unit BMI path must be colon-free: {u}')
+        per_prog = {p: self.header_unit_bmis_of(p, 'vector') for p in ('prog20', 'prog23')}
+        for prog, bmis in per_prog.items():
+            self.assertEqual(len(bmis), 1, f'{prog} must resolve one <vector> BMI, got {bmis}')
+        self.assertNotEqual(per_prog['prog20'], per_prog['prog23'],
+                            'divergent dialect classes must not share a system unit BMI')
+        self.check_gcc_module_mappers()
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()
