@@ -150,7 +150,7 @@ class InternalTests(unittest.TestCase):
         # a hard "no such module". A reverse map bmi -> [names] joins them; a
         # build with no --header-unit-bmi pairs is unchanged.
         from mesonbuild.scripts.depaccumulate import run_p1689
-        from mesonbuild.utils.core import flat_cmi_path
+        from mesonbuild.utils.core import default_cmi_path
 
         def mapper_lines(reported, pairs):
             with tempfile.TemporaryDirectory() as d:
@@ -162,7 +162,7 @@ class InternalTests(unittest.TestCase):
                 argv = ['--dyndep', os.path.join(d, 'out.dd'),
                         '--provmap', os.path.join(d, 'pm.json'),
                         '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
-                        '--mapper-suffix', '.mapper', '--flat-bmi-dir', 'gcm.cache']
+                        '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache']
                 for name, bmi in pairs:
                     argv += ['--header-unit-bmi', name, bmi]
                 argv.append(ddi)
@@ -172,7 +172,7 @@ class InternalTests(unittest.TestCase):
 
         # Two names bound to one BMI: a require reporting either name gets both
         # maplines, pointing at that BMI.
-        bmi = flat_cmi_path('./a/util.h', 'gcm.cache', '.gcm')
+        bmi = default_cmi_path('./a/util.h', 'gcm.cache', '.gcm')
         pairs = [('./a/util.h', bmi), ('./b/util.h', bmi)]
         self.assertEqual(sorted(mapper_lines('./a/util.h', pairs)),
                          sorted([f'./a/util.h {bmi}', f'./b/util.h {bmi}']))
@@ -181,7 +181,7 @@ class InternalTests(unittest.TestCase):
 
         # No pairs: the scan-reported name reconstructs to its own default path,
         # and nothing joins in -- one mapline, unchanged from before the join.
-        recon = flat_cmi_path('./c/util.h', 'gcm.cache', '.gcm')
+        recon = default_cmi_path('./c/util.h', 'gcm.cache', '.gcm')
         self.assertEqual(mapper_lines('./c/util.h', []), [f'./c/util.h {recon}'])
 
     def test_supports_cpp_modules_p1689(self):
@@ -1089,8 +1089,8 @@ class InternalTests(unittest.TestCase):
         # TU (at the CWD-relative primary-output, like the compiler's own
         # BMI paths), naming exactly its provides and direct imports:
         # provides and named-module requires at the class-cache path,
-        # header-unit requires at the compiler's default flat-cache path
-        # (--flat-bmi-dir; a mapper disables GCC's default mapping, so the
+        # header-unit requires at the compiler's default cache path
+        # (--default-cmi-root; a mapper disables GCC's default mapping, so the
         # collate must reproduce it). A TU with no module traffic gets an
         # empty mapper, and no mapper is written at all without the flag.
         from mesonbuild.scripts.depaccumulate import run_p1689
@@ -1129,7 +1129,7 @@ class InternalTests(unittest.TestCase):
                     self.assertFalse(os.path.exists(obj + '.mapper'))
 
                 self.assertEqual(collate(['--mapper-suffix', '.mapper',
-                                          '--flat-bmi-dir', 'gcm.cache']), 0)
+                                          '--default-cmi-root', 'gcm.cache']), 0)
                 self.assertEqual(read('a.cppm.o.mapper'),
                                  'A gcm.cache/deadbeefcafe/A.gcm\n'
                                  'B gcm.cache/deadbeefcafe/B.gcm\n'
@@ -1166,7 +1166,7 @@ class InternalTests(unittest.TestCase):
                      '--stamp-suffix', '.gcm.stamp',
                      '--interface-source', '../src/a.cppm',
                      '--mapper-suffix', '.mapper',
-                     '--flat-bmi-dir', 'gcm.cache', 'a.gcm.ddi']), 0)
+                     '--default-cmi-root', 'gcm.cache', 'a.gcm.ddi']), 0)
                 with open('variant/a.gcm.mapper', encoding='utf-8') as f:
                     self.assertEqual(f.read(),
                                      'A variant/a.gcm\n'
@@ -1197,7 +1197,7 @@ class InternalTests(unittest.TestCase):
                               '--bmi-dir', 'gcm.cache/deadbeefcafe',
                               '--bmi-suffix', '.gcm',
                               '--mapper-suffix', '.mapper',
-                              '--flat-bmi-dir', 'gcm.cache', 'm.cpp.o.ddi'])
+                              '--default-cmi-root', 'gcm.cache', 'm.cpp.o.ddi'])
 
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
@@ -1214,13 +1214,13 @@ class InternalTests(unittest.TestCase):
             finally:
                 os.chdir(olddir)
 
-    def test_depaccumulate_flat_cmi_path(self):
-        # GCC's default header-unit CMI naming under the flat cache: '.' and
+    def test_depaccumulate_default_cmi_path(self):
+        # GCC's default header-unit CMI naming under the cache root: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path
         # is appended as-is under the cache root. A Windows drive letter's
         # colon is mangled the same way, to a hyphen -- confirmed against real
         # GCC's own "compiled module file is ..." diagnostic on WinLibs 16.
-        from mesonbuild.utils.core import flat_cmi_path
+        from mesonbuild.utils.core import default_cmi_path
         cases = {
             './util.h': 'gcm.cache/,/util.h.gcm',
             './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',
@@ -1229,7 +1229,7 @@ class InternalTests(unittest.TestCase):
             'C:/Users/x/vector': 'gcm.cache/C-/Users/x/vector.gcm',
         }
         for name, want in cases.items():
-            self.assertEqual(flat_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
+            self.assertEqual(default_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
 
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit

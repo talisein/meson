@@ -838,7 +838,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # collator resolves (--private-bmi-dir/--private-interface at the
         # collator, in lockstep with this target's own privacy), which the
         # backend adds to compile edges only -- a scan resolves no named
-        # modules, and header units stay in the flat default cache the
+        # modules, and header units stay in the default-named cache the
         # mapper-less scan already finds.
         return [self._named_modules_flag(), '-Mno-modules']
 

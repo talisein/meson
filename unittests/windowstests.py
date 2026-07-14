@@ -1365,7 +1365,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # mangled path. The compile still asks the real drive-letter
         # absolute name, so the TU's mapper must carry that name joined onto
         # the class-aliased BMI. The old flat drive-letter mangling
-        # (flat_cmi_path's 'C:' -> 'C-') only ever applied to a single-class
+        # (default_cmi_path's 'C:' -> 'C-') only ever applied to a single-class
         # machine, and survives only on the degraded path now.
         self.build_and_check_modules('171 stl header units',
                                      setup_not_contains=['cannot name a header unit',
@@ -1436,7 +1436,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         units = self.header_unit_bmis('vector')
         self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
         # A junction alias is build-relative text, so the mangled CMI path
-        # under gcm.cache carries no drive letter -- flat_cmi_path's 'C:' ->
+        # under gcm.cache carries no drive letter -- default_cmi_path's 'C:' ->
         # 'C-' mangling applies only to the degraded (unaliased) path.
         for u in units:
             self.assertNotIn(':', u, f'gated system unit BMI path must be colon-free: {u}')

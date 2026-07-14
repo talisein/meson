@@ -1133,7 +1133,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
         # The scan resolves <vector> through a build-relative alias root, so its
         # CMI path is mangled from a colon-free name -- the Windows drive-letter
-        # mangling flat_cmi_path performs never applies to a gated system unit.
+        # mangling default_cmi_path performs never applies to a gated system unit.
         for u in units:
             self.assertNotIn(':', u, f'gated system unit BMI path must be colon-free: {u}')
         per_prog = {p: self.header_unit_bmis_of(p, 'vector') for p in ('prog20', 'prog23')}
@@ -1144,7 +1144,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The mixed case: <cstdint> has one declaring class, but the chain
         # aliases are per target -- prog20's one scan resolves every system
         # header through the aliased chain -- so its BMI must sit at the
-        # class-aliased path that scan resolves, not the flat real-named one.
+        # class-aliased path that scan resolves, not the default real-named one.
         cstdint = self.header_unit_bmis('cstdint')
         self.assertEqual(len(cstdint), 1, f'expected one <cstdint> BMI, got {cstdint}')
         self.assertIn('imap/', next(iter(cstdint)),
@@ -2115,7 +2115,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # named -- prog's scan resolves <vector> through its class's chain
         # aliases and the BMI sits at the alias name's mangled path. The
         # compile still asks the real absolute name, so the TU's mapper must
-        # carry that name joined onto the class-aliased BMI. The flat
+        # carry that name joined onto the class-aliased BMI. The default
         # absolute-path naming survives only on single-class machines
         # (test_gcc_header_unit_forced_include pins it there).
         self.build_and_check_modules('171 stl header units',

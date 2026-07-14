@@ -36,7 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
-from ..utils.core import flat_cmi_path
+from ..utils.core import default_cmi_path
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 
@@ -1866,7 +1866,7 @@ class NinjaBackend(backends.Backend):
         outright, so it must also name every header unit the TU imports: the one
         the compile computes a name for that differs from the scan's, paired
         outright (--header-unit-bmi), and the scan-reported names by reproducing
-        the default naming under the shared cache (--flat-bmi-dir).
+        the default naming under the shared cache (--default-cmi-root).
 
         --private-map (this target's own private module names) is always
         passed; --private-bmi-dir/--private-interface/--all-provides-private
@@ -1919,7 +1919,7 @@ class NinjaBackend(backends.Backend):
                 depargs += ['--interface-source', p]
         if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper']
-            depargs += ['--flat-bmi-dir', cpp.get_module_cache_dir()]
+            depargs += ['--default-cmi-root', cpp.get_module_cache_dir()]
             self.provision_header_units(target, cpp)
             depargs += self._header_unit_bmi_args(
                 cpp, self._target_header_unit_bmis.get(target.get_id(), []))
@@ -1932,17 +1932,17 @@ class NinjaBackend(backends.Backend):
     def _header_unit_bmi_args(self, cpp: Compiler,
                               bmis: T.List[T.Tuple[str, str]]) -> T.List[str]:
         # The compile-computed name of each unit paired with its BMI. A pair
-        # whose name is the BMI's own stem is dropped: --flat-bmi-dir already
+        # whose name is the BMI's own stem is dropped: --default-cmi-root already
         # reconstructs it, so the pair would be redundant (which covers a whole
         # spaced or single-class build, where the scan and compile names
         # coincide with the stem). What survives is a BMI sitting at a name
         # other than its own -- a real-spelling compile whose BMI stands at the
         # scan's alias-named path -- so the collate learns that name too.
-        flat_dir = cpp.get_module_cache_dir()
+        cache_dir = cpp.get_module_cache_dir()
         suffix = cpp.get_module_bmi_suffix()
         depargs: T.List[str] = []
         for name, bmi in bmis:
-            if bmi != flat_cmi_path(name, flat_dir, suffix):
+            if bmi != default_cmi_path(name, cache_dir, suffix):
                 depargs += ['--header-unit-bmi', name, bmi]
         return depargs
 
@@ -2130,7 +2130,7 @@ class NinjaBackend(backends.Backend):
         depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
         if cpp.get_id() == 'gcc':
             depargs += ['--mapper-suffix', '.mapper',
-                        '--flat-bmi-dir', cpp.get_module_cache_dir()]
+                        '--default-cmi-root', cpp.get_module_cache_dir()]
             depargs += self._header_unit_bmi_args(cpp, hu_bmis)
         for rec in recs:
             depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
@@ -5057,7 +5057,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         is_msvc = cid == 'msvc'
         is_gcc = cid == 'gcc'
         suffix = compiler.get_module_bmi_suffix()
-        flat_dir = compiler.get_module_cache_dir()
+        cache_dir = compiler.get_module_cache_dir()
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
         seen_consumer_args: T.List[T.List[str]] = []
@@ -5097,7 +5097,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 key = f'{base}:{class_subdir}'
                 output = self._header_units.get(key)
                 if output is None:
-                    output = flat_cmi_path(scan_name, flat_dir, suffix)
+                    output = default_cmi_path(scan_name, cache_dir, suffix)
                     mapper = self._class_header_unit_path(key, canon, '.mapper')
                     self._write_header_unit_mapper(mapper, compile_name, output)
                     elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
@@ -5115,7 +5115,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # every name of this BMI into each importer's mapper, so a scan
                 # reporting the alias name and a compile asking the real one both
                 # resolve. A pair whose name is the BMI's own stem is redundant
-                # with --flat-bmi-dir reconstruction and suppressed there.
+                # with --default-cmi-root reconstruction and suppressed there.
                 bmis.append((compile_name, output))
                 if spelling != canon:
                     # An extra declared spelling of the same file: one BMI, an
@@ -5125,7 +5125,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     alias_scan = self._header_unit_gcc_name(compiler, scan_args, mode, spelling)
                     alias_compile = self._header_unit_gcc_name(compiler, args, mode, spelling)
                     if alias_scan is not None:
-                        link = self._alias_header_unit_link(alias_scan, output, flat_dir, suffix)
+                        link = self._alias_header_unit_link(alias_scan, output, cache_dir, suffix)
                         if link not in outputs:
                             outputs.append(link)
                         # The compile resolves the alias spelling to the one BMI
@@ -5142,7 +5142,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # the compile keeps the real chain (so __FILE__, diagnostics and
                 # debug info stay real). The scan name is build-relative through
                 # the alias root, so the CMI path it mangles to is colon-free
-                # even on Windows; flat_cmi_path keeps the drive-letter mangling
+                # even on Windows; default_cmi_path keeps the drive-letter mangling
                 # for the degraded path alone.
                 scan_args = self._reclass_include_args(list(args), class_subdir) + chain_args
                 scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
@@ -5152,7 +5152,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     key = f'{base}:{class_subdir}'
                     output = self._header_units.get(key)
                     if output is None:
-                        output = flat_cmi_path(scan_name, flat_dir, suffix)
+                        output = default_cmi_path(scan_name, cache_dir, suffix)
                         mapper = self._class_header_unit_path(key, canon, '.mapper')
                         self._write_header_unit_mapper(mapper, compile_name, output)
                         elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
@@ -5221,7 +5221,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 mapper: T.Optional[str] = None
                 if is_gcc and flat:
                     assert name is not None, 'a unit GCC cannot name is skipped above'
-                    output = flat_cmi_path(name, flat_dir, suffix)
+                    output = default_cmi_path(name, cache_dir, suffix)
                 else:
                     output = self._class_header_unit_path(key, canon, suffix)
                 if mappable:
@@ -5265,7 +5265,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 if sname is not None:
                     bmis.append((sname, output))
                 if alias and mappable and sname is not None and not self._has_space(sname):
-                    link = self._alias_header_unit_link(sname, flat_output, flat_dir, suffix)
+                    link = self._alias_header_unit_link(sname, flat_output, cache_dir, suffix)
                     if link not in outputs:
                         outputs.append(link)
             # Returns [] on GCC: its consumers resolve through the mapper. Whole
@@ -5314,7 +5314,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return os.path.realpath(os.path.join(self.environment.get_build_dir(), key))
 
     def _alias_header_unit_link(self, alias_name: str, canonical_bmi: str,
-                                flat_dir: str, suffix: str) -> str:
+                                cache_dir: str, suffix: str) -> str:
         """Put the group's BMI at an alias spelling's default-named path too.
 
         Scan edges carry no mapper, so a TU importing through an alias reaches the
@@ -5322,7 +5322,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         resolves it through the mapper and needs no such file, but the scan that
         comes first does -- so the BMI is linked there rather than built twice.
         """
-        output = flat_cmi_path(alias_name, flat_dir, suffix)
+        output = default_cmi_path(alias_name, cache_dir, suffix)
         if output not in self._header_unit_alias_links:
             rulename = 'cpp_header_unit_alias'
             if not self.ninja.has_rule(rulename):
