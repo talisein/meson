@@ -685,6 +685,9 @@ class NinjaBackend(backends.Backend):
         self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_bmis: T.Dict[str, T.List[T.Tuple[str, str]]] = {}
+        # Per-target header units inherited from the module providers it links,
+        # grouped by provider (cl only -- see _imported_header_units).
+        self._target_imported_header_units: T.Dict[str, T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]]] = {}
         # Per-target build-relative paths every generator (custom_target,
         # generator) of the target writes, so a unit exporting a generated
         # header can order behind the edge that produces it.
@@ -2009,10 +2012,10 @@ class NinjaBackend(backends.Backend):
         # reusing a class-mate target's edges when they exist. Built from the
         # same pre-module args as a target's own units. `args` keeps growing
         # below, so the unit edges get their own copy.
-        hu_outputs, hu_args, hu_bmis = self._provision_header_unit_edges(
-            cpp, provider.cpp_header_units, args.copy(), class_key,
+        hu_outputs, hu_args, hu_bmis = self._provision_class_header_units(
+            cpp, provider, args.copy(), class_key,
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
-            vid, None, provider)
+            vid, None)
         modargs = cpp.get_module_compile_args(info.subdir)
         if cpp.get_id() == 'clang' and '-fmodules' in args:
             # Same shape as the compile-edge dance in generate_single_compile.
@@ -4944,7 +4947,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
         bmis: T.List[T.Tuple[str, str]] = []
-        if target.cpp_header_units:
+        if target.cpp_header_units or self._imported_header_units(target, compiler):
             # Build each unit with the target's full compile args (base +
             # per-target), the same a consumer sees, so the BMI freezes the same
             # preprocessor state -- a unit built under different macros (e.g. cl
@@ -4958,13 +4961,89 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 self.check_header_unit_names(target, args)
                 # Costs a probe only on a target that forces includes at all.
                 self.warn_on_preincluded_header_units(target, args)
-            outputs, consumer_args, bmis = self._provision_header_unit_edges(
-                compiler, target.cpp_header_units, args, class_key, class_subdir,
-                target.name, target, target)
+            outputs, consumer_args, bmis = self._provision_class_header_units(
+                compiler, target, args, class_key, class_subdir, target.name, target)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         self._target_header_unit_bmis[tid] = bmis
         return outputs
+
+    def _provision_class_header_units(self, compiler: Compiler, target: build.BuildTarget,
+                                      args: T.Union['CompilerArgs', T.List[str]],
+                                      class_key: T.Tuple[str, ...],
+                                      class_subdir: T.Optional[str],
+                                      declarer: str,
+                                      warn_target: T.Optional[build.BuildTarget]
+                                      ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
+        """Every header unit `target`'s TUs must be able to name, in one class:
+        the units it declares itself, plus the ones it inherits by importing
+        another target's module (see _imported_header_units, empty off cl).
+
+        An inherited unit is built in `target`'s class -- that is the BMI its TUs
+        must read -- but from the *provider's* BMI-irrelevant flags, because the
+        spelling is the provider's and only the provider's include path resolves
+        it. That is the same composition a BMI-only variant uses for the
+        interface itself (_get_or_create_bmi_variant), and it means a consumer
+        and the provider's variant compute one key and emit one edge, whichever
+        of them the backend generates first. The provider is the owner too, so a
+        unit exporting a header that target generates still orders behind its
+        generator. The (GCC name, BMI) pairs stay the target's own: they feed
+        GCC's mapper, and GCC inherits nothing here.
+        """
+        seen: T.List[T.List[str]] = []
+        outputs, consumer_args, bmis = self._provision_header_unit_edges(
+            compiler, target.cpp_header_units, args, class_key, class_subdir,
+            declarer, warn_target, target, seen)
+        relevant, _ = compiler.split_bmi_args(args)
+        for provider, units in self._imported_header_units(target, compiler):
+            _, irrelevant = compiler.split_bmi_args(
+                self._generate_single_compile(provider, compiler))
+            prov_outputs, prov_args, _ = self._provision_header_unit_edges(
+                compiler, units, irrelevant + relevant, class_key, class_subdir,
+                provider.name, None, provider, seen)
+            outputs += [o for o in prov_outputs if o not in outputs]
+            consumer_args += prov_args
+        return outputs, consumer_args, bmis
+
+    def _imported_header_units(self, target: build.BuildTarget, compiler: Compiler
+                               ) -> T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]]:
+        """The header units declared by the module providers this target links,
+        grouped by provider and minus anything the target declares itself.
+
+        cl names a header unit only through a /headerUnit mapping on the command
+        line, and an imported module's BMI does not carry the mappings its own
+        interface was built with. So a TU importing a module whose interface
+        imports a header unit has to be handed that unit's BMI as well, or cl
+        fails the import outright (C7612, "could not find header unit"). GCC
+        reaches the unit at its default-named CMI path and Clang records the
+        pcm's own path inside the importing pcm, so neither needs this -- and on
+        Clang it would be actively harmful, since a unit named for a target is
+        loaded into every one of its TUs, which is what makes declaring a std
+        header unit alongside `import std;` unusable there.
+        """
+        if compiler.get_id() != 'msvc':
+            return []
+        tid = target.get_id()
+        cached = self._target_imported_header_units.get(tid)
+        if cached is not None:
+            return cached
+        seen = {self._header_unit_spelling(hu, compiler) for hu in target.cpp_header_units}
+        groups: T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]] = []
+        for t in sorted(target.get_all_linked_targets(), key=lambda t: t.get_id()):
+            if not isinstance(t, build.BuildTarget) or not t.cpp_header_units \
+                    or not t.provides_cpp_modules() \
+                    or not self.target_uses_p1689_cpp_modules(t):
+                continue
+            units: T.List[T.Union[File, str]] = []
+            for hu in t.cpp_header_units:
+                key = self._header_unit_spelling(hu, compiler)
+                if key not in seen:
+                    seen.add(key)
+                    units.append(hu)
+            if units:
+                groups.append((t, units))
+        self._target_imported_header_units[tid] = groups
+        return groups
 
     def _target_generated_output_paths(self, target: build.BuildTarget) -> T.List[str]:
         """Build-relative paths of every file this target's generators
@@ -5010,14 +5089,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                      class_subdir: T.Optional[str],
                                      declarer: str,
                                      warn_target: T.Optional[build.BuildTarget],
-                                     owner: T.Optional[build.BuildTarget] = None
+                                     owner: T.Optional[build.BuildTarget] = None,
+                                     seen_consumer_args: T.Optional[T.List[T.List[str]]] = None
                                      ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
         """The edge-emitting half of provision_header_units, also used by
         BMI-only module variants to build their class's units (with no
         warn_target: reuse there is same-class by construction). `owner` is the
         target whose generators may supply a declared header, used to order a
-        unit edge behind a build-time-generated header. Returns
-        (unit outputs, per-unit consumer args, per-unit (GCC name, BMI) pairs).
+        unit edge behind a build-time-generated header. `seen_consumer_args` lets
+        a caller that provisions one class's units in several calls -- a target's
+        own plus each imported provider's -- share the flag dedup across them.
+        Returns (unit outputs, per-unit consumer args, per-unit (GCC name, BMI)
+        pairs).
         """
         if not header_units:
             return [], [], []
@@ -5033,7 +5116,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         cache_dir = compiler.get_module_cache_dir()
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
-        seen_consumer_args: T.List[T.List[str]] = []
+        if seen_consumer_args is None:
+            seen_consumer_args = []
         bmis: T.List[T.Tuple[str, str]] = []
         # The chain aliases the declarer's scan edges will carry, mirrored here
         # so the scan names below are computed under the same include path the

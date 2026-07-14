@@ -670,6 +670,38 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
 
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    def test_msvc_header_unit_import_inheritance(self):
+        # Neither program declares util.h: each inherits it by importing modlib,
+        # whose interface re-exports it. cl resolves a header unit only through a
+        # /headerUnit mapping and an imported .ifc carries none, so without the
+        # inherited mapping the compile dies on C7612. The mapping has to name
+        # the unit BMI of the importer's *own* class -- prog23's variant of
+        # modlib's interface was built against the c++23 unit, not the provider's
+        # c++20 one -- and each program constant-evaluates the unit's dialect
+        # probe, so naming the wrong class's BMI is a failing run.
+        self.build_and_check_modules('206 header unit import inheritance',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=(),
+                                     extra_args=self._MSVC_TWO_CLASS_ARGS)
+        per_prog = {p: self.header_unit_digests('util.h', edges=f'{p}.exe.p/')
+                    for p in ('prog20', 'prog23')}
+        for prog, digests in per_prog.items():
+            self.assertEqual(len(digests), 1,
+                             f'{prog} inherits exactly one util.h BMI, got {digests}')
+        self.assertNotEqual(per_prog['prog23'], per_prog['prog20'],
+                            'divergent classes must not share an inherited unit BMI')
+        self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
+                         "prog23 must inherit the unit BMI modlib's variant was built against")
+        # An inherited unit is still a declared unit's BMI, so it reaches the
+        # command line the same way: as a /headerUnit mapping, never as a
+        # /reference and never varying with a scan.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                self.assertNotIn('/reference', line)
+                if line.strip().startswith('ARGS =') and '.ifc' in line:
+                    self.assertIn('/headerUnit', line)
+
     @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler='msvc')
     def test_msvc_module_internal_partitions(self):
         # An internal (implementation) partition on MSVC: `module pkg:impl;` has
