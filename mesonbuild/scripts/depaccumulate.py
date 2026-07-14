@@ -356,12 +356,14 @@ def _warn_private_interface_reach(rules: T.List[Rule], provided: T.Dict[str, str
 
 
 def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
-    """Enforce one providing target per module name per build tree.
+    """Enforce one providing target per module cache path.
 
     Unrelated targets never meet in a collate (--dep-provmap carries only
     linked dependencies), but every provider's BMI lands in the shared module
-    cache at a path keyed by the module name alone, so two exporters of one
-    name would silently fight over the same BMI file and wedge the build.
+    cache at a path keyed by the module name within its machine-and-flag class
+    subdir, so two exporters landing on one BMI path would silently fight over
+    the same file and wedge the build. The same module name on two machines, or
+    in two divergent flag classes, lands at two distinct paths and coexists.
     Record the owning target's provmap path next to the would-be BMI; a second
     claimant errors. A claim is stale -- and taken over -- when its provmap is
     gone (target removed; meson reconfigure runs `ninja -t cleandead`) or no
@@ -423,9 +425,9 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
                     f'Module "{name}" is exported by more than one target in this '
                     f'build ({os.path.dirname(owner)} and {os.path.dirname(provmap)}); '
                     f'both would write their BMI to {cache_bmi}. A module name may '
-                    'have only one providing target per build tree. (If the module '
-                    'recently moved between targets this claim may be stale; re-run '
-                    'ninja once.)')
+                    'have only one providing target per module cache path (that is, '
+                    'per machine and flag class). (If the module recently moved '
+                    'between targets this claim may be stale; re-run ninja once.)')
             # Stale: drop it and retry the atomic claim; a concurrent
             # claimant may win the retry, and the next round then reads its
             # live claim.
