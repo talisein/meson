@@ -38,7 +38,8 @@ built from the standard library's module sources shipped with the MSVC toolset
 (cl 19.32, where `/scanDependencies` shipped) and `cpp_std=c++20` or later.
 As on GCC and Clang, `dependency('std')` folds in the threads dependency by
 default (a no-op on MSVC, where threading needs no flags), and
-`dependency('std-nothreads')` opts out; the two cannot be mixed in one build.
+`dependency('std-nothreads')` opts out; the two cannot be mixed on one
+machine.
 
 Older but modules-capable MSVC (VS 2019 16.8 up to VS 2022 17.1) falls back to
 the previous regex-based scanner, which handles only flat named modules --
@@ -51,4 +52,7 @@ as for GCC. Targets that share modules but compile with divergent
 module-affecting flags (a different `cpp_std`, extra defines, ...) build
 correctly: each flag class gets its own subdirectory of `ifc.cache`, and
 Meson recompiles a shared provider's interfaces per class as BMIs only —
-every consumer still links the provider's objects exactly once.
+every consumer still links the provider's objects exactly once. This holds
+across a cross build's two machines exactly as it does for GCC and Clang:
+each machine keeps its own `ifc.cache` entries, so the build and host
+machines never contend for a BMI.

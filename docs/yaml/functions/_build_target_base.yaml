@@ -172,6 +172,12 @@ kwargs:
       source, or that links a target which provides modules, is treated as
       module-enabled automatically without this keyword.
 
+      The target's `native:` kwarg selects which machine it belongs to, and
+      with it which machine's module cache its provided and imported modules
+      use: a `native: true` target and a `native: false` one never contend
+      over a module name, even the same one, since their BMIs never share a
+      cache path.
+
       Module detection never reads source contents; it is driven entirely by
       extensions, this keyword and the link graph. With GCC, a module
       interface in a plain `.cpp`/`.cc` therefore needs this keyword (or a
@@ -341,12 +347,16 @@ kwargs:
       Names which of this target's C++ sources are module interfaces that are
       *private*: importable only by this target's own sources, never
       published to anything that links this target, and not subject to the
-      *build-tree-wide* rule that a module name have only one providing
-      target -- two unrelated targets may each declare their own private
-      module of the same name. This does not relax the rule *within one
-      link*: a module's exported entities are mangled from its bare module
-      name alone, so two same-named modules -- private or not -- reaching
-      the same link is still a hard error, exactly as for two public ones.
+      rule that a module name have only one providing target per module cache
+      path -- itself already scoped to one machine and flag class, so a public
+      module can share a name with one built for a different machine or a
+      different flag class without being made private. A private module goes
+      further: two unrelated targets may each declare their own private
+      module of the same name even within one cache path. This does not
+      relax the rule *within one link*: a module's exported entities are
+      mangled from its bare module name alone, so two same-named modules --
+      private or not -- reaching the same link is still a hard error, exactly
+      as for two public ones.
       Each entry is one of the target's own sources -- a string or a [[files]]
       object naming a static source, or a `custom_target`, `custom_target[i]`
       or `generator().process()` result naming one of that target's own

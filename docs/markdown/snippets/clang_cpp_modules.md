@@ -33,8 +33,8 @@ compile command line static.
 by default — the std module is built with the threads dependency's flags and
 every consumer inherits them, so the POSIX-thread setting Clang bakes into
 `std.pcm` matches all of its importers by construction;
-`dependency('std-nothreads')` opts out (one shared std module per build, so
-the two spellings cannot be mixed). Clang serves two standard
+`dependency('std-nothreads')` opts out (one shared std module per machine, so
+the two spellings cannot be mixed on one machine). Clang serves two standard
 libraries, so Meson probes which one the build actually uses — honoring the
 platform default, Clang configuration files, and a `-stdlib=libc++` given via
 `cpp_args`, `add_global_arguments` or `add_project_arguments` — and builds the
@@ -60,7 +60,10 @@ own subdirectory of `pcm.cache`, and Meson recompiles a shared provider's
 interfaces per class as BMIs only — every consumer still links the provider's
 objects exactly once. The std module needs no special handling for any of
 this; `dependency('std')` folds the threads dependency in and propagates it
-to every consumer.
+to every consumer. The same separation holds across a cross build's two
+machines, exactly as for GCC: each machine keeps its own `pcm.cache` entries,
+so a build-machine module target and a host-machine one never contend for a
+BMI, even under the same module name.
 
 ccache does not track BMI contents and would serve stale objects for module
 consumers, so Meson makes it fall back to the real compiler for module
