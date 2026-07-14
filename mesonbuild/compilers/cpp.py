@@ -835,7 +835,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # no cache dir on the command line. Every BMI a compile resolves, in
         # any class or a target-private directory, is named by the per-TU
         # module mapper instead (get_module_mapper_args), whose contents the
-        # collator resolves (--private-bmi-dir/--private-interface at the
+        # collator resolves (--private-bmi-dir/--private-interface-object at the
         # collator, in lockstep with this target's own privacy), which the
         # backend adds to compile edges only -- a scan resolves no named
         # modules, and header units stay in the default-named cache the

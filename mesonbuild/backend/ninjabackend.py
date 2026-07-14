@@ -1869,7 +1869,7 @@ class NinjaBackend(backends.Backend):
         the default naming under the shared cache (--default-cmi-root).
 
         --private-map (this target's own private module names) is always
-        passed; --private-bmi-dir/--private-interface/--all-provides-private
+        passed; --private-bmi-dir/--private-interface-object/--all-provides-private
         only when this target actually has a private module of its own; and
         --dep-private-map once per linked, module-providing dependency, always
         naming that dependency's own private-modules.json directly (never a
@@ -1879,11 +1879,11 @@ class NinjaBackend(backends.Backend):
         single link, and target names repeat across subdirs, so a name would
         make two distinct providers look like one (private_map_ref_for pairs
         the id with a display string the collator only ever prints).
-        --private-interface names a provide by its *object* path (a P1689
-        rule's primary-output), not its source: only Clang's P1689 output
-        carries a source-path for a provide at all, so the collator cannot
-        use it as a compiler-agnostic privacy key the way --interface-source
-        (a genuinely Clang-only concern) does.
+        --private-interface-object names a provide by its object path (a
+        P1689 rule's primary-output): only Clang's P1689 output carries a
+        source-path for a provide at all, so the collator cannot use one as
+        a compiler-agnostic privacy key the way --interface-source (a
+        genuinely Clang-only concern) does.
         """
         depargs: T.List[str] = ['--private-map', self.get_private_modules_file_for(target),
                                 self.private_map_display_for(target)]
@@ -1902,7 +1902,7 @@ class NinjaBackend(backends.Backend):
                 depargs += ['--all-provides-private']
             else:
                 for p in sorted(self._private_module_interface_objs(target)):
-                    depargs += ['--private-interface', p]
+                    depargs += ['--private-interface-object', p]
         for path, tid, display in dep_private_maps:
             depargs += ['--dep-private-map', path, tid, display]
         for pm in dep_provmaps:
