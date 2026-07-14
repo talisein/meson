@@ -1932,7 +1932,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # The C++ standard library as importable modules (`import std;`) is not a
         # discoverable external dependency: synthesize it from the compiler.
         # 'std' is threaded by default; 'std-nothreads' opts out (one shared
-        # std module per build, so the two cannot be mixed).
+        # std module per machine, so the two cannot be mixed on one machine).
         if names == ['std']:
             return self._cpp_std_module_dependency(node, kwargs)
         if names == ['std-nothreads']:
@@ -2007,8 +2007,9 @@ class Interpreter(InterpreterBase, HoldableObject):
         built with the platform's thread flags and every consumer inherits
         them through the InternalDependency, making the flag uniform across
         std sharers by construction. `dependency('std-nothreads')` opts out.
-        There is a single shared std module per build, so the two spellings
-        cannot be mixed.
+        There is a single shared std module per machine, so the two spellings
+        cannot be mixed on one machine (a cross build synthesizes its own std
+        library per machine, each with a distinct target name).
 
         'std' is reserved, but as for any reserved dependency name an explicit
         meson.override_dependency('std', ...) takes precedence over synthesis.
@@ -2034,9 +2035,9 @@ class Interpreter(InterpreterBase, HoldableObject):
         if other is not None and other.found():
             raise InterpreterException(
                 "dependency('std') and dependency('std-nothreads') cannot be mixed "
-                'in one build: there is a single shared std module, built either '
-                'with thread support (the default) or without. Use one spelling '
-                'everywhere.')
+                'on one machine: there is a single shared std module per machine, '
+                'built either with thread support (the default) or without. Use one '
+                'spelling everywhere on a machine.')
 
         cached = self.build.cpp_std_module_deps[for_machine].get(name)
         if cached is not None and (cached.found() or not required):
@@ -2105,8 +2106,11 @@ class Interpreter(InterpreterBase, HoldableObject):
             libkwargs['cpp_args'] = std_extra_args
         # The internal name mirrors CMake's __cmake_cxx_std_* convention: the
         # archive (lib__meson_cxx_std.a) is obviously synthesized, and cannot
-        # collide with a user target named 'std'.
-        std_lib = self.func_static_lib(node, ['__meson_cxx_std', *srcs], libkwargs)
+        # collide with a user target named 'std'. Each machine synthesizes its
+        # own std library, so the build-machine variant takes a distinct name --
+        # a cross build would otherwise collide two targets on __meson_cxx_std.
+        libname = '__meson_cxx_std' if for_machine is not MachineChoice.BUILD else '__meson_cxx_std_build'
+        std_lib = self.func_static_lib(node, [libname, *srcs], libkwargs)
         # Mark it a module provider directly, rather than via the cpp_modules
         # keyword, so this internal target does not raise a spurious FeatureNew
         # about a keyword the user never wrote.
