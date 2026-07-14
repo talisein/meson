@@ -4,8 +4,10 @@ Meson can now build C++20 named modules (and module partitions,
 internal implementation partitions included) with GCC on the Ninja
 backend. Sources are scanned with GCC's P1689 dependency scanner and
 ordered through Ninja `dyndep`; compiled module interfaces live in a single shared
-`gcm.cache` at the build root, found by name like headers. No `-fmodule-file=`
-mappings or module names appear on any compile command line.
+`gcm.cache` at the build root, resolved through a per-translation-unit module
+mapper (GCC has no module search-path flag). No `-fmodule-file=` mappings or
+module names appear on any compile command line — a compile carries only its
+mapper file's static path.
 
 Module interfaces produced at build time by a `generator()` or `custom_target`
 are supported: the scan runs after the source is generated, and the module name
@@ -71,15 +73,14 @@ and MSVC the two combine fine, except that a module interface unit itself
 never gets the PCH: its forced include would land before the module
 declaration, which is ill-formed.
 
-This first cut is GCC-only (named modules GCC >= 14; `import std;` GCC >= 15).
-Header units are not covered. Targets that share modules but compile with
+Named modules need GCC >= 14 (the first release with the P1689 scanner);
+`import std;` needs GCC >= 15. Targets that share modules but compile with
 divergent module-affecting flags (a different `cpp_std`, extra defines,
 `-pthread` from `dependency('threads')`, ...) build correctly, as on Clang and
-MSVC: each flag class gets its own subdirectory of `gcm.cache` — reached
-through a per-translation-unit module mapper, since GCC has no module search
-path flag — and Meson recompiles a shared provider's interfaces per class as
-BMIs only, so every consumer still links the provider's objects exactly once.
-A single-class build keeps the flat `gcm.cache` and mapper-less command
-lines. Header units are built per flag class too, renamed through per-class
+MSVC: each flag class gets its own subdirectory of `gcm.cache`, named in the
+compiles' mappers, and Meson recompiles a shared provider's interfaces per
+class as BMIs only, so every consumer still links the provider's objects
+exactly once. A single-class build keeps every BMI in the flat `gcm.cache`.
+Header units are built per flag class too, renamed through per-class
 directory aliases on the dependency scan; see the header-unit notes for the
 mechanism and its degraded path.
