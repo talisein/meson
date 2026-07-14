@@ -4229,78 +4229,170 @@ class Interpreter(InterpreterBase, HoldableObject):
                 f'pipeline (GCC >= 14, MSVC >= 19.32, or Clang with a '
                 f'P1689-capable clang-scan-deps); got {got}.')
 
+    @staticmethod
+    def _generated_output_is_cpp_source(fname: str) -> bool:
+        # A generated output declared as a module unit must be something the
+        # target actually compiles as C++: a header carried along in the same
+        # custom_target output list is harmless (it never matches a compile
+        # edge), but at least one output has to be a compilable C++ source or
+        # the declaration could never take effect.
+        if compilers.is_header(fname):
+            return False
+        ext = os.path.splitext(fname)[1][1:]
+        return ext.lower() in compilers.lang_suffixes['cpp'] or ext == 'C'
+
+    @staticmethod
+    def _target_compiles_generated(target: build.BuildTarget,
+                                   entry: T.Union[build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]) -> bool:
+        # An object-form module kwarg entry must reference one of the target's
+        # own generated sources -- an object the target does not compile would
+        # declare a module unit that is never built (the same silent no-op a
+        # source-name typo would be). Identity is the reference: a
+        # CustomTargetIndex additionally matches when the target compiles its
+        # parent custom_target (or a sibling index of the same output).
+        gen_sources = target.get_generated_sources()
+        if entry in gen_sources:
+            return True
+        if isinstance(entry, build.CustomTargetIndex):
+            for g in gen_sources:
+                if g is entry.target:
+                    return True
+                if isinstance(g, build.CustomTargetIndex) and \
+                        g.target is entry.target and g.output == entry.output:
+                    return True
+        return False
+
+    def _resolve_cpp_module_entry(self, name: str, target: build.BuildTarget, kwarg: str,
+                                  entry: T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]) -> T.List[T.Tuple[object, str]]:
+        # Map one module-kwarg entry to canonical (key, display) pairs, one per
+        # module output it declares, so validation and the cross-kwarg checks
+        # can compare mixed entry forms uniformly. A static source keys on its
+        # File; a generated output keys on ('generated', output-name), the same
+        # regardless of whether it was named by string or by object, so the same
+        # generated output reached two different ways collides as it should.
+        #
+        # Classification is by name at setup time, and a generated source's
+        # output names are static at setup even though its contents are not, so
+        # a generated output is as nameable here as a checked-in source -- only
+        # the filenames are ever consulted, nothing reads the file.
+        if isinstance(entry, (build.CustomTarget, build.CustomTargetIndex, build.GeneratedList)):
+            if not self._target_compiles_generated(target, entry):
+                raise InvalidArguments(
+                    f'Target {name!r} lists the generated source {entry.get_outputs()!s} in '
+                    f'{kwarg}, but the target does not compile it. A module kwarg can only '
+                    "name one of the target's own generated sources.")
+            cpp_outputs = [o for o in entry.get_outputs() if self._generated_output_is_cpp_source(o)]
+            if not cpp_outputs:
+                raise InvalidArguments(
+                    f'Target {name!r} lists the generated source {entry.get_outputs()!s} in '
+                    f'{kwarg}, but none of its outputs is a compilable C++ source, so it '
+                    'can declare no module unit.')
+            return [(('generated', o), o) for o in cpp_outputs]
+
+        # A source-tree File keeps its exact meaning: it must be one of the
+        # target's static sources (File equality resolves a string the same way
+        # a source string does -- File(is_built=False, subdir, fname)).
+        if isinstance(entry, mesonlib.File):
+            if entry not in set(target.sources):
+                raise InvalidArguments(
+                    f'Target {name!r} lists {entry!s} in {kwarg}, but '
+                    "it is not one of the target's sources or generated outputs.")
+            return [(entry, str(entry))]
+
+        # A string first resolves against the static sources as before, then --
+        # if it matches none -- against the output names of the target's
+        # generated sources. Exactly one match anywhere declares that output;
+        # zero is the typo error; more than one (two generated outputs of the
+        # same name, or a generated output shadowing a static source) is an
+        # ambiguity the user resolves by passing the files() object or the
+        # custom_target itself.
+        static = mesonlib.File(False, target.subdir, entry)
+        static_match = static in set(target.sources)
+        generated_matches = [g for g in target.get_generated_sources() if entry in g.get_outputs()]
+        if not static_match and not generated_matches:
+            raise InvalidArguments(
+                f'Target {name!r} lists {entry!s} in {kwarg}, but '
+                "it is not one of the target's sources or generated outputs.")
+        if int(static_match) + len(generated_matches) > 1:
+            where = ['a static source'] if static_match else []
+            where += [f'a generated output of {g.get_outputs()!s}' for g in generated_matches]
+            raise InvalidArguments(
+                f'Target {name!r} lists {entry!s} in {kwarg}, but the name is ambiguous -- '
+                f'it matches {" and ".join(where)}. Pass the files() object or the '
+                'custom_target itself to say which one you mean.')
+        if static_match:
+            return [(static, entry)]
+        return [(('generated', entry), entry)]
+
+    def _cpp_module_kwarg_keys(self, name: str, target: build.BuildTarget, kwarg: str,
+                               entries: T.Sequence[T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]]) -> T.Dict[object, str]:
+        # The canonical key -> display map for one module kwarg, validating each
+        # entry as it goes. Cross-kwarg checks intersect these key maps.
+        keys: T.Dict[object, str] = {}
+        for entry in entries:
+            for key, display in self._resolve_cpp_module_entry(name, target, kwarg, entry):
+                keys[key] = display
+        return keys
+
     def _check_cpp_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
-        # Every cpp_module_interfaces entry must name one of the target's own
-        # sources; otherwise the declaration silently does nothing (the worst
-        # outcome for a typo). A string resolves the same way a source string
-        # does -- File(is_built=False, subdir, fname) -- so File equality matches.
+        # Every cpp_module_interfaces entry must resolve to one of the target's
+        # own sources -- static or generated -- otherwise the declaration
+        # silently does nothing (the worst outcome for a typo).
         if not target.cpp_module_interfaces:
             return
-        sources = set(target.sources)
-        for entry in target.cpp_module_interfaces:
-            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
-            if f not in sources:
-                raise InvalidArguments(
-                    f'Target {name!r} lists {entry!s} in cpp_module_interfaces, but '
-                    "it is not one of the target's sources.")
+        self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
+                                    target.cpp_module_interfaces)
 
     def _check_cpp_internal_partitions(self, name: str, target: build.BuildTarget) -> None:
-        # An internal (implementation) partition entry must name one of the
+        # An internal (implementation) partition entry must resolve to one of the
         # target's own sources, like cpp_module_interfaces. A source may not be
         # listed in both: a C++ source is one or the other, an interface unit or
         # an internal partition, and only the partition kwarg would be acted on
         # (MSVC would compile the declared interface with /internalPartition, so
-        # its module is never produced as an interface at all).
+        # its module is never produced as an interface at all). The comparison is
+        # on canonical keys, so the same source named one way here and another
+        # there is still caught.
         #
         # MSVC additionally rejects an interface file extension for an internal
         # partition (a .ixx is a module-interface extension and is incompatible
         # with /internalPartition), so the source should carry a plain
         # implementation extension (.cpp); use a .cpp there for a portable
-        # meson.build.
+        # meson.build. A generated internal partition has no other channel on
+        # MSVC at all -- extension detection cannot classify a non-interface
+        # extension -- which is one reason this kwarg accepts generated sources.
         if not target.cpp_internal_partitions:
             return
-        sources = set(target.sources)
-        public_interfaces = {
-            entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
-            for entry in target.cpp_module_interfaces}
-        for entry in target.cpp_internal_partitions:
-            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
-            if f not in sources:
-                raise InvalidArguments(
-                    f'Target {name!r} lists {entry!s} in cpp_internal_partitions, but '
-                    "it is not one of the target's sources.")
-            if f in public_interfaces:
-                raise InvalidArguments(
-                    f'Target {name!r} lists {entry!s} in both cpp_module_interfaces and '
-                    'cpp_internal_partitions; a C++ source is one or the other (an '
-                    'interface unit or an internal partition), so list it in exactly one.')
+        partitions = self._cpp_module_kwarg_keys(name, target, 'cpp_internal_partitions',
+                                                 target.cpp_internal_partitions)
+        public_interfaces = self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
+                                                        target.cpp_module_interfaces)
+        for key in partitions.keys() & public_interfaces.keys():
+            raise InvalidArguments(
+                f'Target {name!r} lists {partitions[key]!s} in both cpp_module_interfaces and '
+                'cpp_internal_partitions; a C++ source is one or the other (an '
+                'interface unit or an internal partition), so list it in exactly one.')
 
     def _check_cpp_private_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
-        # Every cpp_private_module_interfaces entry must name one of the
+        # Every cpp_private_module_interfaces entry must resolve to one of the
         # target's own sources, like cpp_module_interfaces. A source may not
         # be listed in both: being private already implies being an
         # interface, so the combination is pure, ambiguous redundancy rather
         # than a meaningful declaration. Listing a source in both
         # cpp_internal_partitions and cpp_private_module_interfaces is fine
         # (and is how a partition itself is marked private -- privacy is not
-        # inherited from a primary module).
+        # inherited from a primary module). The checks run on canonical keys, so
+        # mixed static/generated forms of the same source are still caught.
         if not target.cpp_private_module_interfaces:
             return
-        sources = set(target.sources)
-        public_interfaces = {
-            entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
-            for entry in target.cpp_module_interfaces}
-        for entry in target.cpp_private_module_interfaces:
-            f = entry if isinstance(entry, mesonlib.File) else mesonlib.File(False, target.subdir, entry)
-            if f not in sources:
-                raise InvalidArguments(
-                    f'Target {name!r} lists {entry!s} in cpp_private_module_interfaces, but '
-                    "it is not one of the target's sources.")
-            if f in public_interfaces:
-                raise InvalidArguments(
-                    f'Target {name!r} lists {entry!s} in both cpp_module_interfaces and '
-                    'cpp_private_module_interfaces; list it in cpp_private_module_interfaces '
-                    'only (being private already implies being an interface).')
+        private = self._cpp_module_kwarg_keys(name, target, 'cpp_private_module_interfaces',
+                                              target.cpp_private_module_interfaces)
+        public_interfaces = self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
+                                                        target.cpp_module_interfaces)
+        for key in private.keys() & public_interfaces.keys():
+            raise InvalidArguments(
+                f'Target {name!r} lists {private[key]!s} in both cpp_module_interfaces and '
+                'cpp_private_module_interfaces; list it in cpp_private_module_interfaces '
+                'only (being private already implies being an interface).')
         # cpp_private_module_interfaces is only acted on by the P1689
         # pipeline, like cpp_header_units: on any other compiler the
         # declaration would be silently dropped, and unlike the other module

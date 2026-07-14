@@ -86,9 +86,9 @@ if T.TYPE_CHECKING:
         cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
         cpp_modules: bool
         cpp_header_units: T.List[T.Union[str, File]]
-        cpp_module_interfaces: T.List[T.Union[str, File]]
-        cpp_internal_partitions: T.List[T.Union[str, File]]
-        cpp_private_module_interfaces: T.List[T.Union[str, File]]
+        cpp_module_interfaces: T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]
+        cpp_internal_partitions: T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]
+        cpp_private_module_interfaces: T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]
         d_debug: T.List[T.Union[str, int]]
         d_import_dirs: T.List[IncludeDirs]
         d_module_versions: T.List[T.Union[str, int]]

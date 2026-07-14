@@ -3039,12 +3039,7 @@ class NinjaBackend(backends.Backend):
         # Normalized build-root-relative paths of the sources this target
         # declares as private module interfaces (cpp_private_module_interfaces),
         # the same comparable key as _module_interface_paths.
-        paths: T.Set[str] = set()
-        for entry in target.cpp_private_module_interfaces:
-            f = entry if isinstance(entry, File) else \
-                File.from_source_file(self.source_dir, target.get_subdir(), entry)
-            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
-        return paths
+        return self._module_kwarg_paths(target, target.cpp_private_module_interfaces)
 
     def _private_module_interface_objs(self, target: build.BuildTarget) -> T.Set[str]:
         """Build-root-relative object paths of this target's own private
@@ -4820,18 +4815,48 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return 'system', hu[1:-1]
         return 'user', hu
 
-    def _module_interface_paths(self, target: build.BuildTarget) -> T.Set[str]:
-        # Normalized build-root-relative paths of the sources this target
-        # declares as module interfaces (cpp_module_interfaces). This is the
-        # form rel_src and the P1689 scan's source-path take, so the per-source
-        # interface flags, the Clang harvest edge and the collator all decide
-        # interface-ness from one comparable key and cannot drift.
+    def _module_kwarg_paths(self, target: build.BuildTarget,
+                            entries: T.Sequence[T.Union[str, File, 'build.CustomTarget', 'build.CustomTargetIndex', 'build.GeneratedList']]) -> T.Set[str]:
+        # Normalized build-root-relative paths of the sources a module kwarg
+        # declares. This is the form rel_src and the P1689 scan's source-path
+        # take, so the per-source interface flags, the Clang harvest edge and
+        # the collator all decide interface-ness from one comparable key and
+        # cannot drift. A generated entry keys on its build-tree output path
+        # (the same key get_target_generated_dir gives the compile loop);
+        # object forms declare every C++ output, a string names one; a source
+        # a generated output shadows is disambiguated at setup, so both the
+        # static and generated keys may safely be added for a string.
         paths: T.Set[str] = set()
-        for entry in target.cpp_module_interfaces:
-            f = entry if isinstance(entry, File) else \
-                File.from_source_file(self.source_dir, target.get_subdir(), entry)
-            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
+        gen_sources = target.get_generated_sources()
+
+        def add_generated(gensrc: 'build.GeneratedTypes', output: str) -> None:
+            # get_target_generated_dir resolves a CustomTargetIndex to its parent
+            # target's dir, the same build-tree path the compile loop computes.
+            paths.add(os.path.normpath(self.get_target_generated_dir(target, gensrc, output)))
+
+        for entry in entries:
+            if isinstance(entry, (build.CustomTarget, build.CustomTargetIndex, build.GeneratedList)):
+                for output in entry.get_outputs():
+                    add_generated(entry, output)
+                continue
+            if isinstance(entry, File):
+                paths.add(os.path.normpath(entry.rel_to_builddir(self.build_to_src)))
+                continue
+            # A string names either a static source or a generated output, never
+            # both (setup rejected the ambiguous both-match). Prefer the
+            # generated output when one exists -- a generated name is not on
+            # disk in the source tree, so from_source_file would reject it.
+            gen_hits = [g for g in gen_sources if entry in g.get_outputs()]
+            if gen_hits:
+                for gensrc in gen_hits:
+                    add_generated(gensrc, entry)
+            else:
+                f = File.from_source_file(self.source_dir, target.get_subdir(), entry)
+                paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
         return paths
+
+    def _module_interface_paths(self, target: build.BuildTarget) -> T.Set[str]:
+        return self._module_kwarg_paths(target, target.cpp_module_interfaces)
 
     def _is_declared_module_interface(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
         # Whether src is one of target's declared cpp_module_interfaces sources.
@@ -4846,13 +4871,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # the same comparable key as _module_interface_paths. An internal
         # partition is a BMI-producing module unit like an interface, but MSVC
         # compiles it with /internalPartition instead of /interface (and rejects
-        # an interface file extension for it).
-        paths: T.Set[str] = set()
-        for entry in target.cpp_internal_partitions:
-            f = entry if isinstance(entry, File) else \
-                File.from_source_file(self.source_dir, target.get_subdir(), entry)
-            paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
-        return paths
+        # an interface file extension for it) -- so a generated internal
+        # partition, which cannot be recognised by extension, has this kwarg as
+        # its only channel on MSVC.
+        return self._module_kwarg_paths(target, target.cpp_internal_partitions)
 
     def _is_declared_internal_partition(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
         # Whether src is one of target's declared cpp_internal_partitions sources.
