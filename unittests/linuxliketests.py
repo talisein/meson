@@ -1177,6 +1177,31 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if self.host_cpp_compiler().get_id() == 'gcc':
             self.check_gcc_module_mappers()
 
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
+                              compiler=('gcc', 'clang'))
+    def test_header_unit_import_inheritance(self):
+        # The GCC/Clang side of the fixture cl needed a fix for: neither program
+        # declares util.h, each reaches it only by importing modlib, whose
+        # interface re-exports it. Here that must work with the importer naming
+        # nothing -- GCC resolves the unit at its class's default-named CMI path
+        # and Clang records the pcm's path inside modlib's pcm. Each program
+        # constant-evaluates the unit's dialect probe, and prog23 (a divergent
+        # class) must see 23, so inheriting the provider's c++20 BMI is a failing
+        # run rather than a build failure.
+        self.build_and_check_modules('206 header unit import inheritance',
+                                     setup_not_contains=['divergent dialects'],
+                                     ninja_args_not_contains=())
+        units = self.header_unit_bmis('util.h')
+        self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
+        # An importer must not be handed the unit itself: that is cl's mechanism
+        # (a /headerUnit mapping per TU), and on Clang naming a unit for a target
+        # loads it into every one of that target's TUs.
+        for prog in ('prog20', 'prog23'):
+            self.assertFalse(self.header_unit_bmis_of(prog, 'util.h'),
+                             f'{prog} inherits util.h; it must name no unit BMI itself')
+        if self.host_cpp_compiler().get_id() == 'gcc':
+            self.check_gcc_module_mappers()
+
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_system_header_unit_dialect_divergence(self):
         # The system-unit twin of test_header_unit_dialect_divergence: two
