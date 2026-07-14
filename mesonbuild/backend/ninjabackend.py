@@ -668,12 +668,10 @@ class NinjaBackend(backends.Backend):
         # class. Keyed by (for_machine, id, exelist); the built-in chain does
         # not vary with a target's own include flags.
         self._gcc_include_chains: T.Dict[T.Tuple[T.Any, ...], T.List[str]] = {}
-        # Whether every short chain-alias root this machine needs could be
-        # placed, decided once per (machine, compiler) like the chain itself:
-        # a root whose path is occupied (a project can legitimately mirror a
-        # source directory named imap/ into the build root) degrades system
-        # units machine-wide, so two same-class targets cannot disagree.
-        self._system_chain_alias_ok: T.Dict[T.Tuple[T.Any, ...], bool] = {}
+        # Machines whose system-unit chain aliasing has already reported a
+        # degradation, so the warning that a chain-alias root could not be
+        # placed fires once per (machine, compiler) rather than per declarer.
+        self._warned_system_chain_alias: T.Set[T.Tuple[T.Any, ...]] = set()
         # Header units: global dedup of unit build edges, keyed by
         # (mode, spelling) -- plus compile args on MSVC, plus the declarer's BMI
         # class where the compiler builds units per class -> the edge output (the
@@ -2198,8 +2196,9 @@ class NinjaBackend(backends.Backend):
 
         Reached only on the degraded path: the build tree cannot make the
         directory links a per-class unit is named through (machine-wide), or a
-        system unit's resolved path is so shallow it out-spells its chain alias
-        (per unit; see the fall-through in _provision_header_unit_edges). There
+        system unit resolves through neither its aliased chain nor a reclassed
+        -I and lands on its real path (per unit; see the fall-through in
+        _provision_header_unit_edges). There
         a scan can only reach the unit at its one default-named path, whichever
         class built it, and GCC rejects a CMI whose dialect differs from the
         reader's. A user or system unit earns a BMI per class otherwise --
@@ -2333,88 +2332,6 @@ class NinjaBackend(backends.Backend):
         return self._place_dir_alias(real_dir, class_tag,
                                      f'meson-private/imap/{digest}')
 
-    def _short_alias_root(self, real_dir: str, class_tag: str,
-                          all_keys: T.Sequence[T.Tuple[str, str]]) -> T.Optional[str]:
-        """A build-root alias for a system include-chain directory, as short as
-        the configuration allows: `imap/<hex>`, the digest cut to its shortest
-        unique prefix (never under six characters) against every (class tag,
-        chain directory) pair this configuration can alias. That set is a pure
-        function of the configuration, so the root is stable across
-        reconfigures; a prefix only ever lengthens on a digest collision.
-
-        Why short: the compiler keeps the *shorter* of an include directory's
-        search-path spelling and a resolved header's real path, so an alias
-        spelling longer than the real path is canonicalized away and the
-        per-class name is lost. A system directory's real path can be as short
-        as /usr/include, which only a build-root spelling can undercut. The
-        user-unit roots (_dir_alias_root) stay under meson-private/imap/: a
-        source-tree real path is long, so there the alias is the shorter
-        spelling and survives, and the build root stays uncluttered.
-
-        Same link machinery, registry and never-raise failure contract as
-        _dir_alias_root: an occupied path -- the build root's imap/ may hold a
-        project's own mirrored directories, or even be a stray file -- returns
-        None, and _system_chain_aliasing_available turns that into a
-        machine-wide degradation with a diagnostic.
-        """
-        try:
-            return self._dir_aliases[(real_dir, class_tag)]
-        except KeyError:
-            pass
-        return self._place_dir_alias(
-            real_dir, class_tag, self._short_alias_rel(real_dir, class_tag, all_keys))
-
-    @staticmethod
-    def _short_alias_rel(real_dir: str, class_tag: str,
-                         all_keys: T.Sequence[T.Tuple[str, str]]) -> str:
-        # The pure half of _short_alias_root: the build-relative root path,
-        # separated out so the availability check can name a path it could
-        # not place.
-        def digest(tag: str, d: str) -> str:
-            return hashlib.sha256((tag + '\0' + d).encode()).hexdigest()
-        mine = digest(class_tag, real_dir)
-        others = {digest(t, d) for t, d in all_keys} - {mine}
-        n = 6
-        while n < len(mine) and any(o.startswith(mine[:n]) for o in others):
-            n += 1
-        return f'imap/{mine[:n]}'
-
-    def _system_chain_aliasing_available(self, compiler: Compiler,
-                                         all_keys: T.Sequence[T.Tuple[str, str]]) -> bool:
-        """Whether every short chain-alias root this machine can ever need was
-        placed, decided once per (machine, compiler) by placing them all.
-
-        All roots up front, not each on first use: an occupied path found
-        after another class's unit edges were already emitted could not
-        degrade those retroactively, and two same-class targets must never
-        disagree on whether system units alias. Placement is per path --
-        a project's own build-root imap/ entries coexist with the links
-        unless one specific name collides -- and a root that cannot be
-        placed costs per-class system-unit naming machine-wide, said once
-        here since the shared-BMI consequence is otherwise silent until
-        the divergence warning (or GCC's own scan error) fires.
-        """
-        key = (compiler.for_machine, compiler.get_id(), tuple(compiler.get_exelist()))
-        cached = self._system_chain_alias_ok.get(key)
-        if cached is not None:
-            return cached
-        ok = True
-        for tag, rd in all_keys:
-            if self._short_alias_root(rd, tag, all_keys) is None:
-                rel = self._short_alias_rel(rd, tag, all_keys)
-                mlog.warning(
-                    f'Cannot create the directory link '
-                    f'{os.path.join(self.environment.get_build_dir(), rel)!r} '
-                    'that per-class naming of C++ system header units routes '
-                    'through: the path is occupied, or its parent is not a '
-                    'directory. System header units on this machine fall back '
-                    'to one shared BMI per unit, so targets importing one '
-                    'under divergent dialects will conflict.')
-                ok = False
-                break
-        self._system_chain_alias_ok[key] = ok
-        return ok
-
     def _place_dir_alias(self, real_dir: str, class_tag: T.Optional[str],
                          rel: str) -> T.Optional[str]:
         # The shared half of the alias-root makers: create (or adopt) the link
@@ -2451,11 +2368,9 @@ class NinjaBackend(backends.Backend):
         dangling or still-valid link a few bytes each -- but nothing else ever
         reclaims them, so left alone they accumulate across every reconfigure.
         `_alias_root_real` names exactly the roots this run placed or adopted
-        (both alias-root makers register through `_place_dir_alias`), so
-        anything else under either root directory that is itself a directory
-        link is stale and goes; a plain directory or file is never touched --
-        the build root's `imap/` is not reserved to us, and a project may
-        mirror its own source tree into a directory of that name.
+        (registered through `_place_dir_alias`), so anything else under the
+        root directory that is itself a directory link is stale and goes; a
+        plain directory or file is never touched.
 
         Run once, after every target has been generated, so this reads the
         finished registry rather than a partial one target order could
@@ -2469,24 +2384,24 @@ class NinjaBackend(backends.Backend):
         """
         build_dir = self.environment.get_build_dir()
         live = set(self._alias_root_real.keys())
-        for root in ('meson-private/imap', 'imap'):
-            abs_root = os.path.join(build_dir, root)
-            try:
-                names = os.listdir(abs_root)
-            except OSError:
+        root = 'meson-private/imap'
+        abs_root = os.path.join(build_dir, root)
+        try:
+            names = os.listdir(abs_root)
+        except OSError:
+            return
+        for name in names:
+            if name == '.canary':
+                # Only ever a transient probe of _header_unit_aliasing_available,
+                # never a registered root, but also never stale-scannable.
                 continue
-            for name in names:
-                if name == '.canary':
-                    # Only ever a transient probe of _header_unit_aliasing_available,
-                    # never a registered root, but also never stale-scannable.
-                    continue
-                rel = f'{root}/{name}'
-                if rel in live:
-                    continue
-                abs_entry = os.path.join(abs_root, name)
-                if self._read_dir_link(abs_entry) is None:
-                    continue
-                self._remove_dir_link(abs_entry)
+            rel = f'{root}/{name}'
+            if rel in live:
+                continue
+            abs_entry = os.path.join(abs_root, name)
+            if self._read_dir_link(abs_entry) is None:
+                continue
+            self._remove_dir_link(abs_entry)
 
     def _respell_dir(self, d: str, class_tag: T.Optional[str] = None,
                      force_all: bool = False) -> T.Optional[str]:
@@ -2871,38 +2786,59 @@ class NinjaBackend(backends.Backend):
                                        args: T.Union['CompilerArgs', T.List[str]],
                                        class_tag: str) -> T.List[str]:
         """`-isystem` aliases of GCC's whole built-in chain, in order, each
-        routed through `class_tag`'s short alias root.
+        routed through `class_tag`'s alias root, led by
+        `-fno-canonical-system-headers`.
+
+        GCC names a system header unit by the search-path text it resolves
+        through, so aliasing the chain renames the unit per class. But the
+        compiler otherwise keeps the shorter of an include spelling and a
+        header's realpath, discarding an alias longer than the realpath (a
+        system realpath can be as short as /usr/include, undercutting any
+        meson-private spelling) and with it the per-class name;
+        -fno-canonical-system-headers turns that off. The flag and the aliases
+        it protects are therefore one unit -- every edge and probe that models
+        this resolution takes both or neither, or its mapper key would not
+        match what the edge asks for.
 
         GCC dedups include directories by identity, so an alias of a built-in
         directory substitutes it at the built-in's own position -- search order
         and include_next are preserved, only the text a resolved system header
         carries changes. Aliasing a late entry alone would instead hoist it
         ahead of the earlier chain, so it is the whole chain or, when any one
-        root cannot be placed (_system_chain_aliasing_available), none of it:
-        a partially aliased chain is a reordered one, while an empty result
-        just leaves the scan resolving real names and every system unit
-        degrading to the shared flat path.
+        root cannot be placed, none of it: a partially aliased chain is a
+        reordered one, while an empty result just leaves the scan resolving
+        real names and every system unit degrading to the shared flat path.
         """
         chain = self._gcc_include_chain(compiler, args)
         if not chain:
             return []
         build_dir = self.environment.get_build_dir()
         real_dirs = [os.path.normpath(os.path.join(build_dir, d)) for d in chain]
-        # Every root this configuration can need -- each of this machine's
-        # class tags crossed with the chain -- is the uniqueness set for the
-        # short roots' digest prefixes, so no root's length can depend on
-        # which class or target asked first.
-        tags = sorted(info.subdir for (machine, _), info in self._bmi_classes.items()
-                      if machine == compiler.for_machine and info.subdir is not None)
-        all_keys = [(t, rd) for t in tags for rd in real_dirs]
-        if not self._system_chain_aliasing_available(compiler, all_keys):
-            return []
-        out: T.List[str] = []
+        out: T.List[str] = ['-fno-canonical-system-headers']
         for rd in real_dirs:
-            alias = self._short_alias_root(rd, class_tag, all_keys)
+            alias = self._dir_alias_root(rd, class_tag)
             if alias is None:
-                # Unreachable after the availability check placed every root,
-                # but a missing alias must degrade, never emit a partial chain.
+                # A root under our own meson-private/imap/ that could not be
+                # placed (a stray entry occupying its digest path) degrades
+                # system-unit naming to the shared flat path -- never a partial,
+                # reordered chain. The result is deterministic per directory, so
+                # every declarer agrees; said once per machine, since the
+                # shared-BMI consequence is otherwise silent until the
+                # divergence warning (or GCC's own scan error) fires.
+                key = (compiler.for_machine, compiler.get_id(),
+                       tuple(compiler.get_exelist()))
+                if key not in self._warned_system_chain_alias:
+                    self._warned_system_chain_alias.add(key)
+                    digest = hashlib.sha256(
+                        (class_tag + '\0' + rd).encode()).hexdigest()[:12]
+                    mlog.warning(
+                        f'Cannot create the directory link '
+                        f'{os.path.join(build_dir, "meson-private", "imap", digest)!r} '
+                        'that per-class naming of C++ system header units routes '
+                        'through: the path is occupied, or its parent is not a '
+                        'directory. System header units on this machine degrade '
+                        'to one shared BMI per unit, so targets importing one '
+                        'under divergent dialects will conflict.')
                 return []
             out += ['-isystem', alias]
         return out
@@ -5172,14 +5108,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # a compile asking the real one both resolve.
                     bmis.append((compile_name, output))
                     continue
-                # Identical names mean the alias did not survive resolution: the
-                # compiler keeps the shorter of an include directory's spelling
-                # and a resolved header's real path, and a header this shallow
-                # (or one resolving through the target's own -isystem rather
-                # than the chain) out-spells its alias. The scan will report the
-                # real name, so fall through to the shared flat naming it can
-                # reach -- the same degradation, per unit, that a link-less tree
-                # is machine-wide.
+                # Identical names mean the alias did not enter resolution at all
+                # (the scan reported the real name for this unit): the flagged
+                # chain args defeat the compiler's shorter-of-two canonicalization,
+                # so a placed alias survives, but a unit resolving through neither
+                # the aliased chain nor a reclassed -I still lands on its real
+                # path. Fall through to the shared flat naming that name reaches --
+                # the same degradation, per unit, that a link-less tree is
+                # machine-wide.
             key = base if class_subdir is None else f'{base}:{class_subdir}'
             name: T.Optional[str] = None
             mappable = flat = False
