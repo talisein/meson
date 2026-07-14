@@ -80,5 +80,6 @@ through a per-translation-unit module mapper, since GCC has no module search
 path flag — and Meson recompiles a shared provider's interfaces per class as
 BMIs only, so every consumer still links the provider's objects exactly once.
 A single-class build keeps the flat `gcm.cache` and mapper-less command
-lines. Header units remain shared build-wide: a flag-divergent import of a
-shared header unit still warns at setup.
+lines. Header units are built per flag class too, renamed through per-class
+directory aliases on the dependency scan; see the header-unit notes for the
+mechanism and its degraded path.
