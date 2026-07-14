@@ -463,11 +463,12 @@ class CppModulesTestMixin:
         provided-modules.json. A private module is never in here (it has no
         importer outside the target), whether it is private by declaration or
         because nothing can link the target at all."""
-        # The private dir carries the target's output suffix (app.p on POSIX,
-        # app.exe.p on Windows) -- glob rather than hardcode either, as
-        # assert_alias_mapper_key does.
+        # The private dir carries the target's output name (app.p / app.exe.p
+        # for an executable, libmylib.a.p / mylib.lib.p for a static library) --
+        # glob rather than hardcode any of them, as assert_alias_mapper_key does.
         patterns = [os.path.join(self.builddir, f'{target}.p', 'provided-modules.json'),
-                    os.path.join(self.builddir, f'{target}.*.p', 'provided-modules.json')]
+                    os.path.join(self.builddir, f'{target}.*.p', 'provided-modules.json'),
+                    os.path.join(self.builddir, f'lib{target}.*.p', 'provided-modules.json')]
         matches = [m for pat in patterns for m in glob.glob(pat)]
         self.assertEqual(len(matches), 1,
                          f'{" or ".join(patterns)}: expected one provmap, got {matches}')
