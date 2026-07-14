@@ -13,10 +13,10 @@ static_library('mylib', 'wrap.cppm',
 ```
 
 A header-unit BMI must exist before the sources that import it are scanned and
-compiled, so the declaration is the key: Meson pre-builds each unit's BMI once
-(shared across the build) from the declared list. On GCC consumers resolve the
-BMI by directory lookup with no BMI path on any command line; MSVC has no such
-lookup for header units, so Meson passes each consumer an explicit
+compiled, so the declaration is the key: Meson pre-builds each unit's BMI from
+the declared list. On GCC consumers resolve the BMI through a module mapper,
+so no BMI path reaches a command line; MSVC has no such lookup for header
+units, so Meson passes each consumer an explicit
 `/headerUnit:<spelling>=<bmi>` mapping (the only place a header-unit BMI path
 appears — never a named-module one). MSVC needs `cpp_std=c++20` or later.
 
@@ -83,7 +83,10 @@ Current limitations:
   does the unit stay unnameable; the import then fails to compile with "no such
   module", and Meson warns about it at configure time. In that case move the
   source tree to a path without spaces, or enable Developer Mode. Named modules
-  are unaffected everywhere, since a module name cannot contain whitespace.
+  are unaffected everywhere, since a module name cannot contain whitespace. The
+  same link also gives each BMI class its own name for a unit (see below); where
+  it cannot be made, targets with divergent dialects fall back to sharing one
+  BMI the same way, with a warning at configure time and a failure at the scan.
 - **ccache** does not track BMI contents and would serve stale objects for
   Clang module and header-unit consumers, so Meson makes it fall back to the
   real compiler for module compiles (as it already does for GCC's
