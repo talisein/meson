@@ -104,8 +104,7 @@ Current limitations:
     compiler's whole built-in include chain), so the unit's *name* — and with
     it the BMI the scan reads — embeds the class, while compiles keep the real
     paths. Only where the build tree cannot hold the directory links this
-    needs (the FAT/exFAT and privilege limits above, or a project's own files
-    occupying the build root's `imap/` path) do units fall back to one shared
-    BMI; Meson then warns at configure time, and a dialect-divergent build
+    needs (the FAT/exFAT and privilege limits above) do units fall back to one
+    shared BMI; Meson then warns at configure time, and a dialect-divergent build
     fails at the scan. Give those targets the same dialect there, or stop
     sharing the unit between them.

@@ -577,49 +577,18 @@ class InternalTests(unittest.TestCase):
             be._dir_aliases = {}
             self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
 
-    def test_short_alias_rel_order_independent(self):
-        # _short_alias_rel's shortest-unique-prefix search reads its whole
-        # 'other roots this configuration could need' set through a plain
-        # membership test, so its answer for one (tag, dir) pair cannot
-        # depend on where in the list that pair or any other sits --
-        # exactly what lets _system_chain_aliasing_available place every
-        # root from one frozen list and still agree with whichever target
-        # asks first. Same keys, two orders, same roots throughout.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        all_keys = [
-            ('c1', '/usr/include'),
-            ('c2', '/usr/include'),
-            ('c1', '/usr/include/c++/16'),
-            ('c2', '/usr/include/c++/16'),
-            ('c3', '/usr/include/c++/16/bits'),
-        ]
-        forward = {(tag, d): NinjaBackend._short_alias_rel(d, tag, all_keys)
-                   for tag, d in all_keys}
-        shuffled = all_keys[2:] + all_keys[:2]
-        shuffled.reverse()
-        via_shuffled = {(tag, d): NinjaBackend._short_alias_rel(d, tag, shuffled)
-                        for tag, d in all_keys}
-        self.assertEqual(forward, via_shuffled)
-        # The prefix search exists to keep every root distinct; confirm it
-        # actually does, and that each stays under the short build-root form.
-        self.assertEqual(len(set(forward.values())), len(all_keys))
-        for rel in forward.values():
-            self.assertRegex(rel, r'^imap/[0-9a-f]{6,}$')
-
     def test_prune_stale_dir_aliases(self):
-        # At the end of generation, a directory link under either alias-root
-        # location that this run did not (re)place must go -- a class rename
-        # or a dropped divergence orphans the old digest's root -- but a
-        # plain directory or file there (a project's own imap/, or the
-        # transient canary) must survive untouched.
+        # At the end of generation, a directory link under meson-private/imap/
+        # that this run did not (re)place must go -- a class rename or a
+        # dropped divergence orphans the old digest's root -- but a plain
+        # directory or file there, and the transient canary, must survive
+        # untouched.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         with tempfile.TemporaryDirectory() as d:
             build = os.path.join(d, 'build')
             real_a = os.path.join(d, 'a')
-            real_b = os.path.join(d, 'b')
             os.makedirs(build)
             os.makedirs(real_a)
-            os.makedirs(real_b)
 
             be = NinjaBackend.__new__(NinjaBackend)
             be._dir_aliases = {}
@@ -627,15 +596,10 @@ class InternalTests(unittest.TestCase):
             be.environment = mock.MagicMock()
             be.environment.get_build_dir.return_value = build
 
-            # A user-class root (meson-private/imap/) and a system-chain
-            # root (build-root imap/), both standing from a run before this
-            # one -- as though a since-renamed class or a dropped divergence
-            # placed them.
+            # A root standing from a run before this one -- as though a
+            # since-renamed class or a dropped divergence placed it.
             stale_user = be._dir_alias_root(real_a, 'deadbeefcafe')
-            stale_system = be._short_alias_root(real_b, 'deadbeefcafe',
-                                                [('deadbeefcafe', real_b)])
             self.assertIsNotNone(stale_user)
-            self.assertIsNotNone(stale_system)
 
             # This run's own bookkeeping starts empty (a fresh NinjaBackend,
             # as generate() gets) and places only a root over the same real
@@ -647,16 +611,11 @@ class InternalTests(unittest.TestCase):
             self.assertIsNotNone(live_user)
             self.assertNotEqual(live_user, stale_user)
 
-            # A project's own directory named imap/, and one mirrored file in
-            # it, plus meson-private/imap/'s own non-link entry: none of these
-            # are alias roots and none may be removed.
+            # A non-link entry under meson-private/imap/ (not an alias root)
+            # must survive, and so must a canary somehow left on disk (the
+            # real code always removes it itself; pruning must not reap it by
+            # the ordinary stale-link rule).
             os.makedirs(os.path.join(build, 'meson-private', 'imap', 'not_a_link_dir'))
-            os.makedirs(os.path.join(build, 'imap'), exist_ok=True)
-            with open(os.path.join(build, 'imap', 'not_a_link_file'), 'w',
-                      encoding='utf-8') as f:
-                f.write('project data\n')
-            # A canary somehow left on disk (the real code always removes it
-            # itself); pruning must not reap it by the ordinary stale-link rule.
             canary = os.path.join(build, 'meson-private', 'imap', '.canary')
             os.symlink(build, canary)
 
@@ -667,10 +626,6 @@ class InternalTests(unittest.TestCase):
             self.assertNotIn(os.path.basename(stale_user), priv_entries)
             self.assertIn('not_a_link_dir', priv_entries)
             self.assertIn('.canary', priv_entries)
-
-            top_entries = os.listdir(os.path.join(build, 'imap'))
-            self.assertNotIn(os.path.basename(stale_system), top_entries)
-            self.assertIn('not_a_link_file', top_entries)
 
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both

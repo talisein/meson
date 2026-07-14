@@ -1385,7 +1385,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$',
                                  'the compile still names the real drive-letter path')
                 bmi_norm = bmi.replace('\\', '/')
-                self.assertRegex(bmi_norm, r'^gcm\.cache/,/imap/[0-9a-f]+/vector\.gcm$',
+                self.assertRegex(bmi_norm, r'^gcm\.cache/,/meson-private/imap/[0-9a-f]+/vector\.gcm$',
                                  'the class-aliased BMI path must carry no drive letter')
                 break
         else:

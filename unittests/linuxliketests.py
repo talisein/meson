@@ -1147,49 +1147,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # class-aliased path that scan resolves, not the default real-named one.
         cstdint = self.header_unit_bmis('cstdint')
         self.assertEqual(len(cstdint), 1, f'expected one <cstdint> BMI, got {cstdint}')
-        self.assertIn('imap/', next(iter(cstdint)),
+        self.assertIn('meson-private/imap/', next(iter(cstdint)),
                       'a single-declarer system unit on a multi-class machine '
                       'must still be class-alias-named')
         self.check_gcc_module_mappers()
-
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
-    def test_system_header_unit_alias_root_occupied(self):
-        # The build root's imap/ is not exclusively ours: a project with a
-        # source directory named imap mirrors real entries into it, and a
-        # stray file can sit at the path outright. An occupied root must
-        # degrade system units machine-wide with a diagnostic naming the
-        # path -- never a stack trace, and never a silent misbuild. First a
-        # healthy configure, then imap replaced by a plain file (occupying
-        # every root at once) and a reconfigure over it.
-        testdir = os.path.join(self.unit_test_dir,
-                               '202 system header unit dialect divergence')
-        self.init(testdir)
-        imap = os.path.join(self.builddir, 'imap')
-        windows_proof_rmtree(imap)
-        with open(imap, 'w', encoding='utf-8') as f:
-            f.write('occupied\n')
-        out = self.init(testdir, extra_args=['--reconfigure'])
-        self.assertIn('Cannot create the directory link', out)
-        self.assertIn('imap', out)
-        # The degraded build is the old shared-flat shape: the owner class's
-        # BMI at the real-named flat path every scan reads (the divergent
-        # class keeps a class-keyed copy its own compiles resolve), no alias
-        # naming anywhere, plus the divergence warning saying why that cannot
-        # work across these dialects.
-        self.assertIn('divergent dialects', out)
-        units = self.header_unit_bmis('vector')
-        self.assertTrue(any(re.fullmatch(r'gcm\.cache(/\S+)*/vector\.gcm', u)
-                            and 'imap' not in u for u in units),
-                        f'no real-named flat <vector> BMI among {units}')
-        for u in units:
-            self.assertNotIn('imap', u,
-                             f'degraded unit BMI must not be alias-named: {u}')
-        # GCC rejects the shared CMI under the other dialect at the scan --
-        # the failing build the warning predicts, as opposed to a quiet
-        # miscompile against the wrong class's BMI.
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.build()
-        self.assertIn('vector', cm.exception.output)
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_gcc_header_unit_aliasing_unavailable_warns(self):
@@ -2124,7 +2085,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.check_gcc_module_mappers()
         with open(os.path.join(self.builddir, 'prog.p', 'main.cpp.o.mapper'), encoding='utf-8') as f:
             mapper = f.read().splitlines()
-        self.assertTrue(any(re.fullmatch(r'/\S+/vector gcm\.cache/,/imap/[0-9a-f]+/vector\.gcm', line)
+        self.assertTrue(any(re.fullmatch(r'/\S+/vector gcm\.cache/,/meson-private/imap/[0-9a-f]+/vector\.gcm', line)
                             for line in mapper),
                         f'no real-name mapping onto a class-aliased unit BMI in {mapper}')
 
