@@ -820,13 +820,18 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
     def test_gcc_generated_module_sources(self):
         # The module surface built entirely from generated sources: a primary
-        # interface, an interface partition it re-exports, an implementation
-        # unit, a consumer that only imports, a re-exporting interface, and two
-        # private-by-construction modules sharing a name. Each test() links a
-        # producer/consumer pair, so a wrong BMI (or a private-module collision)
-        # makes a program exit nonzero.
+        # interface, an interface partition it re-exports, two internal
+        # partitions it imports (declared through cpp_internal_partitions by
+        # object and by string), an implementation unit, a consumer that only
+        # imports, a re-exporting interface, two private-by-construction modules
+        # sharing a name, and two libraries each with a generated private
+        # interface (declared through cpp_private_module_interfaces by string
+        # and by object) sharing the private module name 'stash'. Each test()
+        # links a producer/consumer pair, so a wrong BMI (or a private-module
+        # collision) makes a program exit nonzero.
         self.build_and_check_modules('201 generated module sources',
-                                     bmis=['pkg', 'pkg:part', 'wrap'])
+                                     bmis=['pkg', 'pkg:part', 'pkg:detail', 'pkg:detail2',
+                                           'wrap', 'face1', 'face2'])
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='gcc')
     def test_gcc_cpp_module_interfaces(self):
@@ -927,11 +932,15 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
     def test_clang_generated_module_sources(self):
         # The generated-source module surface on clang: primary interface,
-        # re-exported interface partition, implementation unit, import-only
-        # consumer, a re-exporting interface, and two private-by-construction
-        # modules of the same name. See test_gcc_generated_module_sources.
+        # re-exported interface partition, two internal partitions, an
+        # implementation unit, import-only consumer, a re-exporting interface,
+        # two private-by-construction modules of the same name, and two
+        # libraries with a generated private interface (string and object
+        # forms) sharing the private module name 'stash'. See
+        # test_gcc_generated_module_sources.
         self.build_and_check_modules('201 generated module sources',
-                                     bmis=['pkg', 'pkg:part', 'wrap'],
+                                     bmis=['pkg', 'pkg:part', 'pkg:detail', 'pkg:detail2',
+                                           'wrap', 'face1', 'face2'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='clang')
@@ -1499,6 +1508,35 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         testdir = os.path.join(self.unit_test_dir, '199 module internal partition diagnostics')
         out = self.init(testdir, allow_fail=True)
         self.assertIn('in both cpp_module_interfaces and cpp_internal_partitions', out)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_generated_module_kwarg_ambiguity_error(self):
+        # A string that resolves to both a static source and a generated output
+        # of the same name is ambiguous: the resolver names both candidates and
+        # asks for the files() object or the custom_target rather than guess.
+        testdir = os.path.join(self.unit_test_dir, '203 generated module kwarg diagnostics')
+        out = self.init(testdir, extra_args=['-Dmode=ambiguity'], allow_fail=True)
+        self.assertIn('the name is ambiguous', out)
+        self.assertIn('Pass the files() object or the custom_target itself', out)
+
+    @requires_cpp_module_caps('modules', 'partitions', compiler=('gcc', 'clang'))
+    def test_generated_module_kwarg_both_kwargs_error(self):
+        # The same generated output reached two different ways -- named by
+        # string in cpp_module_interfaces and passed as its custom_target in
+        # cpp_internal_partitions -- still trips the one-or-the-other error: the
+        # cross-kwarg check compares canonical keys, not entry forms.
+        testdir = os.path.join(self.unit_test_dir, '203 generated module kwarg diagnostics')
+        out = self.init(testdir, extra_args=['-Dmode=both-kwargs'], allow_fail=True)
+        self.assertIn('in both cpp_module_interfaces and cpp_internal_partitions', out)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_generated_module_kwarg_typo_error(self):
+        # A string matching neither a static source nor any generated output
+        # still fires the typo error, its message now noting that generated
+        # outputs were searched too.
+        testdir = os.path.join(self.unit_test_dir, '203 generated module kwarg diagnostics')
+        out = self.init(testdir, extra_args=['-Dmode=typo'], allow_fail=True)
+        self.assertIn("it is not one of the target's sources or generated outputs", out)
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
     def test_cpp_private_module_reachability_warns(self):

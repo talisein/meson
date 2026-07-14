@@ -468,11 +468,23 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
     def test_msvc_generated_module_sources(self):
         # The generated-source module surface on cl: primary interface,
-        # re-exported interface partition, implementation unit, import-only
-        # consumer, a re-exporting interface, and two private-by-construction
-        # modules of the same name. See test_gcc_generated_module_sources.
+        # re-exported interface partition, two internal partitions, an
+        # implementation unit, import-only consumer, a re-exporting interface,
+        # two private-by-construction modules of the same name, and two
+        # libraries with a generated private interface (string and object forms)
+        # sharing the private module name 'stash'. See
+        # test_gcc_generated_module_sources.
         self.build_and_check_modules('201 generated module sources',
-                                     bmis=['pkg', 'pkg:part', 'wrap'])
+                                     bmis=['pkg', 'pkg:part', 'pkg:detail', 'pkg:detail2',
+                                           'wrap', 'face1', 'face2'])
+        # The two generated internal partitions -- one declared through
+        # cpp_internal_partitions by object form, one by string -- must compile
+        # with /internalPartition: cl rejects an internal partition compiled as
+        # a plain TU (C7621/C7622), and their .cpp extension gives extension
+        # detection nothing to go on, so the flag reaching a generated source's
+        # cl edge is proof the kwarg took effect for both entry forms.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertIn('/internalPartition', f.read())
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
     def test_msvc_cpp_module_interfaces(self):

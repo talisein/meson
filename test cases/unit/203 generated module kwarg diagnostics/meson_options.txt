@@ -1,0 +1,3 @@
+option('mode', type: 'combo',
+  choices: ['ambiguity', 'both-kwargs', 'typo'],
+  value: 'ambiguity')
