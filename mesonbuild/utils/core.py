@@ -175,11 +175,11 @@ class ExecutableSerialisation:
         self.dry_run = False
 
 
-def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
+def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 
     A header unit's logical-name is its resolved header path; GCC stores its
-    CMI under the flat cache root with '.' and '..' components mangled to ','
+    CMI under the cache root with '.' and '..' components mangled to ','
     and ',,' and an absolute path appended as-is: './util.h' ->
     'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
     'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
@@ -201,4 +201,4 @@ def flat_cmi_path(logical_name: str, flat_dir: str, suffix: str) -> str:
     if len(parts) > 1 and len(parts[0]) == 2 and parts[0][1] == ':' and parts[0][0].isalpha():
         parts[0] = parts[0][0] + '-'
     parts = [',' * len(p) if p in ('.', '..') else p for p in parts]
-    return f'{flat_dir}/' + '/'.join(p for p in parts if p) + suffix
+    return f'{cache_dir}/' + '/'.join(p for p in parts if p) + suffix

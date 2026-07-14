@@ -16,7 +16,7 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import MesonException, flat_cmi_path
+from ..utils.core import MesonException, default_cmi_path
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -551,7 +551,7 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='Also write a GCC module mapper per TU at '
                              '<primary-output> + this suffix, mapping its provides '
                              'and direct imports to their BMI paths.')
-    parser.add_argument('--flat-bmi-dir', default=None,
+    parser.add_argument('--default-cmi-root', default=None,
                         help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
                              'imports resolve in; mappers reproduce the compiler\'s '
                              'default header-unit CMI naming under it for any unit not '
@@ -830,7 +830,7 @@ def run_p1689(argv: T.List[str]) -> int:
                                 f'{obj} imports header unit "{req["logical-name"]}", '
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
-                    if args.flat_bmi_dir is not None:
+                    if args.default_cmi_root is not None:
                         # A unit named outright for this TU's class is looked up;
                         # one left at the default-named path is reconstructed
                         # (the reconstruction branch is load-bearing: the scan's
@@ -839,8 +839,8 @@ def run_p1689(argv: T.List[str]) -> int:
                         # that BMI joins in, so the reported name and the one the
                         # compile computes both resolve.
                         name = req['logical-name']
-                        bmi = class_units.get(name) or flat_cmi_path(
-                            name, args.flat_bmi_dir, args.bmi_suffix)
+                        bmi = class_units.get(name) or default_cmi_path(
+                            name, args.default_cmi_root, args.bmi_suffix)
                         for n in dict.fromkeys([name, *bmi_to_names.get(bmi, [])]):
                             maplines.append(f'{n} {bmi}')
                     continue
