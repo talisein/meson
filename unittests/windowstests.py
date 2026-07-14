@@ -1230,6 +1230,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 f.write('#pragma once\n')
             be = NinjaBackend.__new__(NinjaBackend)
             be._dir_aliases = {}
+            be._alias_root_real = {}
             be.environment = mock.MagicMock()
             be.environment.get_build_dir.return_value = build
 
@@ -1377,7 +1378,10 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             mapper = f.read().splitlines()
         for line in mapper:
             key, _, bmi = line.partition(' ')
-            if os.path.basename(key) == 'vector':
+            # The mapper carries a line per name of the BMI (alias-scan and
+            # real-compile spellings both resolve here); only the real,
+            # drive-letter-absolute one is the compile's own name.
+            if os.path.basename(key) == 'vector' and re.match(r'^[A-Za-z]:', key):
                 self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$',
                                  'the compile still names the real drive-letter path')
                 bmi_norm = bmi.replace('\\', '/')
@@ -1442,6 +1446,75 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertNotEqual(per_prog['prog20'], per_prog['prog23'],
                             'divergent dialect classes must not share a system unit BMI')
         self.check_gcc_module_mappers()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_header_unit_aliasing_unavailable_warns(self):
+        # Windows counterpart of LinuxlikeTests.test_gcc_header_unit_aliasing_unavailable_warns:
+        # forcing _make_dir_link to fail is platform-independent, so the same
+        # degraded, first-declarer-named-BMI behavior and warning apply here.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        testdir = os.path.join(self.unit_test_dir, '168 header unit dialect divergence')
+        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
+            out = self.init(testdir, inprocess=True)
+        self.assertEqual(out.count('divergent dialects'), 1,
+                         f'expected exactly one divergence warning, got:\n{out}')
+        self.assertIn('prog23', out)
+        self.assertIn('prog20', out)
+        self.assertIn('-std=c++23', out)
+        self.assertIn('will fail when it scans', out)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('util.h', cm.exception.output)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_aliasing_unavailable_single_class_builds(self):
+        # Windows counterpart of
+        # LinuxlikeTests.test_gcc_header_unit_aliasing_unavailable_single_class_builds:
+        # a single-class machine needs no per-class name, so a forced-negative
+        # aliasing capability costs this fixture nothing.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        testdir = os.path.join(self.unit_test_dir, '197 header unit forced include')
+        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
+            out = self.init(testdir, extra_args=['-Dmode=ok'], inprocess=True)
+        self.assertNotIn('divergent dialects', out)
+        self.assertNotIn('cannot name a header unit', out)
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('imap', f.read())
+        self.build()
+        self.run_tests()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_header_unit_alias_root_pruning(self):
+        # Windows counterpart of LinuxlikeTests.test_header_unit_alias_root_pruning:
+        # alias roots are keyed by (real dir, class tag) regardless of
+        # platform, so a reconfigure that collapses the class split must
+        # prune the same way here.
+        testdir = os.path.join(self.unit_test_dir, '173 header unit aliasing')
+        imap = os.path.join(self.builddir, 'meson-private', 'imap')
+
+        self.init(testdir, extra_args=['-Dmode=classes'])
+        self.build()
+        classes_roots = set(os.listdir(imap))
+        self.assertGreater(len(classes_roots), 1,
+                           f'expected more than one alias root, got {classes_roots}')
+
+        self.init(testdir, extra_args=['--reconfigure', '-Dmode=plain'])
+        self.build()
+        plain_roots = set(os.listdir(imap))
+        self.assertTrue(plain_roots < classes_roots,
+                        f'plain-mode roots {plain_roots} should be a subset of '
+                        f'the classes-mode roots {classes_roots} it reuses')
+        gone = classes_roots - plain_roots
+        self.assertTrue(gone, 'plain mode should have orphaned some per-class roots')
+        for name in gone:
+            self.assertFalse(os.path.exists(os.path.join(imap, name)),
+                             f'stale alias root {name} was not pruned')
+
+        self.init(testdir, extra_args=['--reconfigure', '-Dmode=classes'])
+        self.build()
+        reclassed_roots = set(os.listdir(imap))
+        self.assertEqual(reclassed_roots, classes_roots,
+                         'the same class keys must reproduce the same alias roots')
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

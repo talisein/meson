@@ -607,7 +607,16 @@ class CppModulesTestMixin:
         if self.host_cpp_compiler().get_id() != 'gcc':
             return self.header_unit_digests(basename, edges=f'{target}.p/')
         bmis: T.Set[str] = set()
-        tdir = os.path.join(self.builddir, f'{target}.p')
+        # The private dir carries the target's output suffix (prog.p on
+        # POSIX, prog.exe.p on Windows) -- glob rather than hardcode it. The
+        # dot before the wildcard keeps 'prog' from also matching 'progfoo's
+        # directory.
+        patterns = [os.path.join(self.builddir, f'{target}.p'),
+                    os.path.join(self.builddir, f'{target}.*.p')]
+        matches = [m for pat in patterns for m in glob.glob(pat)]
+        self.assertEqual(len(matches), 1,
+                         f'{" or ".join(patterns)}: expected one private dir, got {matches}')
+        tdir = matches[0]
         for entry in sorted(os.listdir(tdir)):
             if not entry.endswith('.mapper'):
                 continue
