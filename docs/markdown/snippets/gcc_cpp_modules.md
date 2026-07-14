@@ -12,6 +12,10 @@ mapper file's static path.
 Module interfaces produced at build time by a `generator()` or `custom_target`
 are supported: the scan runs after the source is generated, and the module name
 is discovered by that scan (only the output *filename* needs to be declared).
+`cpp_private_module_interfaces` takes a generated source the same way — the
+`custom_target`, one of its indices, or a string naming one of its outputs —
+since privacy is a Meson-level routing decision no compiler infers from the
+source, generated or not.
 
 A target is treated as module-enabled when it contains a module-interface source
 (`.cppm` / `.ixx`, including a generated one), when it links a target that

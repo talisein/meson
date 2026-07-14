@@ -244,14 +244,21 @@ kwargs:
       status and silence it.
 
   cpp_module_interfaces:
-    type: array[str | file]
+    type: array[str | file | custom_tgt | custom_idx | generated_list]
     since: 1.12.0
     default: []
     description: |
       Names which of this target's C++ sources are module *interface* units,
       whatever their file extension. Each entry is one of the target's own
-      sources (a string or a [[files]] object); a path that names no source is
-      an error, not a silent no-op.
+      sources -- a string or a [[files]] object naming a static source, or a
+      `custom_target`, `custom_target[i]` or `generator().process()` result
+      naming one of that target's own generated sources -- or a string naming
+      one of a generated source's output filenames; a path or name that
+      matches none of these is an error, not a silent no-op. A bare string
+      that matches more than one candidate (a static source and a generated
+      output sharing a name, or two generated outputs sharing one) is also an
+      error: pass the [[files]] object or the `custom_target` itself to say
+      which one is meant.
 
       Meson otherwise identifies a module interface by its `.cppm`/`.ixx`
       extension, never by reading the source, and that extension is also how
@@ -274,14 +281,21 @@ kwargs:
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
   cpp_internal_partitions:
-    type: array[str | file]
+    type: array[str | file | custom_tgt | custom_idx | generated_list]
     since: 1.12.0
     default: []
     description: |
       Names which of this target's C++ sources are *internal* (implementation)
       module partitions -- a `module pkg:impl;` unit with no `export`. Each
-      entry is one of the target's own sources (a string or a [[files]]
-      object); a path that names no source is an error, not a silent no-op.
+      entry is one of the target's own sources -- a string or a [[files]]
+      object naming a static source, or a `custom_target`, `custom_target[i]`
+      or `generator().process()` result naming one of that target's own
+      generated sources -- or a string naming one of a generated source's
+      output filenames; a path or name that matches none of these is an error,
+      not a silent no-op. A bare string that matches more than one candidate (a
+      static source and a generated output sharing a name, or two generated
+      outputs sharing one) is also an error: pass the [[files]] object or the
+      `custom_target` itself to say which one is meant.
 
       An internal partition is still a BMI-producing, importable module unit,
       compiled and ordered like any other module unit on every compiler.
@@ -292,7 +306,11 @@ kwargs:
       extension such as `.cpp`. GCC (which infers the unit kind from the
       source itself) and Clang (`-x c++-module`, kind-agnostic) both treat
       this keyword as a portable no-op, so a GCC- or Clang-only project may
-      leave an internal partition undeclared.
+      leave an internal partition undeclared. A generated internal partition
+      is only buildable on MSVC through this keyword: its plain
+      implementation extension gives cl nothing to infer `/internalPartition`
+      from, and until this keyword accepted generated sources there was no
+      way to declare one.
 
       Listing a source in both `cpp_internal_partitions` and
       `cpp_private_module_interfaces` is fine, and is in fact how a partition
@@ -316,7 +334,7 @@ kwargs:
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
   cpp_private_module_interfaces:
-    type: array[str | file]
+    type: array[str | file | custom_tgt | custom_idx | generated_list]
     since: 1.12.0
     default: []
     description: |
@@ -329,8 +347,18 @@ kwargs:
       link*: a module's exported entities are mangled from its bare module
       name alone, so two same-named modules -- private or not -- reaching
       the same link is still a hard error, exactly as for two public ones.
-      Each entry is one of the target's own sources (a string or a [[files]]
-      object); a path that names no source is an error, not a silent no-op.
+      Each entry is one of the target's own sources -- a string or a [[files]]
+      object naming a static source, or a `custom_target`, `custom_target[i]`
+      or `generator().process()` result naming one of that target's own
+      generated sources -- or a string naming one of a generated source's
+      output filenames; a path or name that matches none of these is an error,
+      not a silent no-op. A bare string that matches more than one candidate (a
+      static source and a generated output sharing a name, or two generated
+      outputs sharing one) is also an error: pass the [[files]] object or the
+      `custom_target` itself to say which one is meant. A generated private
+      interface has no other route to privacy: a library has no by-construction
+      way to keep a build-time-produced module out of what it publishes, so
+      this keyword is how one is declared private.
 
       This takes sources, not module names, for two reasons. A module's name
       is only known after Meson scans the source at build time, but the

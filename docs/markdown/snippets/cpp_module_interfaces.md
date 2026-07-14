@@ -23,4 +23,8 @@ portable across all three compilers. Existing `.cppm`/`.ixx` sources keep
 working with no keyword.
 
 Each entry must be one of the target's own sources (a string or a `files()`
-object); a path that names no source is an error, not a silent no-op.
+object); a path that names no source is an error, not a silent no-op. An
+entry may also name a generated source — a `custom_target`, one of its
+indices, or a `generator().process()` output — by the object itself or by a
+string naming one of its output filenames; a bare string ambiguous between
+two candidates is also an error.
