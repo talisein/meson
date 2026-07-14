@@ -772,6 +772,46 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_module_privacy_reconfigure(self):
+        # Flip a module between public and private across reconfigures on cl:
+        # secret is imported only by mylib's own implementation unit, so the flip
+        # is legal every phase; what changes is whether cl's /ifcOutput writes
+        # its BMI into the shared ifc.cache (public, where linkers of mylib can
+        # resolve it) or mylib's own @bmi-private dir (private, where nothing
+        # outside mylib can), and whether mylib publishes it. public -> private
+        # -> public: each phase builds, runs and settles to a no-op, and the
+        # round trip leaves build.ninja byte-identical. provided_modules globs
+        # mylib's private dir (libmylib.a.p on this toolchain), so the published
+        # set is read whatever the archive is named.
+        def assert_public():
+            self.assertIn('secret', self.provided_modules('mylib'))
+            self.assertEqual(self.private_bmi_dirs(), set())
+
+        testdir = os.path.join(self.unit_test_dir, '205 private module reconfigure')
+        self.init(testdir, extra_args=['-Dprivacy=public'])
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        assert_public()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            public_class = f.read()
+
+        self.setconf('-Dprivacy=private')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        self.assertNotIn('secret', self.provided_modules('mylib'))
+        self.assertEqual(len(self.private_bmi_dirs()), 1)
+
+        self.setconf('-Dprivacy=public')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        assert_public()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), public_class)
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_preprocess_module_interface(self):
         # compiler.preprocess() of a module interface: a preprocess-only target
         # neither writes a BMI nor imports one, and generate_target returns
