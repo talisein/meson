@@ -202,12 +202,13 @@ kwargs:
 
       A unit's BMI freezes the module-affecting flags it was built with, so
       targets that declare the same header unit with divergent flags each get a
-      BMI of it, one per flag equivalence class. The exception is GCC and the
-      *dialect* (`cpp_std`, `cpp_eh`, `cpp_rtti`), which it records in the unit
-      and refuses to read back under any other, while scanning -- before a
-      per-class BMI can be selected. Declaring one header unit from targets whose
-      dialects differ therefore cannot work on GCC: Meson warns and the build
-      fails at the scan.
+      BMI of it, one per flag equivalence class, on every supported compiler.
+      GCC also freezes the *dialect* (`cpp_std`, `cpp_eh`, `cpp_rtti`) and
+      enforces it while scanning, before a per-class BMI could be selected, so
+      each class's scan resolves the header through its own directory alias
+      instead. Only where the build tree cannot make that alias do
+      dialect-divergent targets fall back to sharing one BMI, with a warning at
+      configure time and a failure at the scan.
 
       Every header unit a source imports must be listed (the declaration does
       not propagate through dependencies, so a consumer that imports the same
