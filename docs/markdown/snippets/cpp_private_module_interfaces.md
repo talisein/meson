@@ -3,9 +3,9 @@
 A library can now declare that some of its C++ module interfaces are
 *private*: importable only by its own sources, never published to a target
 that links it, and exempt from the rule that a module name have only one
-providing target per module cache path -- itself already scoped to one
-machine and flag class, so a public module can share a name with one built
-for a different machine or flag class without being made private:
+providing target per machine -- a public module already shares a name freely
+with one built for the other machine of a cross build, but within a machine
+privacy is what permits the reuse:
 
 ```meson
 library('mylib', 'api.cppm', 'detail.cppm', 'impl.cpp',
