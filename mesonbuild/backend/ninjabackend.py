@@ -1977,15 +1977,13 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
-        if cpp.get_id() == 'gcc' and provider.cpp_header_units \
-                and self._header_unit_aliasing_available():
-            # The provider's include path is spelled through its *own* class
-            # root (a spaced tree) or its real directories (otherwise); either
-            # way a header unit it imports must resolve to this variant's class,
-            # so re-alias the whole include path through the variant's root.
-            # Every edge below -- unit provisioning, scan, compile -- then names
-            # the unit identically and reaches this class's BMI.
-            args = self._reclass_include_args(args, info.subdir)
+        # The include path keeps the provider's spellings: a variant compile,
+        # like any compile, never sees a class alias, so the CMIs it writes
+        # record the provider's paths. Only the variant's scan is re-aliased
+        # (inside generate_cpp_module_scan, via class_tag); the unit pairs
+        # below carry the compile-computed names, and the collate join binds
+        # them to the scan-named BMI in each variant TU's mapper -- the same
+        # composition as a target's own edges.
         # An interface's `import <hdr>;` must resolve this class's unit BMI,
         # reusing a class-mate target's edges when they exist. Built from the
         # same pre-module args as a target's own units. `args` keeps growing
@@ -2025,22 +2023,13 @@ class NinjaBackend(backends.Backend):
             vpcm = self.get_bmi_file_for(cpp, os.path.join(private_dir, rec.obj_basename))
             header_deps = list(rec.header_deps)
             order_deps: T.List[FileOrString] = list(rec.order_deps)
-            # The source is spelled through the provider's own class root (a
-            # spaced tree); a quote-form `import "h";` searches the includer's
-            # own directory first, so the source must be re-aliased to this
-            # variant's class too or it resolves the unit to the provider's
-            # name. Same re-aliasing the scan does internally, applied here so
-            # the compile edge agrees.
-            vsrc = self._reclass_path(rec.rel_src, info.subdir) \
-                if cpp.get_id() == 'gcc' and provider.cpp_header_units \
-                and self._header_unit_aliasing_available() else rec.rel_src
-            self.generate_cpp_module_scan(provider, cpp, vsrc, vpcm,
+            self.generate_cpp_module_scan(provider, cpp, rec.rel_src, vpcm,
                                           args + iface_args,
                                           header_deps=header_deps, order_deps=order_deps,
                                           header_unit_override=hu_outputs,
                                           class_tag=info.subdir)
             ddis.append(self.get_ddi_file_for(vpcm))
-            elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, vsrc)
+            elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
             # cl's BMI_VARIANT rule no longer bakes /interface: the per-unit
             # interface/internalPartition flag rides ARGS, as on the compile
             # edge. clang/gcc carry their unit flag in the rule itself.
