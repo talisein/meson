@@ -1,0 +1,3 @@
+option('privacy', type: 'combo',
+  choices: ['public', 'private'],
+  value: 'public')

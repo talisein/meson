@@ -1384,6 +1384,47 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             self.assertEqual(f.read(), single_class)
 
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_privacy_reconfigure(self):
+        # Flip a module between public and private across reconfigures, over a
+        # build tree full of the other privacy's artifacts. secret is imported
+        # only by mylib's own implementation unit, so the flip is legal in every
+        # phase; what changes is where its BMI lives and whether mylib publishes
+        # it. public -> private -> public: each phase builds, runs and settles
+        # to a no-op, and the round trip leaves the generated build
+        # byte-identical. mylib's published module set and its @bmi-private dir
+        # track the flip both ways; the stale artifacts the other privacy left
+        # behind (a withheld module's shared-cache BMI, a published module's
+        # private dir) stay inert, like the harvest cache under any graph
+        # mutation.
+        def assert_public():
+            self.assertIn('secret', self.provided_modules('mylib'))
+            self.assertEqual(self.private_bmi_dirs(), set())
+
+        testdir = os.path.join(self.unit_test_dir, '205 private module reconfigure')
+        self.init(testdir, extra_args=['-Dprivacy=public'])
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        assert_public()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            public_class = f.read()
+
+        self.setconf('-Dprivacy=private')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        self.assertNotIn('secret', self.provided_modules('mylib'))
+        self.assertEqual(len(self.private_bmi_dirs()), 1)
+
+        self.setconf('-Dprivacy=public')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        assert_public()
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), public_class)
+
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_module_eh_rtti_divergence_builds(self):
         # cpp_eh and cpp_rtti each independently survive the class key (neither
