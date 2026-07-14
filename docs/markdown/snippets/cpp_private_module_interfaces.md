@@ -29,6 +29,12 @@ primary module; list the partition's own source here too if it should be
 private as well. Meson enforces this: leaving a private primary's partition
 undeclared is a build-time error, not a silently-accepted gap.
 
+An entry may also name a generated source — a `custom_target`, one of its
+indices, or a `generator().process()` output — which gives a generated
+private interface a route to privacy it would otherwise lack entirely: a
+library has no by-construction way to keep a build-time-produced module out
+of what it publishes, so a dropped declaration would silently publish it.
+
 Keep a *public* module's interface out of its private ones, though. A
 translation unit that imports a module has an interface dependency on
 everything that module's interface unit imports, and transitively on

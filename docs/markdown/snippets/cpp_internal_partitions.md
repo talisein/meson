@@ -24,4 +24,7 @@ The keyword is accepted on every supported compiler and only changes a flag on
 MSVC; a GCC- or Clang-only project may leave the partition in its source without
 declaring it, since those compilers infer the unit kind. Each entry must be one
 of the target's own sources (a string or a `files()` object); a path that names
-no source is an error, not a silent no-op.
+no source is an error, not a silent no-op. An entry may also name a generated
+source — a `custom_target`, one of its indices, or a `generator().process()`
+output — which is how a *generated* internal partition is declared at all: its
+non-interface extension gives MSVC nothing to infer `/internalPartition` from.
