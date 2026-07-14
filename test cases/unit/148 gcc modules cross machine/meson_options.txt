@@ -1,0 +1,2 @@
+option('std', type: 'boolean', value: false,
+       description: 'Also build `import std` targets on both machines.')

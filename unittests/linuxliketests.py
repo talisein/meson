@@ -999,13 +999,12 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_clang_cpp_module_graph_mutation(self):
         self.check_module_graph_mutation('164 cpp module graph mutation')
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
-    def test_gcc_modules_cross_machine(self):
-        testdir = os.path.join(self.unit_test_dir, '148 gcc modules cross machine')
-        # Use the system gcc/g++ as the cross "host" compiler so is_cross_build()
-        # is true with a real working toolchain. A C++-module target on both
-        # machines would share one gcm.cache with incompatible BMIs, so configure
-        # must error.
+    def _identity_cross_gcc(self):
+        # The system gcc/g++ as the cross "host" compiler: is_cross_build() is
+        # true with a real, working toolchain whose host binaries are runnable
+        # on the build machine (same arch), so cross-built programs can be run
+        # by test(). The caller keeps the returned handle alive for the file's
+        # lifetime and points self.meson_cross_files at it.
         crossfile = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8')
         crossfile.write(textwrap.dedent(f'''\
             [binaries]
@@ -1021,10 +1020,62 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             endian = 'little'
             '''))
         crossfile.flush()
+        return crossfile
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_modules_cross_machine(self):
+        # Two machines, one build: a module library and its consumer, plus a
+        # header unit, on each of the build and host machines -- with the SAME
+        # module name 'foo' on both, the case a single shared cache used to
+        # forbid. The per-machine class subdir keeps the two compilers' BMIs
+        # apart, so the build works and the host programs run under test()
+        # (identity cross).
+        cpp = self.host_cpp_compiler()
+        suffix = cpp.get_module_bmi_suffix()
+        crossfile = self._identity_cross_gcc()
         self.meson_cross_files = [crossfile.name]
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.init(testdir)
-        self.assertIn('more than one machine', cm.exception.output)
+        # No claim error despite the shared module name: build_and_check_modules
+        # builds, runs every test, and checks the rebuild is a no-op.
+        self.build_and_check_modules('148 gcc modules cross machine')
+        # The module lands in two distinct class subdirs (one per machine), each
+        # with its own owner claim, and never flat at the cache root.
+        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
+        class_dirs = self.bmi_class_dirs()
+        module_dirs = [d for d in class_dirs
+                       if os.path.isfile(os.path.join(cache, d, 'foo' + suffix))]
+        self.assertEqual(len(module_dirs), 2,
+                         f'module foo must land in two per-machine class dirs, got {module_dirs}')
+        for d in module_dirs:
+            self.assertTrue(os.path.isfile(os.path.join(cache, d, 'foo' + suffix + '.owner')),
+                            f'missing per-machine owner claim in {d}')
+        self.assertFalse(os.path.exists(os.path.join(cache, 'foo' + suffix)),
+                         'the same module name on two machines must not share a flat BMI')
+        # The header unit earns a per-machine BMI too: two distinct unit BMIs,
+        # named apart through the two machines' alias roots.
+        unit_bmis = self.header_unit_bmis('head.hpp')
+        self.assertEqual(len(unit_bmis), 2,
+                         f'expected two per-machine header-unit BMIs, got {sorted(unit_bmis)}')
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='gcc')
+    def test_gcc_modules_cross_machine_import_std(self):
+        # `import std` on both machines of a cross build: each machine
+        # synthesizes its own std library, at distinct target names, and both
+        # build and run. c++23 on both machines (std needs it); the build
+        # machine's std level is a per-machine option.
+        crossfile = self._identity_cross_gcc()
+        self.meson_cross_files = [crossfile.name]
+        self.build_and_check_modules(
+            '148 gcc modules cross machine',
+            extra_args=['-Dstd=true', '-Dcpp_std=c++23', '-Dbuild.cpp_std=c++23'],
+            # Header units legitimately map BMIs on consumer command lines.
+            ninja_args_not_contains=())
+        # Two std static libraries, one per machine, with distinct target names.
+        std_targets = sorted(t['name'] for t in self.introspect('--targets')
+                             if t['name'].startswith('__meson_cxx_std'))
+        self.assertEqual(std_targets, ['__meson_cxx_std', '__meson_cxx_std_build'])
+        for lib in ('lib__meson_cxx_std.a', 'lib__meson_cxx_std_build.a'):
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, lib)),
+                            f'{lib} was not built')
 
     @skip_if_not_language('fortran')
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))

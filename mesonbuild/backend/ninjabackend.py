@@ -1767,20 +1767,11 @@ class NinjaBackend(backends.Backend):
         maps of its module-providing dependencies, and produces the dyndep that
         orders the module compiles together with this target's own provided-module
         map. A single module cache at the build root is shared by every compile,
-        so C++ modules cannot span machines in a cross build, and the cache dir is
-        created up front for cl/clang. Per-compiler collator flags come from
-        _module_collate_depargs.
+        with per-machine class subdirs keeping a cross build's build-machine and
+        host-machine BMIs apart, and the cache dir is created up front for
+        cl/clang. Per-compiler collator flags come from _module_collate_depargs.
         """
         cpp = target.compilers['cpp']
-        if self.environment.is_cross_build():
-            machines = {t.for_machine for t in self.build.get_targets().values()
-                        if self.target_uses_p1689_cpp_modules(t)}
-            if len(machines) > 1:
-                raise MesonException(
-                    'C++ modules are not supported for targets on more than one '
-                    'machine in a cross build: a single module cache at the build '
-                    'root is shared, and BMIs are not interchangeable between the '
-                    'build-machine and host-machine compilers.')
         private = self._module_private_bmi_dir_for(target)
         if private is not None:
             # Unconditional across compilers, mirroring _get_or_create_bmi_variant's
@@ -3001,14 +2992,18 @@ class NinjaBackend(backends.Backend):
     def _compute_bmi_class_registry(self) -> None:
         """Freeze the per-machine set of BMI equivalence classes before any
         target is generated (compile args must not depend on generation order).
-        A machine with one class keeps the flat cache dir; with more, every
-        class gets its own subdirectory named by a digest of the class key.
-        Only compilers with supports_bmi_classes() participate -- the same
-        registry keys their header units per class; the rest keep the
-        divergence warning. The key is computed from _generate_single_compile,
-        which excludes
-        get_module_compile_args, so the chosen dir cannot feed back into the
-        key.
+        The whole build keeps the flat cache dir only when it has exactly one
+        (machine, class) entry; otherwise every class gets its own subdirectory
+        named by a digest of the machine identity and the class key. Folding the
+        machine in keeps a cross build's two compilers apart: identical
+        BMI-relevant flags on the build and host machines (the common case) no
+        longer collide in one subdir, and a two-machine build never flattens
+        into a shared cache even at one class per machine, where the BMIs are
+        still not interchangeable. Only compilers with supports_bmi_classes()
+        participate -- the same registry keys their header units per class; the
+        rest keep the divergence warning. The key is computed from
+        _generate_single_compile, which excludes get_module_compile_args, so the
+        chosen dir cannot feed back into the key.
         """
         per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
         for t in self.build.get_targets().values():
@@ -3019,10 +3014,12 @@ class NinjaBackend(backends.Backend):
                 continue
             relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
+        multi = sum(len(classes) for classes in per_machine.values()) > 1
         for machine, classes in per_machine.items():
-            multi = len(classes) > 1
             for key, relevant in classes.items():
-                subdir = hashlib.sha256('\x00'.join(key).encode()).hexdigest()[:12] if multi else None
+                subdir = hashlib.sha256(
+                    (machine.get_lower_case_name() + '\x00' + '\x00'.join(key)).encode()
+                ).hexdigest()[:12] if multi else None
                 self._bmi_classes[(machine, key)] = BmiClassInfo(subdir, relevant)
 
     def _bmi_class_subdir_for(self, target: build.BuildTarget) -> T.Optional[str]:
