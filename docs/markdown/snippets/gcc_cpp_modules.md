@@ -51,7 +51,9 @@ threads dependency's flags and every consumer inherits them, so the
 POSIX-thread setting compiled into the module matches all of its importers
 by construction (Clang enforces this; see below). A build that must avoid
 the thread flags can use `dependency('std-nothreads')` instead; there is a
-single shared std module per build, so the two spellings cannot be mixed.
+single shared std module per machine, so the two spellings cannot be mixed on
+one machine (a cross build synthesizes its own std library per machine, each
+under its own target name).
 
 `import std;` works in any modules-capable dialect (`cpp_std=c++20` or later with
 GCC); it is not restricted to `c++23`. As always, `cpp_std` still governs which
@@ -88,3 +90,10 @@ exactly once. A single-class build keeps every BMI in the flat `gcm.cache`.
 Header units are built per flag class too, renamed through per-class
 directory aliases on the dependency scan; see the header-unit notes for the
 mechanism and its degraded path.
+
+Module targets may exist on both machines of a cross build: a static library
+built `native: true` and one built for the host can each provide modules, and
+each machine keeps its own BMIs, since the build-machine and host-machine
+compilers are never interchangeable. A module name may be provided
+independently on each machine — a build-machine target and a host-machine
+target may even share one — because targets never link across machines.

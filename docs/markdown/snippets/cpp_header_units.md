@@ -105,6 +105,9 @@ Current limitations:
     it the BMI the scan reads — embeds the class, while compiles keep the real
     paths. Only where the build tree cannot hold the directory links this
     needs (the FAT/exFAT and privilege limits above) do units fall back to one
-    shared BMI; Meson then warns at configure time, and a dialect-divergent build
-    fails at the scan. Give those targets the same dialect there, or stop
+    shared BMI; Meson then warns at configure time, both for a dialect
+    divergence and for two declaring targets on different machines of a cross
+    build -- the build-machine and host-machine compilers write incompatible
+    BMIs to that one shared path -- and a divergent build fails at the scan.
+    Give those targets the same dialect (and the same machine), or stop
     sharing the unit between them.
