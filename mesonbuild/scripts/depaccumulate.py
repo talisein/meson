@@ -448,7 +448,7 @@ def run_p1689(argv: T.List[str]) -> int:
     names the shared class-cache directory, whether a name is this target's
     own public provide or reached through a linked dependency.
 
-    A provide whose object is named by --private-interface (or, for a
+    A provide whose object is named by --private-interface-object (or, for a
     module-providing executable where every module is private by
     construction, --all-provides-private) is instead named at
     --private-bmi-dir: it is resolvable within this target's own compiles but
@@ -486,23 +486,23 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--dep-provmap', action='append', default=[],
                         help='Provided-module map of a dependency target. Repeatable.')
     parser.add_argument('--private-bmi-dir', default=None,
-                        help='Directory a provide named by --private-interface (or, '
+                        help='Directory a provide named by --private-interface-object (or, '
                              'under --all-provides-private, any provide) is named in '
                              'instead of --bmi-dir.')
-    parser.add_argument('--private-interface', action='append', default=[],
+    parser.add_argument('--private-interface-object', action='append', default=[],
                         dest='private_interface_objs',
-                        help='The *object* path (a P1689 rule\'s primary-output, not its '
-                             'source-path) of a private interface compile '
-                             '(cpp_private_module_interfaces): its provide is named at '
-                             '--private-bmi-dir, resolvable only within this target, never '
-                             'published to --provmap. Matched by object rather than source: '
-                             "only Clang's P1689 output carries a source-path for a provide at "
-                             'all, so it is not a compiler-agnostic key here (unlike '
-                             '--interface-source, which is a Clang-only concern). Repeatable.')
+                        help='The object path (a P1689 rule\'s primary-output) of a private '
+                             'interface compile (cpp_private_module_interfaces): its provide '
+                             'is named at --private-bmi-dir, resolvable only within this '
+                             "target, never published to --provmap. Matched by object rather "
+                             "than source: only Clang's P1689 output carries a source-path "
+                             'for a provide at all, so it is not a compiler-agnostic key here '
+                             '(unlike --interface-source, which is a genuinely Clang-only '
+                             'concern). Repeatable.')
     parser.add_argument('--all-provides-private', action='store_true',
                         help='Every provide in this target is private (a module-providing '
                              "executable: nothing can ever link it, so all of its modules "
-                             'are private by construction). Overrides --private-interface.')
+                             'are private by construction). Overrides --private-interface-object.')
     parser.add_argument('--private-map', default=None, nargs=2,
                         metavar=('PATH', 'DISPLAY'),
                         help="Output a JSON list of this target's own private module names "
