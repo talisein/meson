@@ -701,12 +701,14 @@ class InternalTests(unittest.TestCase):
         self.assertIn('-Iinc', cmd)
 
     def test_header_unit_dedup_shared_by_spelling(self):
-        # On a single-class machine (an empty BMI class registry) a header
-        # unit is deduped globally by (mode, spelling) for both compilers: the
-        # same spelling declared by another target reuses the one BMI, even if
-        # that target's compile args differ, so the first edge builds the unit
-        # for every consumer. Per-class dedup on a multi-class machine is
-        # covered by the bmi_classes fixture tests.
+        # On a single-class machine (an empty BMI class registry) a header unit
+        # is deduped globally by (mode, resolved identity) for both compilers:
+        # another target that spells and resolves the same file reuses the one
+        # BMI, even if its compile args differ, so the first edge builds the
+        # unit for every consumer. A same-spelling unit resolving to a different
+        # file is a different identity and earns its own BMI (see
+        # test_header_unit_distinct_files_same_spelling). Per-class dedup on a
+        # multi-class machine is covered by the bmi_classes fixture tests.
         from mesonbuild.backend.ninjabackend import NinjaBackend
 
         def outputs_for(cid, suffix, builddir):
@@ -725,6 +727,7 @@ class InternalTests(unittest.TestCase):
             be._warned_header_unit_names = set()
             be._probed_header_units = {}
             be._dir_aliases = {}
+            be._target_imported_header_units = {}
             # A real build tree holding the header on the -I path: GCC names a
             # unit by the path it resolves to, so a unit that resolves nowhere is
             # not built at all and has no output to dedup. The walk finds it here
@@ -739,6 +742,10 @@ class InternalTests(unittest.TestCase):
             cpp.get_module_bmi_suffix.return_value = suffix
             cpp.get_module_cache_dir.return_value = 'gcm.cache'
             cpp.get_header_unit_consumer_args.return_value = []
+            # No provider imports units here: the target declares its own, so
+            # the relevant/irrelevant split is only consulted for an empty
+            # provider loop.
+            cpp.split_bmi_args.return_value = ([], [])
 
             def provision(tid, args):
                 target = mock.MagicMock()
@@ -764,6 +771,67 @@ class InternalTests(unittest.TestCase):
             self.assertEqual(a, b)
             self.assertEqual(a, c)
             self.assertTrue(a.endswith(suffix))
+
+    def test_header_unit_distinct_files_same_spelling(self):
+        # Two targets in one class declare a header unit spelled alike but their
+        # -I paths resolve it to different files. The dedup key carries the
+        # resolved identity, so each earns its own BMI: a key of (mode, spelling)
+        # alone would hand the second target the first's BMI, built from the
+        # wrong header, silently. Identity is resolvable only for a user unit on
+        # the -I path; a system unit falls back to its spelling, the sole dedup
+        # axis there.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+
+        def outputs_for(cid, suffix, builddir):
+            be = NinjaBackend.__new__(NinjaBackend)
+            be.build_to_src = '..'
+            be.all_outputs = set()
+            be._bmi_classes = {}
+            be._header_units = {}
+            be._header_unit_class = {}
+            be._header_unit_group = {}
+            be._target_header_unit_outputs = {}
+            be._target_header_unit_consumer_args = {}
+            be._target_header_unit_bmis = {}
+            be._target_generated_outputs = {}
+            be._warned_header_unit_divergence = set()
+            be._warned_header_unit_names = set()
+            be._probed_header_units = {}
+            be._dir_aliases = {}
+            be._target_imported_header_units = {}
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = builddir
+            be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
+            be.add_build = mock.MagicMock()
+            cpp = mock.MagicMock()
+            cpp.get_id.return_value = cid
+            cpp.get_exelist.return_value = ['c++']
+            cpp.get_module_bmi_suffix.return_value = suffix
+            cpp.get_module_cache_dir.return_value = 'gcm.cache'
+            cpp.get_header_unit_consumer_args.return_value = []
+            cpp.split_bmi_args.return_value = ([], [])
+
+            def provision(tid, incdir):
+                target = mock.MagicMock()
+                target.get_id.return_value = tid
+                target.cpp_header_units = ['util.h']
+                target.compilers = {'cpp': cpp}
+                target.get_generated_sources.return_value = []
+                be._generate_single_compile = mock.MagicMock(return_value=[f'-I{incdir}'])
+                return be.provision_header_units(target, cpp)[0]
+
+            return provision('a', 'inc_a'), provision('b', 'inc_b')
+
+        for cid, suffix in (('msvc', '.ifc'), ('gcc', '.gcm')):
+            with tempfile.TemporaryDirectory() as builddir:
+                for inc in ('inc_a', 'inc_b'):
+                    os.makedirs(os.path.join(builddir, inc))
+                    with open(os.path.join(builddir, inc, 'util.h'), 'w', encoding='utf-8') as f:
+                        f.write(f'#pragma once\n// {inc}\n')
+                a, b = outputs_for(cid, suffix, builddir)
+            self.assertNotEqual(a, b, f'{cid}: two files sharing a spelling shared one BMI')
+            self.assertTrue(a.endswith(suffix))
+            self.assertTrue(b.endswith(suffix))
 
     def test_cpp_header_units_rejected_on_unsupported_compiler(self):
         # Declaring cpp_header_units on a compiler without header-unit support

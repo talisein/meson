@@ -675,9 +675,14 @@ class NinjaBackend(backends.Backend):
         # placed fires once per (machine, compiler) rather than per declarer.
         self._warned_system_chain_alias: T.Set[T.Tuple[T.Any, ...]] = set()
         # Header units: global dedup of unit build edges, keyed by
-        # (mode, spelling) -- plus compile args on MSVC, plus the declarer's BMI
-        # class where the compiler builds units per class -> the edge output (the
-        # real BMI on every compiler). Plus per-target caches of those outputs
+        # (mode, resolved header identity) -- plus the declarer's BMI class where
+        # the compiler builds units per class -> the edge output (the real BMI on
+        # every compiler). The identity is the header's real path, so two targets
+        # spelling one unit alike but resolving it to different files earn
+        # distinct BMIs; a unit with no identity to resolve -- a system header, or
+        # a user one off the -I path -- falls back to its spelling, where that
+        # spelling is the only axis a same-name collision could split on anyway.
+        # Plus per-target caches of those outputs
         # (ordered before the target's scans/compiles), of the flags MSVC and
         # clang compiles need to name each unit's BMI, and of the (resolved name,
         # BMI) pairs a GCC target's mapper lines are written from.
@@ -4931,12 +4936,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         GCC resolves it through the module mapper instead, so no unit BMI path
         ever reaches a GCC command line.
 
-        Edges are deduped by (mode, spelling) plus, for compilers with
-        supports_bmi_classes(), the declarer's BMI class: each class builds its
-        own BMI (a unit is interface-only, so per-class copies are purely
-        additive) and each consumer resolves its own class's. On a single-class
-        machine the key carries no class part, keeping paths and edges
-        byte-identical to a pre-class build.
+        Edges are deduped by (mode, resolved header identity) plus, for compilers
+        with supports_bmi_classes(), the declarer's BMI class: each class builds
+        its own BMI (a unit is interface-only, so per-class copies are purely
+        additive) and each consumer resolves its own class's. Two targets that
+        spell one unit alike but resolve it to different files keep distinct
+        BMIs. On a single-class machine the key carries no class part, keeping
+        paths and edges byte-identical to a pre-class build.
         """
         cid = compiler.get_id()
         if cid not in ('gcc', 'msvc', 'clang'):
@@ -5133,9 +5139,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # One BMI per file and, when classes are in play, per class; the
             # canonical spelling of the group builds it and the others are extra
             # names for it (see the provision_header_units docstring). Within a
-            # key the first edge's args build the unit for every consumer.
-            canon = self._canonical_header_unit(args, mode, spelling)
-            base = f'{mode}:{canon}'
+            # key the first edge's args build the unit for every consumer, so the
+            # key must carry the file, not just its spelling: two units spelled
+            # alike but resolving to different files are different units. The
+            # identity is the resolved real path, or the spelling itself for a
+            # unit with none -- a system unit, or a user one off the -I path.
+            ident = self._header_unit_identity(args, mode, spelling)
+            canon = self._canonical_header_unit(args, mode, spelling, ident)
+            base = f'{mode}:{ident if ident is not None else canon}'
             if is_gcc and mode == 'user' and class_subdir is not None \
                     and self._header_unit_aliasing_available():
                 # The supported per-class path: every class aliases symmetrically,
@@ -5157,15 +5168,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     output = default_cmi_path(scan_name, cache_dir, suffix)
                     mapper = self._class_header_unit_path(key, canon, '.mapper')
                     self._write_header_unit_mapper(mapper, compile_name, output)
-                    elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
-                    elem.add_item('ARGS', args)
-                    elem.add_item('SPELLING', canon)
-                    elem.add_item('HULANG', f'c++-{mode}-header')
-                    elem.add_item('DEPFILE', output + '.d')
-                    elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'])
-                    elem.add_dep(mapper)
-                    elem.add_orderdep(self._header_unit_generated_deps(owner, canon))
-                    self.add_build(elem)
+                    self._add_header_unit_edge(output, rulename, args, canon, mode,
+                                               mapper, owner, is_msvc, is_gcc)
                     self._header_units[key] = output
                 outputs.append(output)
                 # The pair carries the compile-computed name; the collate joins
@@ -5212,15 +5216,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                         output = default_cmi_path(scan_name, cache_dir, suffix)
                         mapper = self._class_header_unit_path(key, canon, '.mapper')
                         self._write_header_unit_mapper(mapper, compile_name, output)
-                        elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
-                        elem.add_item('ARGS', args)
-                        elem.add_item('SPELLING', canon)
-                        elem.add_item('HULANG', f'c++-{mode}-header')
-                        elem.add_item('DEPFILE', output + '.d')
-                        elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'])
-                        elem.add_dep(mapper)
-                        elem.add_orderdep(self._header_unit_generated_deps(owner, canon))
-                        self.add_build(elem)
+                        self._add_header_unit_edge(output, rulename, args, canon, mode,
+                                                   mapper, owner, is_msvc, is_gcc)
                         self._header_units[key] = output
                     outputs.append(output)
                     # The pair carries the compile-computed (real chain) name;
@@ -5288,26 +5285,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # directory the compiler owns and a user may clear.
                     mapper = self._class_header_unit_path(key, canon, '.mapper')
                     self._write_header_unit_mapper(mapper, name, output)
-                elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
-                elem.add_item('ARGS', args)
-                elem.add_item('SPELLING', canon)
-                if is_msvc:
-                    elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
-                else:
-                    elem.add_item('HULANG', f'c++-{mode}-header')
-                    elem.add_item('DEPFILE', output + '.d')
-                if is_gcc:
-                    # A setup-written file is a fine ninja input: what ninja
-                    # rejects is an input that no rule makes and no file provides.
-                    elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
-                    if mapper is not None:
-                        elem.add_dep(mapper)
-                # The command reads the header off disk; a generated one must be
-                # written first. Order-only, like the consumers' own dep on it:
-                # the header's content reaches the compile through the BMI's
-                # rebuild, not through this edge re-firing on every touch.
-                elem.add_orderdep(self._header_unit_generated_deps(owner, canon))
-                self.add_build(elem)
+                self._add_header_unit_edge(output, rulename, args, canon, mode,
+                                           mapper, owner, is_msvc, is_gcc)
                 self._header_units[key] = output
             outputs.append(output)
             if is_gcc:
@@ -5336,17 +5315,51 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 consumer_args += cargs
         return outputs, consumer_args, bmis
 
+    def _add_header_unit_edge(self, output: str, rulename: str,
+                              args: T.Union['CompilerArgs', T.List[str]],
+                              spelling: str, mode: str, mapper: T.Optional[str],
+                              owner: T.Optional[build.BuildTarget],
+                              is_msvc: bool, is_gcc: bool) -> None:
+        """One HEADER_UNIT edge, in the one shape every naming mode shares. The
+        caller has already chosen the output path and, where the compiler
+        resolves a unit through one, written the mapper this only wires in.
+        """
+        elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
+        elem.add_item('ARGS', args)
+        elem.add_item('SPELLING', spelling)
+        if is_msvc:
+            elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
+        else:
+            elem.add_item('HULANG', f'c++-{mode}-header')
+            elem.add_item('DEPFILE', output + '.d')
+        if is_gcc:
+            # A setup-written file is a fine ninja input: what ninja rejects is
+            # an input that no rule makes and no file provides.
+            elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
+            if mapper is not None:
+                elem.add_dep(mapper)
+        # The command reads the header off disk; a generated one must be written
+        # first. Order-only, like the consumers' own dep on it: the header's
+        # content reaches the compile through the BMI's rebuild, not through
+        # this edge re-firing on every touch.
+        elem.add_orderdep(self._header_unit_generated_deps(owner, spelling))
+        self.add_build(elem)
+
     def _canonical_header_unit(self, args: T.Union['CompilerArgs', T.List[str]],
-                               mode: str, spelling: str) -> str:
+                               mode: str, spelling: str,
+                               ident: T.Optional[str] = None) -> str:
         """The spelling that builds the BMI for whatever file `spelling` names.
 
         Declared spellings of one file share one BMI; the rest become extra names
         for it. The group is build-wide, not per-target: a unit's default-named
         CMI path is a pure function of its resolved name, so each name has to have
         exactly one producer across the build, and two targets that disagreed on
-        which spelling was canonical would emit two.
+        which spelling was canonical would emit two. `ident` is
+        _header_unit_identity when the caller already has it, resolved here
+        otherwise; the header is realpath'd once either way.
         """
-        ident = self._header_unit_identity(args, mode, spelling)
+        if ident is None:
+            ident = self._header_unit_identity(args, mode, spelling)
         if ident is None:
             return spelling
         return self._header_unit_group.setdefault((mode, ident), spelling)
