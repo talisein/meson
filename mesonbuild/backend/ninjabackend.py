@@ -1392,10 +1392,11 @@ class NinjaBackend(backends.Backend):
         the legacy escape hatch of a bare -fmodules/-fmodules-ts in the
         target's cpp_args.
         'none': the target wants no C++ modules, or wants them and no scanner
-        can serve it (Clang without clang-scan-deps, or MSVC below the modules
-        floor / from a too-old developer prompt -- the cases check_cpp_modules_scanner
-        reports; cpp_module_pipeline_applies has already screened out the
-        targets the pipeline never applies to).
+        can serve it (Clang without clang-scan-deps, MSVC below the modules
+        floor / from a too-old developer prompt, or a compiler the pipeline
+        does not drive -- the cases check_cpp_modules_scanner reports;
+        cpp_module_pipeline_applies has already screened out the targets the
+        pipeline never applies to).
 
         A target opts in by declaration (a module-interface source, the
         cpp_modules/cpp_header_units kwargs, or linking a module provider --
@@ -1597,6 +1598,14 @@ class NinjaBackend(backends.Backend):
                 f'Target {target.name!r} uses C++ modules with MSVC, but no module '
                 f'scanner is available: cl module support needs at least cl 19.28.28617 '
                 f'(VS 2019 16.8), {reason}; got cl {cpp.version}.')
+        # What remains is a compiler the pipeline does not drive at all
+        # (clang-cl, say) -- gcc cannot arrive, a declaring gcc-family target
+        # always answers p1689 or regex. Its declared modules would be
+        # compiled as plain C++ with no scanning and no BMI outputs.
+        raise MesonException(
+            f'Target {target.name!r} uses C++ modules, but its C++ compiler '
+            f'({cpp.get_id()} {cpp.version}) is not driven by the C++ module '
+            'pipeline; Meson builds C++ modules with GCC, Clang and MSVC cl.')
 
     def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes | build.Target) -> bool:
         """Whether this target should use the P1689 module pipeline (GCC/MSVC)."""

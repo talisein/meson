@@ -292,18 +292,23 @@ class InternalTests(unittest.TestCase):
             self.assertEqual(be.cpp_module_scanner_for_target(target), 'regex')
             be.check_cpp_modules_scanner(target)  # must not raise
 
-    def test_scanner_clang_cl_behavior_unchanged(self):
-        # clang-cl (family 'none') is not diagnosed: it reaches the regex escape
-        # hatch only when the user passes a bare modules flag, and a declaring
-        # target without one stays silently at 'none' exactly as before.
+    def test_scanner_unsupported_family_declared_modules_raises(self):
+        # A declaring target on a compiler outside the pipeline (clang-cl,
+        # family 'none') errors at setup: its modules would be compiled as
+        # plain C++ with no scanning. The bare-modules-flag escape hatch still
+        # answers 'regex', and a non-declaring target is never asked.
         be, target = self._module_scanner_mock(
             'none', cpp_modules_args=['-fmodules', '-fmodules-ts'])
         self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
-        be.check_cpp_modules_scanner(target)  # must not raise
+        with self.assertRaises(MesonException):
+            be.check_cpp_modules_scanner(target)
         be, target = self._module_scanner_mock(
             'none', cpp_modules_args=['-fmodules', '-fmodules-ts'],
             extra_args=['-fmodules'])
         self.assertEqual(be.cpp_module_scanner_for_target(target), 'regex')
+        be.check_cpp_modules_scanner(target)  # must not raise
+        be, target = self._module_scanner_mock('none', uses_modules=False)
+        be.check_cpp_modules_scanner(target)  # must not raise
 
     def test_msvc_module_compile_args_use_cache_dir(self):
         # /ifcSearchDir and /ifcOutput must point at the compiler's own module
