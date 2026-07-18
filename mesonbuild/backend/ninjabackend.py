@@ -1119,7 +1119,7 @@ class NinjaBackend(backends.Backend):
         assert isinstance(target, build.BuildTarget)
         self.check_cpp_modules_fortran_mix(target)
         self.check_cpp_modules_std(target)
-        self.check_clang_cpp_modules_scanner(target)
+        self.check_cpp_modules_scanner(target)
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
         compiled_sources: T.List[str] = []
         source2object: T.Dict[str, str] = {}
@@ -1392,9 +1392,10 @@ class NinjaBackend(backends.Backend):
         the legacy escape hatch of a bare -fmodules/-fmodules-ts in the
         target's cpp_args.
         'none': the target wants no C++ modules, or wants them and no scanner
-        can serve it (Clang without clang-scan-deps -- the one case a caller
-        may want to report; cpp_module_pipeline_applies has already screened
-        out the targets the pipeline never applies to).
+        can serve it (Clang without clang-scan-deps, or MSVC below the modules
+        floor / from a too-old developer prompt -- the cases check_cpp_modules_scanner
+        reports; cpp_module_pipeline_applies has already screened out the
+        targets the pipeline never applies to).
 
         A target opts in by declaration (a module-interface source, the
         cpp_modules/cpp_header_units kwargs, or linking a module provider --
@@ -1411,18 +1412,18 @@ class NinjaBackend(backends.Backend):
         assert isinstance(target, build.BuildTarget)
         cpp = target.compilers['cpp']
         if target.uses_cpp_modules():
-            if cpp.get_id() == 'gcc':
+            family = cpp.cpp_module_family()
+            if family == 'gcc':
                 return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
-            if cpp.get_id() == 'msvc' and mesonlib.current_vs_supports_modules() \
+            if family == 'msvc' and mesonlib.current_vs_supports_modules() \
                     and mesonlib.version_compare(cpp.version, '>=19.28.28617'):
                 return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
             # Clang has no regex fallback: its P1689 support lives in the
             # separate clang-scan-deps tool, feature-probed by
             # supports_cpp_modules_p1689. Without it, fall through -- the
             # legacy -fmodules/-fmodules-ts escape hatch below still applies,
-            # and check_clang_cpp_modules_scanner reports the gap at
-            # generation time.
-            if cpp.get_id() == 'clang' and cpp.supports_cpp_modules_p1689():
+            # and check_cpp_modules_scanner reports the gap at generation time.
+            if family == 'clang' and cpp.supports_cpp_modules_p1689():
                 return 'p1689'
         for arg in cpp.get_cpp_modules_args():
             if arg in target.extra_args['cpp']:
@@ -1560,29 +1561,42 @@ class NinjaBackend(backends.Backend):
                 f'Target {target.name!r} uses C++ modules, which require cpp_std '
                 f'c++20 or later; got cpp_std={std}.')
 
-    def check_clang_cpp_modules_scanner(self, target: build.BuildTarget) -> None:
-        # Clang's module pipeline needs a working clang-scan-deps (feature-
-        # probed, no version assumption). Without it a module-using target
-        # would silently get no scanning and fail at build time with confusing
-        # compiler errors, so report the missing tool at setup instead. The
-        # legacy -fmodules/-fmodules-ts regex escape hatch is exempt: it does
-        # not need the scanner, and answers 'regex' rather than 'none'.
+    def check_cpp_modules_scanner(self, target: build.BuildTarget) -> None:
+        # A target that declares C++ modules but resolves to no scanner would
+        # silently be compiled without module flags and fail at build time with
+        # raw compiler errors (missing BMIs). Report the gap at setup, naming
+        # the per-compiler cause. Both the documented regex fallback (older but
+        # modules-capable GCC/cl) and the legacy -fmodules escape hatch answer
+        # 'regex', never 'none', so this never fires where modules build.
         #
-        # The three conditions below are the only three there are: the pipeline
-        # applies, the target wants modules, and no scanner answered. Blaming
-        # clang-scan-deps for a target the pipeline never applied to would send
-        # the reader hunting a tool that is installed and fine, which is why
-        # that question is asked first and asked by name.
+        # The three conditions are the only three there are: the pipeline
+        # applies, the target wants modules, and no scanner answered. Asking
+        # pipeline-applies first keeps a target the pipeline never covered from
+        # being blamed on a missing tool that is installed and fine.
         if not self.cpp_module_pipeline_applies(target):
             return
         cpp = target.compilers['cpp']
-        if cpp.get_id() != 'clang' or not target.uses_cpp_modules():
+        if not target.uses_cpp_modules() \
+                or self.cpp_module_scanner_for_target(target) != 'none':
             return
-        if self.cpp_module_scanner_for_target(target) == 'none':
+        family = cpp.cpp_module_family()
+        if family == 'clang':
+            # Feature-probed, no version assumption: the tool is separate.
             raise MesonException(
                 f'Target {target.name!r} uses C++ modules with Clang, which '
                 'requires a clang-scan-deps with P1689 support (-format=p1689) '
                 'matching the compiler; none was found.')
+        if family == 'msvc':
+            # The two dead ends have different remedies, so name both: too old a
+            # cl (upgrade), or too old a developer prompt (open a newer one).
+            reason = 'run from a Visual Studio 16.10 or newer developer command prompt' \
+                if mesonlib.current_vs_supports_modules() \
+                else 'invoked from a Visual Studio 16.10 or newer developer command prompt ' \
+                     '(the current prompt is older)'
+            raise MesonException(
+                f'Target {target.name!r} uses C++ modules with MSVC, but no module '
+                f'scanner is available: cl module support needs at least cl 19.28.28617 '
+                f'(VS 2019 16.8), {reason}; got cl {cpp.version}.')
 
     def target_uses_p1689_cpp_modules(self, target: build.BuildTargetTypes | build.Target) -> bool:
         """Whether this target should use the P1689 module pipeline (GCC/MSVC)."""
@@ -1658,12 +1672,13 @@ class NinjaBackend(backends.Backend):
                                  class_tag: T.Optional[str] = None) -> None:
         if not self.source_uses_p1689_cpp_modules(target, compiler, rel_src):
             return
-        if compiler.get_id() == 'clang':
+        family = compiler.cpp_module_family()
+        if family == 'clang':
             # Registered lazily (idempotent): creating clang's scan rule needs
             # the clang-scan-deps feature probe, which projects without module
             # targets must not pay for.
             self.generate_cpp_module_scan_rule(compiler)
-        if compiler.get_id() == 'gcc' and target.cpp_header_units:
+        if family == 'gcc' and target.cpp_header_units:
             # A GCC scan carries no mapper, so it reaches a header unit only at
             # its default-named path -- the one its own include spelling
             # mangles to. Respell the scan's include path and source through the
@@ -1701,7 +1716,7 @@ class NinjaBackend(backends.Backend):
             hu_outputs = header_unit_override
         else:
             hu_outputs = self.provision_header_units(target, compiler)
-            if compiler.get_id() == 'clang' and hu_outputs:
+            if family == 'clang' and hu_outputs:
                 # A clang scan hard-errors on a header-unit import with no
                 # matching -fmodule-file, even with the BMI built (no ambient
                 # lookup), so the per-unit flags must ride the scan too.
@@ -1722,7 +1737,7 @@ class NinjaBackend(backends.Backend):
         self.add_header_deps(target, elem, header_deps or [])
         elem.add_dep(pch_dep or [])
         elem.add_orderdep(self.order_deps_to_strings(target, order_deps or []))
-        if compiler.get_id() == 'clang':
+        if family == 'clang':
             # Real inputs, not order-only: the scan command names the pcms, so
             # a missing unit is a graph error rather than a build-time race.
             elem.add_dep(hu_outputs)
@@ -1780,13 +1795,14 @@ class NinjaBackend(backends.Backend):
         cl/clang. Per-compiler collator flags come from _module_collate_depargs.
         """
         cpp = target.compilers['cpp']
+        family = cpp.cpp_module_family()
         private = self._module_private_bmi_dir_for(target)
         if private is not None:
             # Unconditional across compilers, mirroring _get_or_create_bmi_variant's
             # own private_dir creation: unlike the shared class cache, there is no
             # existing evidence GCC auto-creates this new top-level path shape.
             os.makedirs(os.path.join(self.environment.get_build_dir(), private), exist_ok=True)
-        if cpp.get_id() in {'msvc', 'clang'}:
+        if family in {'msvc', 'clang'}:
             # cl does not create /ifcOutput itself, and clang consumers name
             # pcm.cache before the first harvest populates it. Created even when
             # this target has its own private dir: that dir's search path still
@@ -1794,7 +1810,7 @@ class NinjaBackend(backends.Backend):
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      self._module_shared_bmi_dir_for(target)),
                         exist_ok=True)
-        if cpp.get_id() == 'clang':
+        if family == 'clang':
             self.warn_on_clang_modules_ccache(cpp)
 
         ddis: T.List[str] = []
@@ -1824,7 +1840,7 @@ class NinjaBackend(backends.Backend):
         private_map_file = self.get_private_modules_file_for(target)
         elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file, private_map_file],
                                  'cpp_module_collate', sorted(ddis))
-        if cpp.get_id() == 'gcc':
+        if family == 'gcc':
             # The per-TU module mappers the compile edges rebuild on. They
             # are written copy-if-different, so restat keeps an unchanged
             # mapper from recompiling its TU when a sibling module changes.
@@ -1906,7 +1922,8 @@ class NinjaBackend(backends.Backend):
             depargs += ['--dep-private-map', path, tid, display]
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
-        if cpp.get_id() == 'clang':
+        family = cpp.cpp_module_family()
+        if family == 'clang':
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
             # Declared interfaces, internal partitions and private interfaces
             # are all compiled as interface units (Clang emits a BMI only for
@@ -1916,13 +1933,13 @@ class NinjaBackend(backends.Backend):
                             | self._internal_partition_paths(target)
                             | self._private_module_interface_paths(target)):
                 depargs += ['--interface-source', p]
-        if cpp.get_id() == 'gcc':
+        if family == 'gcc':
             depargs += ['--mapper-suffix', '.mapper']
             depargs += ['--default-cmi-root', cpp.get_module_cache_dir()]
             self.provision_header_units(target, cpp)
             depargs += self._header_unit_bmi_args(
                 cpp, self._target_header_unit_bmis.get(target.get_id(), []))
-        if cpp.get_id() == 'msvc':
+        if family == 'msvc':
             for hu in target.cpp_header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
@@ -1989,6 +2006,7 @@ class NinjaBackend(backends.Backend):
         if existing is not None:
             return existing
         cpp = provider.compilers['cpp']
+        family = cpp.cpp_module_family()
         info = self._bmi_classes[(provider.for_machine, class_key)]
         assert info.subdir is not None, 'a class divergence implies more than one class'
         vid = f'{provider.get_id()}@bmi@{info.subdir}'
@@ -2022,10 +2040,10 @@ class NinjaBackend(backends.Backend):
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
             vid, None)
         modargs = cpp.get_module_compile_args(info.subdir)
-        if cpp.get_id() == 'clang' and '-fmodules' in args:
+        if family == 'clang' and '-fmodules' in args:
             # Same shape as the compile-edge dance in generate_single_compile.
             modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
-        if cpp.get_id() == 'msvc':
+        if family == 'msvc':
             # The variant rule names its own explicit-file /ifcOutput; drop
             # the directory pair, keep /ifcSearchDir for the class cache
             # lookup (the variant's own imports resolve there).
@@ -2062,11 +2080,11 @@ class NinjaBackend(backends.Backend):
             # cl's BMI_VARIANT rule no longer bakes /interface: the per-unit
             # interface/internalPartition flag rides ARGS, as on the compile
             # edge. clang/gcc carry their unit flag in the rule itself.
-            compile_iface = iface_args if cpp.get_id() == 'msvc' else []
+            compile_iface = iface_args if family == 'msvc' else []
             elem.add_item('ARGS', args + compile_iface)
-            if cpp.get_id() in {'clang', 'gcc'}:
+            if family in {'clang', 'gcc'}:
                 elem.add_item('DEPFILE', vpcm + '.d')
-            if cpp.get_id() == 'gcc':
+            if family == 'gcc':
                 # The variant's collate writes this mapper; it sends the
                 # export to $out and the imports to the class cache.
                 elem.add_item('MAPPER', vpcm + '.mapper')
@@ -2106,7 +2124,7 @@ class NinjaBackend(backends.Backend):
         own_private_map = self.get_private_modules_file_for(provider)
         elem = NinjaBuildElement(self.all_outputs, [variant.dyndep, variant.provmap],
                                  'cpp_module_collate', sorted(ddis))
-        if cpp.get_id() == 'gcc':
+        if family == 'gcc':
             # As on a target collate: the variant compiles rebuild on these.
             elem.implicit_outfilenames.extend(
                 d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
@@ -2127,13 +2145,13 @@ class NinjaBackend(backends.Backend):
         for pm in dep_provmaps:
             depargs += ['--dep-provmap', pm]
         depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
-        if cpp.get_id() == 'gcc':
+        if family == 'gcc':
             depargs += ['--mapper-suffix', '.mapper',
                         '--default-cmi-root', cpp.get_module_cache_dir()]
             depargs += self._header_unit_bmi_args(cpp, hu_bmis)
         for rec in recs:
             depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
-        if cpp.get_id() == 'msvc':
+        if family == 'msvc':
             # The provider's declared units, as in _module_collate_depargs:
             # cl reports header-unit requires from the variant's scans too,
             # and the collator checks them against the declared set.
@@ -2584,7 +2602,7 @@ class NinjaBackend(backends.Backend):
         the unit identically or they name two different units.
         """
         mode, spelling = self._parse_header_unit(hu, self.build_to_src)
-        if compiler.get_id() == 'gcc' and (force_all or self._has_space(spelling)):
+        if compiler.cpp_module_family() == 'gcc' and (force_all or self._has_space(spelling)):
             spelling = self._respell_path(spelling, class_tag, force_all) or spelling
         return mode, spelling
 
@@ -2600,7 +2618,7 @@ class NinjaBackend(backends.Backend):
         (generate_cpp_module_scan): a non-spaced unit's class rides its scan
         name, never its compile, so no alias reaches the CMI.
         """
-        return (compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc'
+        return (compiler.get_language() == 'cpp' and compiler.cpp_module_family() == 'gcc'
                 and bool(target.cpp_header_units)
                 and self.target_uses_p1689_cpp_modules(target))
 
@@ -4721,7 +4739,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         command = compiler.get_exelist()
         description = 'Precompiling C++ module BMI $out'
-        if compiler.get_id() == 'msvc':
+        family = compiler.cpp_module_family()
+        if family == 'msvc':
             # The per-unit /interface or /internalPartition flag rides $ARGS
             # (added by the variant edge), so the shared rule can serve both an
             # interface and an internal-partition recompile.
@@ -4731,7 +4750,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
             return
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
-        if compiler.get_id() == 'gcc':
+        if family == 'gcc':
             # GCC has no BMI output flag: the per-edge $MAPPER (written by
             # the variant's collate) maps the module name to $out, and
             # -fmodule-only skips the object. The pre-15 driver needs the
@@ -4750,7 +4769,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if self.ninja.has_rule(rulename):
             return
         description = 'Scanning $in for C++ module dependencies'
-        if compiler.get_id() == 'clang':
+        family = compiler.cpp_module_family()
+        if family == 'clang':
             # Clang's scanner is the separate clang-scan-deps tool, wrapping
             # the full compile command after '--'. It preprocesses with the
             # wrapped -MD/-MF, so the scan gets a make-style header depfile
@@ -4780,7 +4800,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # GCC emits a make-style header depfile alongside the scan; cl does not,
         # so the scan there tracks only its source (generated-header existence is
         # covered by order-only deps in generate_cpp_module_scan).
-        if compiler.get_id() == 'gcc':
+        if family == 'gcc':
             rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
         else:
             rule = NinjaRule(rulename, command, args, description)
@@ -4794,7 +4814,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         command = compiler.get_exelist()
         description = 'Building C++ header unit $SPELLING'
-        if compiler.get_id() == 'msvc':
+        family = compiler.cpp_module_family()
+        if family == 'msvc':
             # cl writes the BMI to the path we pick ($out) and emits no object;
             # /headerName:$HUMODE is quote or angle. /showIncludes feeds the msvc
             # deps parser so editing the header rebuilds the unit.
@@ -4804,7 +4825,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = ['$ARGS'] + huargs
             self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
             return
-        if compiler.get_id() == 'clang':
+        if family == 'clang':
             # Clang names the BMI directly (-o $out) and emits no object, so
             # the edge's declared output is the real pcm -- no stamp, no touch.
             # -fmodule-header is the precompile action (no -c); $HULANG is
@@ -4913,9 +4934,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # -x c++-module covers both kinds; GCC infers the kind from the source
         # but its pre-15 driver does not know the module extensions and needs
         # the language spelled out.
-        if cpp.get_id() == 'msvc':
+        family = cpp.cpp_module_family()
+        if family == 'msvc':
             return ['/internalPartition', '/TP'] if is_internal_partition else ['/interface', '/TP']
-        if cpp.get_id() == 'clang':
+        if family == 'clang':
             return ['-x', 'c++-module']
         return ['-x', 'c++'] if mesonlib.version_compare(cpp.version, '<15') else []
 
@@ -4944,8 +4966,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         BMIs. On a single-class machine the key carries no class part, keeping
         paths and edges byte-identical to a pre-class build.
         """
-        cid = compiler.get_id()
-        if cid not in ('gcc', 'msvc', 'clang'):
+        family = compiler.cpp_module_family()
+        if family == 'none':
             return []
         tid = target.get_id()
         if tid in self._target_header_unit_outputs:
@@ -4961,7 +4983,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = self._generate_single_compile(target, compiler)
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
-            if cid == 'gcc':
+            if family == 'gcc':
                 # The only place a unit GCC cannot name is reported. The edges
                 # below just skip such a unit; what it means is decided here.
                 self.check_header_unit_names(target, args)
@@ -5027,7 +5049,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         loaded into every one of its TUs, which is what makes declaring a std
         header unit alongside `import std;` unusable there.
         """
-        if compiler.get_id() != 'msvc':
+        if compiler.cpp_module_family() != 'msvc':
             return []
         tid = target.get_id()
         cached = self._target_imported_header_units.get(tid)
@@ -5110,14 +5132,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         """
         if not header_units:
             return [], [], []
-        cid = compiler.get_id()
-        if cid == 'clang':
+        family = compiler.cpp_module_family()
+        if family == 'clang':
             # Registered lazily (idempotent), like clang's scan rule: only
             # projects declaring header units grow the rule.
             self.generate_cpp_header_unit_rule(compiler)
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
-        is_msvc = cid == 'msvc'
-        is_gcc = cid == 'gcc'
+        is_msvc = family == 'msvc'
+        is_gcc = family == 'gcc'
         suffix = compiler.get_module_bmi_suffix()
         cache_dir = compiler.get_module_cache_dir()
         outputs: T.List[str] = []
@@ -5445,13 +5467,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     self.generate_tasking_mil_compile_rules(compiler)
                 self.generate_compile_rule_for(langname, compiler)
                 self.generate_pch_rule_for(langname, compiler)
-                if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
+                if langname == 'cpp' and compiler.cpp_module_family() in ('gcc', 'msvc'):
                     # Clang's scan rule is registered lazily with the first
                     # module scan edge instead: creating it needs the
                     # clang-scan-deps feature probe, which non-module clang
                     # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
-                if langname == 'cpp' and compiler.get_id() in ('gcc', 'msvc'):
+                if langname == 'cpp' and compiler.cpp_module_family() in ('gcc', 'msvc'):
                     # Clang's header-unit rule is registered lazily with the
                     # first unit edge (provision_header_units) instead, so
                     # projects without header units don't grow an unused rule.
@@ -5923,7 +5945,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if use_pch and 'mw' not in compiler.id:
             commands += self.get_pch_include_args(compiler, target)
             pch = target.pch.get(compiler.get_language())
-            if pch and compiler.get_id() == 'msvc' \
+            if pch and compiler.cpp_module_family() == 'msvc' \
                     and self.target_uses_p1689_cpp_modules_edge(target, compiler):
                 # cl's /scanDependencies force-includes the PCH header (/FI) from
                 # disk -- it does not resolve the forced include against the
@@ -5949,7 +5971,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             private_output = private_dir is not None and self._is_private_module_source(target, src)
             modargs = compiler.get_module_compile_args(
                 self._bmi_class_subdir_for(target), private_dir, private_output)
-            if compiler.get_id() == 'clang' and '-fmodules' in commands:
+            module_family = compiler.cpp_module_family()
+            if module_family == 'clang' and '-fmodules' in commands:
                 # The user turned on implicit Clang modules themselves (via
                 # cpp_args, add_project_arguments, ...; all those channels are
                 # in `commands` by now). Drop the ccache-defeating pair: its
@@ -5965,7 +5988,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # provide from a source outside this set is an error there, not a
             # downstream "module not found".
             if is_module_interface:
-                if compiler.get_id() == 'msvc':
+                if module_family == 'msvc':
                     # An internal partition is not an interface: cl rejects
                     # /interface (and an interface file extension) for it and
                     # wants /internalPartition. The flag rides `commands`, which
@@ -5974,20 +5997,20 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # covers both, so only cl needs the split.
                     commands += ['/internalPartition', '/TP'] if is_internal_partition \
                         else ['/interface', '/TP']
-                elif compiler.get_id() == 'clang':
+                elif module_family == 'clang':
                     # -x c++-module parses the TU as an interface unit (.ixx
                     # needs it; uniform for .cppm too); bare -fmodule-output
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
-                elif compiler.get_id() == 'gcc' and mesonlib.version_compare(compiler.version, '<15'):
+                elif module_family == 'gcc' and mesonlib.version_compare(compiler.version, '<15'):
                     # GCC 14's driver does not know the module extensions and
                     # would treat the file as linker input (and the -E scan
                     # would silently emit nothing); hand it the language.
                     # Interface-ness is still inferred from the source. GCC 15
                     # taught the driver the extensions.
                     commands += ['-x', 'c++']
-        elif compiler.get_language() == 'cpp' and compiler.get_id() == 'gcc' \
+        elif compiler.get_language() == 'cpp' and compiler.cpp_module_family() == 'gcc' \
                 and self.cpp_module_scanner_for_target(target) == 'regex' \
                 and any(a in commands for a in compiler.get_cpp_modules_args()):
             # The regex escape hatch: the user's bare modules flag makes GCC
@@ -6177,7 +6200,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # neither -- its directory /ifcOutput writes the BMI straight into the
         # class cache and the dyndep declares it there.
         is_miu = is_module_interface and compiler.supports_bmi_classes()
-        clang_miu = is_miu and compiler.get_id() == 'clang'
+        clang_miu = is_miu and compiler.cpp_module_family() == 'clang'
         if clang_miu:
             element.implicit_outfilenames.append(self.get_bmi_file_for(compiler, rel_obj))
         # Declared header units are implicit inputs: their BMIs must exist

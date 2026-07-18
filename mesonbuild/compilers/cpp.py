@@ -450,6 +450,11 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # was found (see _clang_scan_deps).
         return self._clang_scan_deps is not None
 
+    def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
+        # Inherited by every clang-derived compiler (intel-llvm, armltdclang,
+        # emscripten, appleclang); clang-cl is not a subclass and stays 'none'.
+        return 'clang'
+
     def get_module_scanner_exelist(self) -> T.List[str]:
         assert self._clang_scan_deps is not None, 'only valid when supports_cpp_modules_p1689()'
         return [self._clang_scan_deps]
@@ -809,6 +814,9 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # GCC gained -fdeps-format=p1689r5 (the scanner the pipeline needs) in
         # GCC 14.
         return version_compare(self.version, '>=14')
+
+    def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
+        return 'gcc'
 
     def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
         return 'gcm.cache' if class_subdir is None else f'gcm.cache/{class_subdir}'
@@ -1323,6 +1331,9 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # from VS 2022 17.2, i.e. cl 19.32.
         return version_compare(self.version, '>=19.32')
 
+    def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
+        return 'msvc'
+
     def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
         return 'ifc.cache' if class_subdir is None else f'ifc.cache/{class_subdir}'
 
@@ -1676,3 +1687,8 @@ class Xc32CPPCompiler(Xc32CPPStds, Xc32Compiler, GnuCPPCompiler):
         GnuCPPCompiler.__init__(self, ccache, exelist, version, for_machine, env,
                                 linker=linker, full_version=full_version, defines=defines)
         Xc32Compiler.__init__(self)
+
+    def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
+        # XC32 is GCC-based but its module pipeline is untested; keep it out,
+        # matching the id gate this classifier replaces.
+        return 'none'

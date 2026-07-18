@@ -190,12 +190,12 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
     # Deliberately not gated on current_vs_supports_modules() or the
     # >= 19.28.28617 floor: no test depends on them and a broken developer
     # prompt should fail loudly, not skip.
-    if cpp.get_id() in {'gcc', 'clang', 'msvc'} and cpp.supports_cpp_modules_p1689():
+    if cpp.cpp_module_family() != 'none' and cpp.supports_cpp_modules_p1689():
         caps.update(('modules', 'partitions', 'header_units', 'module_interfaces'))
         if cpp.get_std_module_sources():
             # GCC 15.0-15.2 ship the manifest but are too unreliable for the
             # std module.
-            if cpp.get_id() != 'gcc' or version_compare(cpp.version, '>=15.3'):
+            if cpp.cpp_module_family() != 'gcc' or version_compare(cpp.version, '>=15.3'):
                 caps.add('import_std')
     if regex_scanner_flag(cpp) is not None:
         caps.add('regex_scanner')

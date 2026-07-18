@@ -211,6 +211,100 @@ class InternalTests(unittest.TestCase):
         clang._clang_scan_deps = '/usr/bin/clang-scan-deps'
         self.assertTrue(clang.supports_cpp_modules_p1689())
 
+    def test_cpp_module_family_by_class(self):
+        # The module pipeline dispatches on the toolchain family, resolved by
+        # class so a new clang-derived id is covered by inheritance with no
+        # per-site audit. clang-cl is not a Clang subclass and stays 'none';
+        # xc32-gcc is GCC-based but deliberately kept out.
+        from mesonbuild.compilers.cpp import (
+            GnuCPPCompiler, VisualStudioCPPCompiler, ClangCPPCompiler,
+            IntelLLVMCPPCompiler, ArmLtdClangCPPCompiler, EmscriptenCPPCompiler,
+            AppleClangCPPCompiler, ClangClCPPCompiler, Xc32CPPCompiler)
+        cases = {
+            GnuCPPCompiler: 'gcc',
+            VisualStudioCPPCompiler: 'msvc',
+            ClangCPPCompiler: 'clang',
+            IntelLLVMCPPCompiler: 'clang',
+            ArmLtdClangCPPCompiler: 'clang',
+            EmscriptenCPPCompiler: 'clang',
+            AppleClangCPPCompiler: 'clang',
+            ClangClCPPCompiler: 'none',
+            Xc32CPPCompiler: 'none',
+        }
+        for cls, family in cases.items():
+            self.assertEqual(cls.__new__(cls).cpp_module_family(), family, cls.__name__)
+
+    def _module_scanner_mock(self, family, *, uses_modules=True, version='19.40',
+                             p1689=False, cpp_modules_args=None, extra_args=None):
+        # A NinjaBackend and a mocked C++ target wired for the scanner-selection
+        # and diagnostic paths. cpp_module_family is set explicitly: an unset
+        # MagicMock compares unequal to every family string and would silently
+        # flip the dispatch.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild import build
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.ninja_has_dyndeps = True
+        cpp = mock.MagicMock()
+        cpp.cpp_module_family.return_value = family
+        cpp.get_id.return_value = {'gcc': 'gcc', 'msvc': 'msvc',
+                                   'clang': 'intel-llvm', 'none': 'clang-cl'}[family]
+        cpp.version = version
+        cpp.supports_cpp_modules_p1689.return_value = p1689
+        cpp.get_cpp_modules_args.return_value = cpp_modules_args or []
+        target = mock.MagicMock(spec=build.BuildTarget)
+        target.name = 't'
+        target.compilers = {'cpp': cpp}
+        target.uses_cpp_modules.return_value = uses_modules
+        target.uses_fortran.return_value = False
+        target.extra_args = {'cpp': extra_args or []}
+        return be, target
+
+    def test_scanner_clang_family_selects_p1689(self):
+        # A clang-derived compiler (id intel-llvm, family clang) with a working
+        # clang-scan-deps must select the P1689 scanner and pass the diagnostic
+        # -- dispatch is on the family, never the id.
+        be, target = self._module_scanner_mock('clang', p1689=True)
+        self.assertEqual(be.cpp_module_scanner_for_target(target), 'p1689')
+        self.assertTrue(be.target_uses_p1689_cpp_modules(target))
+        be.check_cpp_modules_scanner(target)  # must not raise
+
+    def test_scanner_msvc_declared_modules_none_raises(self):
+        # A declaring MSVC target that resolves to no scanner must error at
+        # setup rather than fail at build time with raw cl errors.
+        # (A) cl below the 19.28.28617 modules floor.
+        be, target = self._module_scanner_mock('msvc', version='19.28.28000')
+        with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
+                        'current_vs_supports_modules', return_value=True):
+            self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
+            with self.assertRaises(MesonException):
+                be.check_cpp_modules_scanner(target)
+        # (B) a too-old developer prompt, cl new enough otherwise.
+        be, target = self._module_scanner_mock('msvc', version='19.40')
+        with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
+                        'current_vs_supports_modules', return_value=False):
+            self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
+            with self.assertRaises(MesonException):
+                be.check_cpp_modules_scanner(target)
+        # (C) the documented regex fallback (cl 19.28.28617 - 19.31) is fine.
+        be, target = self._module_scanner_mock('msvc', version='19.29')
+        with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
+                        'current_vs_supports_modules', return_value=True):
+            self.assertEqual(be.cpp_module_scanner_for_target(target), 'regex')
+            be.check_cpp_modules_scanner(target)  # must not raise
+
+    def test_scanner_clang_cl_behavior_unchanged(self):
+        # clang-cl (family 'none') is not diagnosed: it reaches the regex escape
+        # hatch only when the user passes a bare modules flag, and a declaring
+        # target without one stays silently at 'none' exactly as before.
+        be, target = self._module_scanner_mock(
+            'none', cpp_modules_args=['-fmodules', '-fmodules-ts'])
+        self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
+        be.check_cpp_modules_scanner(target)  # must not raise
+        be, target = self._module_scanner_mock(
+            'none', cpp_modules_args=['-fmodules', '-fmodules-ts'],
+            extra_args=['-fmodules'])
+        self.assertEqual(be.cpp_module_scanner_for_target(target), 'regex')
+
     def test_msvc_module_compile_args_use_cache_dir(self):
         # /ifcSearchDir and /ifcOutput must point at the compiler's own module
         # cache dir (get_module_cache_dir), not a hardcoded literal, so the BMI
@@ -454,6 +548,7 @@ class InternalTests(unittest.TestCase):
         be.ninja_has_dyndeps = True
         cpp = mock.MagicMock()
         cpp.get_id.return_value = 'gcc'
+        cpp.cpp_module_family.return_value = 'gcc'
         cpp.version = '14.0.0'
         cpp.get_cpp_modules_args.return_value = []
         cpp.supports_cpp_modules_p1689.return_value = True
@@ -484,6 +579,7 @@ class InternalTests(unittest.TestCase):
         def should(version, vs_ok=True):
             cpp = mock.MagicMock()
             cpp.get_id.return_value = 'msvc'
+            cpp.cpp_module_family.return_value = 'msvc'
             cpp.version = version
             cpp.get_cpp_modules_args.return_value = []
             target = mock.MagicMock(spec=build.BuildTarget)
@@ -517,6 +613,7 @@ class InternalTests(unittest.TestCase):
 
         cpp = mock.MagicMock()
         cpp.get_id.return_value = 'gcc'
+        cpp.cpp_module_family.return_value = 'gcc'
         cpp.for_machine = MachineChoice.HOST
         cpp.get_exelist.return_value = ['g++']
         cpp.get_module_compile_args.return_value = []
@@ -677,6 +774,7 @@ class InternalTests(unittest.TestCase):
         be.environment.get_build_dir.return_value = '/nonexistent'
         cpp = mock.MagicMock()
         cpp.get_id.return_value = 'gcc'
+        cpp.cpp_module_family.return_value = 'gcc'
         cpp.get_exelist.return_value = ['g++']
 
         proc = mock.MagicMock()
@@ -738,6 +836,7 @@ class InternalTests(unittest.TestCase):
             be.add_build = mock.MagicMock()
             cpp = mock.MagicMock()
             cpp.get_id.return_value = cid
+            cpp.cpp_module_family.return_value = cid
             cpp.get_exelist.return_value = ['c++']
             cpp.get_module_bmi_suffix.return_value = suffix
             cpp.get_module_cache_dir.return_value = 'gcm.cache'
@@ -805,6 +904,7 @@ class InternalTests(unittest.TestCase):
             be.add_build = mock.MagicMock()
             cpp = mock.MagicMock()
             cpp.get_id.return_value = cid
+            cpp.cpp_module_family.return_value = cid
             cpp.get_exelist.return_value = ['c++']
             cpp.get_module_bmi_suffix.return_value = suffix
             cpp.get_module_cache_dir.return_value = 'gcm.cache'
@@ -842,10 +942,11 @@ class InternalTests(unittest.TestCase):
         from mesonbuild.interpreterbase import InvalidArguments
         interp = Interpreter.__new__(Interpreter)
 
-        def check(cid, supported, has_cpp=True):
+        def check(family, supported, cid=None, has_cpp=True):
             cpp = mock.MagicMock()
             cpp.supports_cpp_modules_p1689.return_value = supported
-            cpp.get_id.return_value = cid
+            cpp.cpp_module_family.return_value = family
+            cpp.get_id.return_value = cid or family
             cpp.version = '18.0.0'
             target = mock.MagicMock()
             target.cpp_header_units = ['util.h']
@@ -854,10 +955,15 @@ class InternalTests(unittest.TestCase):
 
         check('gcc', True)   # supported compiler: no raise
         check('clang', True)  # P1689-capable clang builds header units too
+        # A clang-derived compiler (family clang, distinct id) is accepted by
+        # family, not by an id allowlist.
+        check('clang', True, cid='intel-llvm')
         with self.assertRaises(InvalidArguments):
             check('gcc', False)  # modules-incapable gcc
         with self.assertRaises(InvalidArguments):
             check('clang', False)  # clang without a P1689 clang-scan-deps
+        with self.assertRaises(InvalidArguments):
+            check('none', True, cid='clang-cl')  # not a pipeline compiler
         with self.assertRaises(InvalidArguments):
             check('gcc', False, has_cpp=False)  # no C++ compiler at all
 

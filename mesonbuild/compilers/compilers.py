@@ -1535,6 +1535,14 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         # older/regex-scannable modules mode, or none, return False.
         return False
 
+    def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
+        # Which module toolchain family this compiler belongs to: the dialect of
+        # scan/collate/compile flags the backend emits for it, or 'none' for a
+        # compiler outside the module pipeline. Answered by class, not id, so a
+        # derived compiler (a clang-based one, say) is classified by inheritance
+        # and needs no per-dispatch-site audit.
+        return 'none'
+
     @abc.abstractmethod
     def get_optimization_args(self, optimization_level: str) -> T.List[str]:
         pass

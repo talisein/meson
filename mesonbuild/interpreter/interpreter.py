@@ -4224,7 +4224,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         if not target.cpp_header_units:
             return
         cpp = target.compilers.get('cpp')
-        if cpp is None or cpp.get_id() not in {'gcc', 'msvc', 'clang'} \
+        if cpp is None or cpp.cpp_module_family() == 'none' \
                 or not cpp.supports_cpp_modules_p1689():
             got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
             raise InvalidArguments(
@@ -4422,7 +4422,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # footgun, not a portability inconvenience -- the module would be
         # published and globally claimed exactly as if it were public.
         cpp = target.compilers.get('cpp')
-        if cpp is None or cpp.get_id() not in {'gcc', 'msvc', 'clang'} \
+        if cpp is None or cpp.cpp_module_family() == 'none' \
                 or not cpp.supports_cpp_modules_p1689():
             got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
             raise InvalidArguments(
