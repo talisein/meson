@@ -1117,7 +1117,6 @@ class NinjaBackend(backends.Backend):
             self.generate_run_target(target)
             return
         assert isinstance(target, build.BuildTarget)
-        self.check_cpp_modules_fortran_mix(target)
         self.check_cpp_modules_std(target)
         self.check_cpp_modules_scanner(target)
         os.makedirs(self.get_target_private_dir_abs(target), exist_ok=True)
@@ -1363,10 +1362,6 @@ class NinjaBackend(backends.Backend):
           one, and generate_target returns before a collate is ever emitted for
           it, so mappers, scans and header units would name outputs nothing
           produces.
-        - a target with Fortran sources: a target gets one scanner and this one
-          uses Fortran's (should_use_dyndeps_for_target enables it without this
-          pipeline). check_cpp_modules_fortran_mix reports the C++ modules such
-          a target cannot have.
         - a target with no C++ compiler at all.
         - a target that compiles no C++ source of its own: process_compilers
           adds a language a target merely *links* (to pick the linker), so a
@@ -1376,14 +1371,20 @@ class NinjaBackend(backends.Backend):
           scanner selection, dyndeps, the collate, the BMI-class registry and
           its variants, and header-unit provisioning -- would name outputs
           nothing produces.
+
+        A target with Fortran sources is not excluded: its C++ TUs get the
+        module pipeline while its Fortran sources are scanned separately, the
+        two dyndep files keyed per language so no edge binds both (dyndep
+        binding is per edge, and the module systems do not interact). The gate
+        follows the C++ TUs -- a target that only *links* a Fortran library
+        carries a fortran compiler but no Fortran TU, and is a plain C++ target
+        here.
         """
         if not self.ninja_has_dyndeps:
             return False
         if not isinstance(target, build.BuildTarget):
             return False
         if isinstance(target, build.CompileTarget):
-            return False
-        if target.uses_fortran():
             return False
         return 'cpp' in target.compilers and target.has_cpp_source()
 
@@ -1440,10 +1441,14 @@ class NinjaBackend(backends.Backend):
         return 'none'
 
     def should_use_dyndeps_for_target(self, target: build.BuildTargetTypes | build.Target) -> bool:
-        # The other side of the exclusion cpp_module_pipeline_applies makes: a
-        # Fortran target dyndeps on Fortran's own scanner, never on the C++ one.
+        # A target that compiles a Fortran source of its own is scanned by the
+        # Fortran module scanner; a mixed target additionally runs the C++
+        # pipeline (its two dyndep files are keyed per language). The question is
+        # the Fortran source, not 'fortran' in compilers -- process_compilers
+        # adds the language a target merely *links*, and a target with no
+        # Fortran TU has nothing for the legacy scanner.
         if self.ninja_has_dyndeps and isinstance(target, build.BuildTarget) \
-                and target.uses_fortran():
+                and target.has_fortran_source():
             return True
         return self.cpp_module_scanner_for_target(target) != 'none'
 
@@ -1454,15 +1459,26 @@ class NinjaBackend(backends.Backend):
         if not self.should_use_dyndeps_for_target(target):
             return
         self._uses_dyndeps = True
+        # A mixed target runs both scanners: the P1689 collate over its C++
+        # sources and the legacy scan over its Fortran ones, into two dyndep
+        # files keyed per language. A pure-P1689 target emits only the collate.
+        mixed = self._target_needs_split_dyndep(target)
         if self.target_uses_p1689_cpp_modules(target):
             self.generate_p1689_module_collate_target(target, compiled_sources, source2object)
-            return
-        json_file, depscan_file = self.get_dep_scan_file_for(target)
+            if not mixed:
+                return
+        json_file, depscan_file = self.get_dep_scan_file_for(
+            target, 'fortran' if mixed else None)
         pickle_base = target.name + '.dat'
         pickle_file = os.path.join(self.get_target_private_dir(target), pickle_base).replace('\\', '/')
         pickle_abs = os.path.join(self.get_target_private_dir_abs(target), pickle_base).replace('\\', '/')
         rule_name = 'depscan'
-        scan_sources = list(self.select_sources_to_scan(compiled_sources))
+        # The legacy depscan writes a dyndep rule for every source it is handed,
+        # C++ ones included. In a mixed target the C++ edges are bound to the
+        # collate's dyndep file instead, so this scan must see only the Fortran
+        # sources or its dyndep file would name an edge it cannot bind.
+        scan_sources = [(s, lang) for s, lang in self.select_sources_to_scan(compiled_sources)
+                        if not mixed or lang == 'fortran']
 
         scaninfo = TargetDependencyScannerInfo(
             self.get_target_private_dir(target), source2object, scan_sources)
@@ -1487,47 +1503,27 @@ class NinjaBackend(backends.Backend):
         elem.add_item('name', target.name)
         self.add_build(elem)
 
+        # Merge in the legacy depscan of every linked target that compiles a
+        # source this scanner resolves: a Fortran producer (its Fortran depscan,
+        # keyed when that target is itself mixed) or a regex-C++ producer. A
+        # P1689 target's module info flows through the collate's provided-module
+        # map, not a depscan.json, so a pure-P1689 provider is not collected
+        # here -- but a mixed provider is, for its Fortran side.
         infiles: T.Set[str] = set()
         for t in target.get_all_linked_targets():
-            if self.should_use_dyndeps_for_target(t) and not self.target_uses_p1689_cpp_modules(t):
-                assert isinstance(t, build.BuildTarget)
+            if not isinstance(t, build.BuildTarget):
+                continue
+            if t.has_fortran_source():
+                infiles.add(self.get_dep_scan_file_for(t, 'fortran')[0])
+            elif self.should_use_dyndeps_for_target(t) and not self.target_uses_p1689_cpp_modules(t):
                 infiles.add(self.get_dep_scan_file_for(t)[0])
         _, od = self.flatten_object_list(target)
-        infiles.update({self.get_dep_scan_file_for(t)[0] for t in od if t.uses_fortran()})
+        infiles.update({self.get_dep_scan_file_for(t, 'fortran')[0]
+                        for t in od if t.has_fortran_source()})
 
         elem = NinjaBuildElement(self.all_outputs, depscan_file, 'depaccumulate', [json_file] + sorted(infiles))
         elem.add_item('name', target.name)
         self.add_build(elem)
-
-    def check_cpp_modules_fortran_mix(self, target: build.BuildTarget) -> None:
-        # A target with Fortran sources is scanned by the Fortran module
-        # scanner, and a target gets one scanner: cpp_module_scanner_for_target
-        # returns 'none' for it, so its C++ sources are compiled with no module
-        # flags, no scan and no dyndep. A C++ module in such a target cannot
-        # work, and left alone it fails at build time with a raw compiler error
-        # about `export module` needing -fmodules. Say so at setup instead, and
-        # name the shape that does work: the C++ modules go in a C++ library
-        # the Fortran target links.
-        if not target.uses_fortran():
-            return
-        if target.provides_cpp_modules():
-            raise MesonException(
-                f'Target {target.name!r} has both Fortran sources and C++ module '
-                'sources, which Meson does not support in one target: a target '
-                'gets a single module scanner, and a Fortran target uses the '
-                'Fortran one, so its C++ modules would never be compiled as '
-                'modules. Move the C++ module sources into a C++ library and '
-                'link it from this target.')
-        if target.uses_cpp_modules() and target.has_cpp_source():
-            # It links a module provider and has C++ TUs of its own. Those TUs
-            # are not module-enabled, so an `import` in one of them fails at
-            # compile time; if none imports anything, the build is fine, so
-            # this is a warning rather than an error.
-            mlog.warning(
-                f'Target "{target.name}" has both Fortran and C++ sources and links a '
-                'C++ module provider. C++ modules are not supported in a mixed '
-                'Fortran/C++ target, so its C++ sources cannot import those modules. '
-                'Move the C++ sources into a C++ library and link it from this target.')
 
     def check_cpp_modules_std(self, target: build.BuildTarget) -> None:
         # C++ modules need C++20 or later; with an older cpp_std the compiler
@@ -1848,7 +1844,7 @@ class NinjaBackend(backends.Backend):
         dep_provmaps.sort()
         dep_private_maps.sort()
 
-        dyndep_file = self.get_dep_scan_file_for(target)[1]
+        dyndep_file = self.get_dep_scan_file_for(target, 'cpp')[1]
         provmap_file = self.get_provided_modules_file_for(target)
         private_map_file = self.get_private_modules_file_for(target)
         # A target's own public provides are always named in the shared class
@@ -6351,14 +6347,32 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         if isinstance(target, build.CompileTarget):
             return
-        if self.source_scan_language(src) is None:
+        lang = self.source_scan_language(src)
+        if lang is None:
             return
-        dep_scan_file = self.get_dep_scan_file_for(target)[1]
+        # A mixed target binds each edge to its own language's dyndep file; a
+        # single-language target has one file and ignores the language.
+        dep_scan_file = self.get_dep_scan_file_for(target, lang)[1]
         element.add_item('dyndep', dep_scan_file)
         element.add_orderdep(dep_scan_file)
 
-    def get_dep_scan_file_for(self, target: build.BuildTarget) -> T.Tuple[str, str]:
+    def _target_needs_split_dyndep(self, target: build.BuildTargetTypes | build.Target) -> bool:
+        # A target that runs both module scanners in one build: its Fortran
+        # sources go through the legacy scan while its C++ sources go through the
+        # P1689 collate. Each pipeline writes its own dyndep file, keyed by
+        # language, because ninja binds a dyndep per edge and a file may name
+        # only edges bound to it. Every other target keeps a single unkeyed
+        # depscan.dd, so unmixed build graphs stay byte-identical.
+        return (isinstance(target, build.BuildTarget) and target.has_fortran_source()
+                and self.target_uses_p1689_cpp_modules(target))
+
+    def get_dep_scan_file_for(self, target: build.BuildTarget,
+                              lang: T.Optional[Literal['cpp', 'fortran']] = None) -> T.Tuple[str, str]:
         priv = self.get_target_private_dir(target)
+        if self._target_needs_split_dyndep(target):
+            assert lang is not None, 'a split-dyndep target must name the language'
+            return (os.path.join(priv, f'depscan-{lang}.json'),
+                    os.path.join(priv, f'depscan-{lang}.dd'))
         return os.path.join(priv, 'depscan.json'), os.path.join(priv, 'depscan.dd')
 
     def add_header_deps(self, target: build.BuildTarget, ninja_element: NinjaBuildElement, header_deps: T.List[FileOrString]) -> None:

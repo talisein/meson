@@ -28,6 +28,12 @@ publishes each interface's BMI into the shared cache under its scanned module
 name as a small build-time step; this is invisible in the API and keeps every
 compile command line static.
 
+Objective-C++ sources are outside the module pipeline: an `import` in a `.mm`
+is unsupported, matching Clang itself, which rejects a C++-built module
+interface in an Objective-C++ compile as a configuration mismatch. Meson never
+scans `.mm` sources. A mixed Objective-C++/C++ target's `.cpp` sources use
+modules normally.
+
 `import std;` and `import std.compat;` are available through
 `dependency('std')`, exactly as on GCC and MSVC. The dependency is threaded
 by default — the std module is built with the threads dependency's flags and

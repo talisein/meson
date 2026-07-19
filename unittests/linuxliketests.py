@@ -1114,38 +1114,65 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @skip_if_not_language('fortran')
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
-    def test_fortran_cpp_modules_mix_diagnostics(self):
-        # A target gets one module scanner, and a Fortran target uses the
-        # Fortran one -- so C++ modules in that target are compiled with no
-        # module flags at all. Left undiagnosed the build dies in the compiler
-        # ("'module' only available with '-fmodules'"), so setup reports it.
+    def test_fortran_cpp_modules_one_target(self):
+        # Both module systems in one target: a C++ named module (import) and a
+        # Fortran module (use across two .f90 files), scanned separately into two
+        # language-keyed dyndep files. The Fortran main calls into the C++ module
+        # through ISO_C_BINDING, so a green run proves both scanners and interop.
+        self.build_and_check_modules('210 fortran cpp modules one target')
+        # Two dyndep files, each naming only its own language's compile edges.
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            contents = f.read()
+        self.assertIn('prog.p/depscan-cpp.dd', contents)
+        self.assertIn('prog.p/depscan-fortran.dd', contents)
+        for line in contents.splitlines():
+            if not (line.startswith('build ') and '_COMPILER ' in line):
+                continue
+            if 'depscan-cpp.dd' in line:
+                self.assertIn('cpp_COMPILER', line, 'a C++ edge binds the cpp dyndep')
+                self.assertNotIn('depscan-fortran.dd', line)
+            if 'depscan-fortran.dd' in line:
+                self.assertIn('fortran_COMPILER', line, 'a Fortran edge binds the fortran dyndep')
+                self.assertNotIn('depscan-cpp.dd', line)
+
+    @skip_if_not_language('fortran')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_fortran_cpp_modules_cross_link(self):
+        # A mixed target linking another mixed provider: it imports the
+        # provider's C++ module and uses the provider's Fortran module, both
+        # across the link. The provider is on the P1689 pipeline, so collecting
+        # its Fortran depscan must key off its Fortran sources, not off which C++
+        # pipeline it runs -- otherwise Fortran resolution breaks silently.
+        self.build_and_check_modules('211 fortran cpp modules cross link')
+
+    @skip_if_not_language('fortran')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_cpp_module_links_fortran(self):
+        # The transpose of the mixed shape: a C++ module target that merely links
+        # a Fortran library and has no Fortran source of its own. process_compilers
+        # adds 'fortran' to its compiler dict for the link, but the pipeline
+        # follows the C++ TUs -- it gets the full, unsplit C++ module pipeline.
+        self.build_and_check_modules('212 cpp module links fortran')
+
+    @skip_if_not_language('fortran')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_fortran_cpp_modules_mix(self):
+        # A Fortran and C++ named modules meeting in one build, three shapes, all
+        # supported: the C++ module interface in the same target, in a linked
+        # library its own C++ TU imports, or in a library it merely links with no
+        # C++ TU of its own. Each builds and runs.
         testdir = os.path.join(self.unit_test_dir, '196 fortran cpp modules diagnostics')
-
-        # A C++ module source in the Fortran target can never work: a setup error
-        # naming the shape that does.
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.init(testdir, extra_args=['-Dmode=module_source'])
-        self.assertIn('both Fortran sources and C++ module sources', cm.exception.output)
-        self.assertIn('Move the C++ module sources into a C++ library', cm.exception.output)
-
-        # C++ TUs in a Fortran target that links a module provider cannot import
-        # its modules -- but if none of them tries, the build is fine. A warning,
-        # not an error, and the build still works.
-        self.wipe()
-        out = self.init(testdir, extra_args=['-Dmode=links_provider'])
-        self.assertIn('cannot import those modules', out)
-        self.build()
-        self.run_tests()
-
-        # The supported shape: the modules live in a C++ library the Fortran
-        # target links. No mix diagnostic -- and in particular no claim that
-        # clang-scan-deps is missing, which such a target does not use.
-        self.wipe()
-        out = self.init(testdir, extra_args=['-Dmode=supported'])
-        self.assertNotIn('Fortran/C++', out)
-        self.assertNotIn('clang-scan-deps', out)
-        self.build()
-        self.run_tests()
+        for i, mode in enumerate(('module_source', 'links_provider', 'supported')):
+            if i:
+                self.wipe()
+            out = self.init(testdir, extra_args=[f'-Dmode={mode}'])
+            # No leftover mix diagnostic, and no false claim that clang-scan-deps
+            # is missing (such a target uses it exactly as any C++ module target).
+            self.assertNotIn('Move the C++ module sources', out)
+            self.assertNotIn('cannot import those modules', out)
+            self.assertNotIn('clang-scan-deps', out)
+            self.build()
+            self.run_tests()
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
     def test_gcc_module_cpp_std_divergence_builds(self):
