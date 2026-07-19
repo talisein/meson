@@ -183,6 +183,16 @@ def is_cpp_source(fname: 'mesonlib.FileOrString') -> bool:
     """
     return source_scan_language(fname) == 'cpp' and not is_header(fname)
 
+def is_fortran_source(fname: 'mesonlib.FileOrString') -> bool:
+    """Whether a source is a Fortran translation unit of its own: a source the
+    Fortran compiler compiles (and the module scanner scans). The compiler dict
+    is not this question -- process_compilers adds a clink language a target
+    merely *links* (fortran is one), so 'fortran' in a target's compilers is
+    true for a C or C++ program that only links a Fortran library and has no
+    Fortran source at all.
+    """
+    return source_scan_language(fname) == 'fortran'
+
 def is_assembly(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
         fname = fname.fname

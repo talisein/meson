@@ -1,7 +1,6 @@
-// A plain C++ TU inside the Fortran target. It reaches the modules-using
-// library only through the extern "C" boundary: it cannot `import mathmod;`
-// itself, because a Fortran target's C++ sources get no module pipeline. That
-// is what the warning is about; this shape still builds.
-extern "C" int fortran_square(int x);
+import mathmod;
 
-extern "C" int shim_square(int x) { return fortran_square(x); }
+// A C++ TU inside a mixed Fortran/C++ target that links the module provider.
+// It imports the provider's named module directly across the link and exposes
+// a C-linkage entry the Fortran main calls.
+extern "C" int fortran_square(int x) { return square(x); }

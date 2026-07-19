@@ -453,9 +453,10 @@ Thread model: posix'''), '21.9.0')
         target.uses_fortran.return_value = False
         target.extra_args = {'cpp': extra_args or []}
         # These mocks stand for real module targets: they compile a C++ source
-        # of their own. The pure-linker case (no C++ TU) is exercised separately
-        # in test_scanner_pure_c_consumer_not_blamed.
+        # of their own and no Fortran source. The pure-linker case (no C++ TU) is
+        # exercised separately in test_scanner_pure_c_consumer_not_blamed.
         target.has_cpp_source.return_value = True
+        target.has_fortran_source.return_value = False
         return be, target
 
     def test_scanner_clang_family_selects_p1689(self):
@@ -820,6 +821,7 @@ Thread model: posix'''), '21.9.0')
         # A Fortran target uses Fortran's scanner, not this pipeline; say so,
         # or the mock answers every unstubbed predicate with a truthy mock.
         target.uses_fortran.return_value = False
+        target.has_fortran_source.return_value = False
         target.has_cpp_source.return_value = True
         target.extra_args = {'cpp': []}
 
@@ -849,6 +851,7 @@ Thread model: posix'''), '21.9.0')
             target.compilers = {'cpp': cpp}
             target.uses_cpp_modules.return_value = True
             target.uses_fortran.return_value = False
+            target.has_fortran_source.return_value = False
             target.has_cpp_source.return_value = True
             target.extra_args = {'cpp': []}
             with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
