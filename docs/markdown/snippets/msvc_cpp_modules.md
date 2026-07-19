@@ -38,8 +38,10 @@ built from the standard library's module sources shipped with the MSVC toolset
 (cl 19.32, where `/scanDependencies` shipped) and `cpp_std=c++20` or later.
 As on GCC and Clang, `dependency('std')` folds in the threads dependency by
 default (a no-op on MSVC, where threading needs no flags), and
-`dependency('std-nothreads')` opts out; the two cannot be mixed on one
-machine.
+`dependency('std-nothreads')` opts out; the threaded and unthreaded spellings
+cannot be mixed on one machine. Meson synthesizes one std library per standard
+library the build selects, each under its own target name, and a single link
+cannot mix standard libraries.
 
 Older but modules-capable MSVC (VS 2019 16.8 up to VS 2022 17.1) falls back to
 the previous regex-based scanner, which handles only flat named modules --

@@ -50,10 +50,13 @@ project needs to supply the standard-library modules itself.
 threads dependency's flags and every consumer inherits them, so the
 POSIX-thread setting compiled into the module matches all of its importers
 by construction (Clang enforces this; see below). A build that must avoid
-the thread flags can use `dependency('std-nothreads')` instead; there is a
-single shared std module per machine, so the two spellings cannot be mixed on
-one machine (a cross build synthesizes its own std library per machine, each
-under its own target name).
+the thread flags can use `dependency('std-nothreads')` instead; the threaded
+and unthreaded spellings cannot be mixed on one machine. Meson synthesizes one
+std library per standard library the build actually selects (and one per
+machine in a cross build), each under its own target name; targets whose
+compile flags diverge but select the same standard library share it, with
+their module interfaces recompiled per configuration. A single link cannot
+mix standard libraries.
 
 `import std;` works in any modules-capable dialect (`cpp_std=c++20` or later with
 GCC); it is not restricted to `c++23`. As always, `cpp_std` still governs which

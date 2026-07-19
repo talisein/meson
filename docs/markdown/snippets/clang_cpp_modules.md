@@ -33,15 +33,18 @@ compile command line static.
 by default — the std module is built with the threads dependency's flags and
 every consumer inherits them, so the POSIX-thread setting Clang bakes into
 `std.pcm` matches all of its importers by construction;
-`dependency('std-nothreads')` opts out (one shared std module per machine, so
-the two spellings cannot be mixed on one machine). Clang serves two standard
+`dependency('std-nothreads')` opts out (the threaded and unthreaded spellings
+cannot be mixed on one machine). Clang serves two standard
 libraries, so Meson probes which one the build actually uses — honoring the
 platform default, Clang configuration files, and a `-stdlib=libc++` given via
 `cpp_args`, `add_global_arguments` or `add_project_arguments` — and builds the
 std module from that library's own manifest: libstdc++'s
 `libstdc++.modules.json` (GCC >= 15 installed alongside) or libc++'s
-`libc++.modules.json`. Per-target `-stdlib` divergence is not supported: a
-compiled module bakes in its standard library.
+`libc++.modules.json`. Meson synthesizes one std library per standard library
+the build selects, so targets that use different standard libraries each get
+their own -- provided they are never linked together, since a single link
+cannot mix standard libraries (a compiled module bakes in its standard
+library, and the two ABIs are incompatible).
 
 ```meson
 std = dependency('std')
