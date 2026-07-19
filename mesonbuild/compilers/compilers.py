@@ -1532,6 +1532,18 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         return (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
                 ('-iquote', 1), ('-I', 2))
 
+    def _bmi_irrelevant_include_flags(self) -> T.FrozenSet[str]:
+        """The include-dir flag spellings from get_include_dir_flags, stripped of
+        their leading dash to the body form get_bmi_irrelevant_args matches (the
+        form split_bmi_args computes once it removes the lead). The BMI-class
+        strip set and the header-unit identity machinery thus draw "what is an
+        include flag" from one inventory and cannot drift apart. Selects the same
+        argument-syntax branch get_include_dir_flags does (both key off
+        self.get_argument_syntax()), so each compiler folds in exactly the
+        spellings it actually emits.
+        """
+        return frozenset(flag.lstrip('-') for flag, _ in self.get_include_dir_flags())
+
     def get_depfile_format(self) -> str:
         return 'msvc' if self.get_argument_syntax() == 'msvc' else 'gcc'
 

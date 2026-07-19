@@ -469,6 +469,23 @@ class InternalTests(unittest.TestCase):
         # Two-token and joined include spellings are both stripped.
         self.assertEqual(gcc.get_bmi_class_key(base + ['-isystem', '/x']),
                          gcc.get_bmi_class_key(base + ['-isystem/y']))
+        # Every include-dir flag get_include_dir_flags knows -- not just -I and
+        # -isystem -- is BMI-irrelevant: two targets differing only in an
+        # -iquote or -idirafter directory share a class. Regression lock for the
+        # class key splitting on an include dir the identity machinery already
+        # resolves the same, which built a redundant BMI per split. Both the
+        # two-token and the joined spelling strip (the joined form goes through
+        # the prefix branch, the two-token form through the consuming branch).
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-iquote', '/a']),
+                         gcc.get_bmi_class_key(base + ['-iquote', '/b']))
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-iquote/a']),
+                         gcc.get_bmi_class_key(base))
+        self.assertEqual(gcc.get_bmi_class_key(base + ['-idirafter', '/a']),
+                         gcc.get_bmi_class_key(base + ['-idirafter', '/b']))
+        self.assertEqual(clang.get_bmi_class_key(base + ['-iquote', '/a']),
+                         clang.get_bmi_class_key(base))
+        self.assertEqual(clang.get_bmi_class_key(base + ['-idirafter', '/a']),
+                         clang.get_bmi_class_key(base))
         # Non-allowlisted differences split, unknown flags included.
         for divergent in (['-DFOO'], ['-std=c++23'], ['-ftrivial-auto-var-init=zero']):
             self.assertNotEqual(gcc.get_bmi_class_key(base),
@@ -493,6 +510,15 @@ class InternalTests(unittest.TestCase):
                             msvc.get_bmi_class_key(mbase + ['/DFOO']))
         self.assertNotEqual(msvc.get_bmi_class_key(mbase),
                             msvc.get_bmi_class_key(['/std:c++23', '/DBAR']))
+        # cl sees -iquote/-idirafter in unix form too (Meson emits them that way
+        # until native conversion folds them into /I at write time), so they
+        # strip on an msvc command line just as on a GNU one. Regression lock for
+        # the observed cl defect: an -iquote dir passed via cpp_args leaking into
+        # the class key and splitting same-file header-unit targets apart.
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['-iquote', '/a']),
+                         msvc.get_bmi_class_key(mbase))
+        self.assertEqual(msvc.get_bmi_class_key(mbase + ['-idirafter', '/a']),
+                         msvc.get_bmi_class_key(mbase))
         # The '/' lead is MSVC-only: a stray absolute path must survive on a
         # GNU-syntax command line even though 'W' would prefix-match it.
         self.assertIn('/Work/lib.a', gcc.get_bmi_class_key(base + ['/Work/lib.a']))
@@ -534,6 +560,21 @@ class InternalTests(unittest.TestCase):
             key = msvc.get_bmi_class_key(mbase + pair)
             self.assertEqual(key, msvc.get_bmi_class_key(mbase), pair)
             self.assertNotIn(pair[1], key)
+
+        # Anti-drift tripwire: the BMI-class consuming set must cover every
+        # include-dir flag get_include_dir_flags reports (dash-stripped), so the
+        # class key and the header-unit identity machinery can never disagree on
+        # what an include flag is. If this fails, the two inventories diverged --
+        # get_bmi_irrelevant_args grew or lost an include flag get_include_dir_flags
+        # did not, or vice versa; re-derive rather than re-hand-list.
+        for comp in (gcc, clang, msvc):
+            include_bodies = {flag.lstrip('-') for flag, _ in comp.get_include_dir_flags()}
+            consuming = comp.get_bmi_irrelevant_args()[2]
+            self.assertLessEqual(
+                include_bodies, consuming,
+                f'{type(comp).__name__}: get_bmi_irrelevant_args consuming set and '
+                f'get_include_dir_flags inventories diverged (missing '
+                f'{sorted(include_bodies - consuming)})')
 
     def test_split_bmi_args_keeps_detached_arguments_paired(self):
         # A flag and an argument of its own passed as a separate token must

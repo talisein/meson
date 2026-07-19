@@ -513,7 +513,12 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable). A user-passed -fmodules is intentionally NOT stripped:
-        # implicit Clang header modules genuinely change the compile.
+        # implicit Clang header modules genuinely change the compile. The
+        # include-dir flags are not hand-listed: they are derived from
+        # get_include_dir_flags so the class key and the identity machinery
+        # share one inventory of them (see _bmi_irrelevant_include_flags).
+        # 'framework' is the one consuming entry that is not an include-dir
+        # flag, so it stays hand-listed.
         #
         # Protected against the four family prefixes above (checked against
         # `clang --help-hidden`): -Wa,/-Wp,/-Wl, forward opaque, comma-
@@ -527,7 +532,7 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return (frozenset(),
                 frozenset({'g', 'O', 'W', 'w', 'Q', 'fmodule-file', 'fPIC',
                            'fpic', 'fPIE', 'fpie', 'fsanitize', 'embed-dir'}),
-                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}),
+                frozenset({'framework'}) | self._bmi_irrelevant_include_flags(),
                 frozenset({'Wa,', 'Wp,', 'Wl,', 'ObjC', 'gcc-toolchain',
                            'working-directory'}))
 
@@ -882,7 +887,12 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # After xmake's speculative GCC strip list. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
-        # executable); -Mno-modules shapes only the depfile, never the BMI.
+        # executable); -Mno-modules shapes only the depfile, never the BMI. The
+        # include-dir flags are not hand-listed: they are derived from
+        # get_include_dir_flags so the class key and the identity machinery
+        # share one inventory of them (see _bmi_irrelevant_include_flags).
+        # 'framework' is the one consuming entry that is not an include-dir
+        # flag, so it stays hand-listed.
         #
         # Protected against the two family prefixes above (checked against
         # `man gcc`): -Wa,/-Wp,/-Wl, forward opaque, comma-delimited content
@@ -896,7 +906,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
                 frozenset({'O', 'W', 'w', 'Q', 'fmodule-mapper', 'fmodules-ts',
                            'fmodules', 'fPIC', 'fpic', 'fPIE', 'fpie',
                            'fsanitize', 'embed-dir', 'Mno-modules'}),
-                frozenset({'I', 'isystem', 'cxx-isystem', 'framework'}),
+                frozenset({'framework'}) | self._bmi_irrelevant_include_flags(),
                 frozenset({'Wa,', 'Wp,', 'Wl,', 'ObjC', 'wrapper'}))
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
@@ -1372,9 +1382,14 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative MSVC strip list. Defines are deliberately
         # absent (a -D difference must split the BMI class) and so is /O
-        # (conservative: optimization divergence splits here). 'isystem' is
-        # listed because Meson emits system includes as unix-form two-token
-        # ['-isystem', dir] until native conversion at write time. /EH* (which
+        # (conservative: optimization divergence splits here). The include-dir
+        # flags are not hand-listed: they are derived from get_include_dir_flags
+        # (see _bmi_irrelevant_include_flags) so the class key and the identity
+        # machinery share one inventory of them -- and that covers the unix-form
+        # -iquote/-isystem/-idirafter/-I Meson emits until native conversion at
+        # write time. The consuming plumbing below (ifc*, reference, headerUnit*,
+        # /external:I system includes cl already spells natively) is not part of
+        # that inventory, so it stays hand-listed. /EH* (which
         # cpp_eh controls) is deliberately NOT stripped: it changes
         # _CPPUNWIND, an ABI-relevant macro that can be baked into
         # constexpr-evaluated BMI content, so a divergence there must split
@@ -1403,10 +1418,11 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
                            'Fp', 'Fm', 'Fe', 'Fd', 'FC',
                            'doc', 'diagnostics', 'cgthreads', 'analyze',
                            'external', 'fsanitize'}),
-                frozenset({'Fo', 'I', 'reference', 'isystem', 'ifcSearchDir',
+                frozenset({'Fo', 'reference', 'ifcSearchDir',
                            'ifcOutput', 'sourceDependencies', 'scanDependencies',
                            'headerUnit', 'headerUnit:quote', 'headerUnit:angle',
-                           'headerName:quote', 'headerName:angle', 'external:I'}),
+                           'headerName:quote', 'headerName:angle', 'external:I'})
+                | self._bmi_irrelevant_include_flags(),
                 frozenset())
 
     def get_module_scanner_args(self, outfile: str, target: str, depfile: str) -> T.List[str]:
