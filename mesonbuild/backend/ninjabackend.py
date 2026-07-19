@@ -1554,6 +1554,13 @@ class NinjaBackend(backends.Backend):
             return
         if 'cpp' not in target.compilers or not target.uses_cpp_modules():
             return
+        # A target that compiles no C++ source of its own has no TU that could
+        # parse `export module` / `import`, so its cpp_std is irrelevant: 'cpp'
+        # in compilers only means it links a C++ library (process_compilers adds
+        # the language to pick the linker). A pure-C program linking a
+        # module-providing C++ library reaches here and must not be blamed.
+        if not self._has_cpp_source(target):
+            return
         from ..compilers.cpp import cpp_std_supports_modules
         std = str(self.get_target_option(target, OptionKey(
             'cpp_std', machine=target.for_machine, subproject=target.subproject)))
@@ -1579,6 +1586,13 @@ class NinjaBackend(backends.Backend):
         cpp = target.compilers['cpp']
         if not target.uses_cpp_modules() \
                 or self.cpp_module_scanner_for_target(target) != 'none':
+            return
+        # Same pure-linker case as check_cpp_modules_std: a target that compiles
+        # no C++ source of its own has no compile that could consume a BMI, so a
+        # missing scanner cannot hurt it. 'cpp' in compilers here only means it
+        # links a C++ module provider (process_compilers picks the linker); do
+        # not blame a pure-C consumer for a scanner it never needed.
+        if not self._has_cpp_source(target):
             return
         family = cpp.cpp_module_family()
         if family == 'clang':

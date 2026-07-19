@@ -312,6 +312,10 @@ class InternalTests(unittest.TestCase):
         from mesonbuild import build
         be = NinjaBackend.__new__(NinjaBackend)
         be.ninja_has_dyndeps = True
+        # These mocks stand for real module targets: they compile a C++ source
+        # of their own. The pure-linker case (no C++ TU) is exercised
+        # separately in test_scanner_pure_c_consumer_not_blamed.
+        be._has_cpp_source = mock.MagicMock(return_value=True)
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = family
         cpp.get_id.return_value = {'gcc': 'gcc', 'msvc': 'msvc',
@@ -377,6 +381,21 @@ class InternalTests(unittest.TestCase):
         be.check_cpp_modules_scanner(target)  # must not raise
         be, target = self._module_scanner_mock('none', uses_modules=False)
         be.check_cpp_modules_scanner(target)  # must not raise
+
+    def test_scanner_pure_c_consumer_not_blamed(self):
+        # A pure-C target that merely links a C++ module provider carries a cpp
+        # compiler (process_compilers adds it to pick the linker) and answers
+        # uses_cpp_modules(), but it compiles no C++ source of its own. Even
+        # where the family resolves to no scanner (Clang without clang-scan-deps
+        # here), it must not be blamed for a missing tool it never needed.
+        be, target = self._module_scanner_mock('clang', p1689=False)
+        be._has_cpp_source = mock.MagicMock(return_value=False)
+        self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
+        be.check_cpp_modules_scanner(target)  # must not raise
+        # A real C++ TU on that same dead-end compiler still raises.
+        be, target = self._module_scanner_mock('clang', p1689=False)
+        with self.assertRaises(MesonException):
+            be.check_cpp_modules_scanner(target)
 
     def test_msvc_module_compile_args_use_cache_dir(self):
         # /ifcSearchDir and /ifcOutput must point at the compiler's own module
@@ -594,8 +613,9 @@ class InternalTests(unittest.TestCase):
         from mesonbuild.mesonlib import MesonException
         be = NinjaBackend.__new__(NinjaBackend)
 
-        def check(std, uses_modules=True, has_cpp=True):
+        def check(std, uses_modules=True, has_cpp=True, has_cpp_source=True):
             be.get_target_option = mock.MagicMock(return_value=std)
+            be._has_cpp_source = mock.MagicMock(return_value=has_cpp_source)
             target = mock.MagicMock()
             target.for_machine = MachineChoice.HOST
             target.subproject = ''
@@ -603,9 +623,10 @@ class InternalTests(unittest.TestCase):
             target.compilers = {'cpp': mock.MagicMock()} if has_cpp else {}
             be.check_cpp_modules_std(target)
 
-        check('c++20')                       # ok
-        check('c++17', uses_modules=False)   # not a module target: ignored
-        check('c++17', has_cpp=False)        # no C++ compiler: ignored
+        check('c++20')                          # ok
+        check('c++17', uses_modules=False)      # not a module target: ignored
+        check('c++17', has_cpp=False)           # no C++ compiler: ignored
+        check('c++17', has_cpp_source=False)    # links a provider, no C++ TU: ignored
         with self.assertRaises(MesonException):
             check('c++17')
         with self.assertRaises(MesonException):

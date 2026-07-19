@@ -1090,6 +1090,16 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # every compiler.
         self.build_and_check_modules('155 fortran links gcc cpp module')
 
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_c_links_cpp_module(self):
+        # A pure-C executable that links a C++ module-providing library carries a
+        # cpp compiler only to pick the linker (process_compilers) and answers
+        # uses_cpp_modules(), yet compiles no C++ TU of its own. It must not be
+        # blamed for cpp_std<c++20 (the C exe keeps cpp_std=none) nor, on Clang
+        # without clang-scan-deps, for a missing scanner. The C main calls into
+        # the modules-using library, so a green run also proves interop.
+        self.build_and_check_modules('209 c links cpp module')
+
     @skip_if_not_language('fortran')
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_fortran_cpp_modules_mix_diagnostics(self):
