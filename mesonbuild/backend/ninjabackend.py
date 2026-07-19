@@ -703,7 +703,7 @@ class NinjaBackend(backends.Backend):
         self._target_header_unit_bmis: T.Dict[str, T.List[T.Tuple[str, str]]] = {}
         # Per-target header units inherited from the module providers it links,
         # grouped by provider (cl only -- see _imported_header_units).
-        self._target_imported_header_units: T.Dict[str, T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]]] = {}
+        self._target_imported_header_units: T.Dict[str, T.List[T.Tuple[build.BuildTarget, T.List[str]]]] = {}
         # Per-target build-relative paths every generator (custom_target,
         # generator) of the target writes, so a unit exporting a generated
         # header can order behind the edge that produces it.
@@ -2020,7 +2020,7 @@ class NinjaBackend(backends.Backend):
             # units are passed for the collator to flag an import of one never
             # declared (GCC cannot, so it is omitted there).
             for hu in header_units:
-                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+                mode, spelling = self._parse_header_unit(hu)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
         return depargs
 
@@ -2664,17 +2664,17 @@ class NinjaBackend(backends.Backend):
                 self._aliasing_available = False
         return self._aliasing_available
 
-    def _header_unit_spelling(self, hu: T.Union[File, str],
+    def _header_unit_spelling(self, hu: str,
                               compiler: Compiler,
                               class_tag: T.Optional[str] = None,
                               force_all: bool = False) -> T.Tuple[str, str]:
         """(mode, spelling) of a declared header unit as the edges spell it.
 
-        A File-declared unit carries a path, which on GCC is respelled through
-        the same alias its importers resolve through -- both sides must name
-        the unit identically or they name two different units.
+        A spaced spelling is respelled on GCC through the same alias its
+        importers resolve through -- both sides must name the unit identically
+        or they name two different units.
         """
-        mode, spelling = self._parse_header_unit(hu, self.build_to_src)
+        mode, spelling = self._parse_header_unit(hu)
         if compiler.cpp_module_family() == 'gcc' and (force_all or self._has_space(spelling)):
             spelling = self._respell_path(spelling, class_tag, force_all) or spelling
         return mode, spelling
@@ -2966,10 +2966,10 @@ class NinjaBackend(backends.Backend):
             out += ['-isystem', alias]
         return out
 
-    def _declares_system_header_unit(self, header_units: T.Sequence[T.Union[File, str]]) -> bool:
+    def _declares_system_header_unit(self, header_units: T.Sequence[str]) -> bool:
         # Whether any declared unit is system-mode (import <h>;) -- the
         # per-target trigger for aliasing the built-in chain on scan edges.
-        return any(self._parse_header_unit(hu, self.build_to_src)[0] == 'system'
+        return any(self._parse_header_unit(hu)[0] == 'system'
                    for hu in header_units)
 
     def check_header_unit_names(self, target: build.BuildTarget,
@@ -4946,12 +4946,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
 
     @staticmethod
-    def _parse_header_unit(hu: T.Union[File, str], build_to_src: str) -> T.Tuple[str, str]:
-        # A declared header unit is a File (user header, spelled build-relative),
-        # a '<pkg/hdr.h>' string (system header), or a plain string (user
-        # header). Returns (mode, spelling); mode is 'user' or 'system'.
-        if isinstance(hu, File):
-            return 'user', hu.rel_to_builddir(build_to_src)
+    def _parse_header_unit(hu: str) -> T.Tuple[str, str]:
+        # A declared header unit is a '<pkg/hdr.h>' string (system header) or a
+        # plain string (user header), spelled as its importers spell it. Returns
+        # (mode, spelling); mode is 'user' or 'system'.
         if hu.startswith('<') and hu.endswith('>'):
             return 'system', hu[1:-1]
         return 'user', hu
@@ -5131,7 +5129,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return outputs, consumer_args, bmis
 
     def _imported_header_units(self, target: build.BuildTarget, compiler: Compiler
-                               ) -> T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]]:
+                               ) -> T.List[T.Tuple[build.BuildTarget, T.List[str]]]:
         """The header units declared by the module providers this target links,
         grouped by provider and minus anything the target declares itself.
 
@@ -5153,13 +5151,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if cached is not None:
             return cached
         seen = {self._header_unit_spelling(hu, compiler) for hu in target.cpp_header_units}
-        groups: T.List[T.Tuple[build.BuildTarget, T.List[T.Union[File, str]]]] = []
+        groups: T.List[T.Tuple[build.BuildTarget, T.List[str]]] = []
         for t in sorted(self.get_all_linked_targets(target), key=lambda t: t.get_id()):
             if not isinstance(t, build.BuildTarget) or not t.cpp_header_units \
                     or not t.provides_cpp_modules() \
                     or not self.target_uses_p1689_cpp_modules(t):
                 continue
-            units: T.List[T.Union[File, str]] = []
+            units: T.List[str] = []
             for hu in t.cpp_header_units:
                 key = self._header_unit_spelling(hu, compiler)
                 if key not in seen:
@@ -5208,7 +5206,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return deps
 
     def _provision_header_unit_edges(self, compiler: Compiler,
-                                     header_units: T.List[T.Union[File, str]],
+                                     header_units: T.List[str],
                                      args: T.Union['CompilerArgs', T.List[str]],
                                      class_key: T.Tuple[str, ...],
                                      class_subdir: T.Optional[str],

@@ -199,7 +199,7 @@ kwargs:
       P1689-capable `clang-scan-deps`) on the Ninja backend only.
 
   cpp_header_units:
-    type: array[str | file]
+    type: array[str]
     since: 1.12.0
     default: []
     description: |

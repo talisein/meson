@@ -410,8 +410,8 @@ Thread model: posix'''), '21.9.0')
             ['--private-map', 'p.json', 'd'] + deps
             + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc'])
         # MSVC: the declared header units close the sequence. A non-empty list
-        # exercises the --header-unit branch (build_to_src drives the parse);
-        # header_units=[] on every case above pins it as a no-op there.
+        # exercises the --header-unit branch (the parse strips an angle-wrapped
+        # system spelling); header_units=[] on every case above pins it a no-op.
         self.assertEqual(
             depargs('msvc', ['--own-private-map', 'p.json', 'd'],
                     harvests=True, interface_sources=['x.cc'],
@@ -997,15 +997,11 @@ Thread model: posix'''), '21.9.0')
         # _parse_header_unit so the grammar is defined (and ordered) once,
         # rather than hand-parsed twice with the tuple in opposite orders.
         from mesonbuild.backend.ninjabackend import NinjaBackend
-        from mesonbuild.utils.universal import File
         parse = NinjaBackend._parse_header_unit
         # '<pkg/hdr.h>' is a system header; the angle brackets are stripped.
-        self.assertEqual(parse('<pkg/hdr.h>', 'bld2src'), ('system', 'pkg/hdr.h'))
+        self.assertEqual(parse('<pkg/hdr.h>'), ('system', 'pkg/hdr.h'))
         # A plain string is a user header, spelled as written.
-        self.assertEqual(parse('pkg/hdr.h', 'bld2src'), ('user', 'pkg/hdr.h'))
-        # A File is a user header, spelled build-relative.
-        f = File(False, 'sub', 'hdr.h')
-        self.assertEqual(parse(f, 'bld2src'), ('user', f.rel_to_builddir('bld2src')))
+        self.assertEqual(parse('pkg/hdr.h'), ('user', 'pkg/hdr.h'))
 
     def test_header_probe_strips_forced_includes(self):
         # The -H probe asks where a header resolves, which the include search

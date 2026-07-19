@@ -418,7 +418,7 @@ class BuildTarget(BaseBuildTarget):
     c_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
     cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
     cpp_modules: bool
-    cpp_header_units: T.List[T.Union[str, File]]
+    cpp_header_units: T.List[str]
     cpp_module_interfaces: T.List[T.Union[str, File]]
     cpp_internal_partitions: T.List[T.Union[str, File]]
     cpp_private_module_interfaces: T.List[T.Union[str, File]]
