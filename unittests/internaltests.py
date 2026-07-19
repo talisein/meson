@@ -938,6 +938,65 @@ class InternalTests(unittest.TestCase):
         self.assertNotIn('-imacrosother.h', cmd)
         self.assertIn('-Iinc', cmd)
 
+    def test_gcc_include_chain_memo_keys_on_args(self):
+        # The built-in chain is a pure function of the probe arglist, so the
+        # memo keys on it: two targets whose args reshape the chain (--sysroot
+        # here) each probe and cache their own. A coarser (machine, compiler)
+        # key would hand the second target the first's chain and so alias the
+        # wrong directories. Include-only differences reshape nothing, so they
+        # over-split into identical chains -- extra spawns, never a wrong reuse.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        with tempfile.TemporaryDirectory() as builddir:
+            # Real dirs: the chain drops any entry GCC lists but does not open.
+            d1 = os.path.join(builddir, 'sys1')
+            d2 = os.path.join(builddir, 'sys2')
+            os.makedirs(d1)
+            os.makedirs(d2)
+            be = NinjaBackend.__new__(NinjaBackend)
+            be._gcc_include_chains = {}
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = builddir
+            cpp = mock.MagicMock()
+            cpp.for_machine = MachineChoice.HOST
+            cpp.get_id.return_value = 'gcc'
+            cpp.get_exelist.return_value = ['g++']
+            cpp.get_include_dir_flags.return_value = (
+                ('-idirafter', None), ('-isystem', 3), ('-iquote', 1), ('-I', 2))
+            proc = mock.MagicMock()
+            proc.returncode = 0
+            stderr = ('#include <...> search starts here:\n'
+                      f' {d1}\n {d2}\nEnd of search list.\n')
+
+            def probe(args):
+                with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.Popen_safe',
+                                return_value=(proc, '', stderr)) as popen:
+                    chain = be._gcc_include_chain(cpp, args)
+                return chain, popen.call_count
+
+            # A chain-shaping flag splits the memo: two probes, two entries.
+            chain_a, calls_a = probe(['--sysroot=/a'])
+            chain_b, calls_b = probe(['--sysroot=/b'])
+            self.assertEqual(calls_a, 1)
+            self.assertEqual(calls_b, 1)
+            self.assertEqual(len(be._gcc_include_chains), 2)
+            # The same arglist reuses its entry: no second probe.
+            _, calls_again = probe(['--sysroot=/a'])
+            self.assertEqual(calls_again, 0)
+            self.assertEqual(len(be._gcc_include_chains), 2)
+            # Include-only differences reshape nothing: a fresh probe each (the
+            # over-split), but byte-identical chains -- harmless by construction,
+            # since a target's own include dirs are filtered out of the chain.
+            chain_x, calls_x = probe(['-I/x'])
+            chain_y, calls_y = probe(['-I/y'])
+            self.assertEqual(calls_x, 1)
+            self.assertEqual(calls_y, 1)
+            self.assertEqual(chain_x, chain_y,
+                             'an include-only arg difference must over-split into '
+                             'identical chains, never diverge')
+            # Every probe yields the built-in block, in search order.
+            self.assertEqual(chain_a, [d1, d2])
+            self.assertEqual(chain_a, chain_b)
+
     def test_header_unit_dedup_shared_by_spelling(self):
         # On a single-class machine (an empty BMI class registry) a header unit
         # is deduped globally by (mode, resolved identity) for both compilers:

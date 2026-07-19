@@ -664,11 +664,13 @@ class NinjaBackend(backends.Backend):
         # spawns the compiler, and a unit is declared by many targets. The
         # value is (resolved path or None, whether the compiler exited clean).
         self._probed_header_units: T.Dict[T.Tuple[T.Any, ...], T.Tuple[T.Optional[str], bool]] = {}
-        # The compiler's built-in system include chain, in search order,
-        # probed once per (machine, compiler): a GCC system-mode header unit
-        # is named through this chain, so aliasing it renames the unit per
-        # class. Keyed by (for_machine, id, exelist); the built-in chain does
-        # not vary with a target's own include flags.
+        # The compiler's built-in system include chain, in search order: a GCC
+        # system-mode header unit is named through this chain, so aliasing it
+        # renames the unit per class. Keyed by (for_machine, id, exelist,
+        # arglist) because args that reshape the chain (--sysroot et al.) are
+        # BMI-relevant and so drive distinct classes that must each alias their
+        # own chain; the arglist is the whole key rather than a hand-picked
+        # subset (see _gcc_include_chain).
         self._gcc_include_chains: T.Dict[T.Tuple[T.Any, ...], T.List[str]] = {}
         # Machines whose system-unit chain aliasing has already reported a
         # degradation, so the warning that a chain-alias root could not be
@@ -2840,7 +2842,7 @@ class NinjaBackend(backends.Backend):
     def _gcc_include_chain(self, compiler: Compiler,
                            args: T.Union['CompilerArgs', T.List[str]]) -> T.List[str]:
         """GCC's built-in ``#include <...>`` search chain, in order, probed and
-        memoised once per (machine, compiler).
+        memoised on the args that shape it.
 
         A system-mode header unit is named through this chain, not through any
         -I of ours, so aliasing the chain is what respells such a unit. Only the
@@ -2849,12 +2851,25 @@ class NinjaBackend(backends.Backend):
         surface in the probe's ``<...>`` block are dropped, leaving a chain that
         does not vary with a target's include flags. Non-existent entries GCC
         lists but never opens are dropped too, as GCC itself skips them.
+
+        Keyed on the probe arglist itself -- the sole thing the chain is a
+        function of -- since args that reshape the built-in chain (--sysroot,
+        -nostdinc++, --gcc-toolchain, -B) are BMI-relevant and so name distinct
+        classes, each of which must alias its own chain. There is no owned
+        inventory of just those flags to key on without hand-listing (the trap),
+        so the whole arglist keys it: include and forced-include differences are
+        left in the key but made irrelevant to the value above, so they only
+        over-split into identical chains -- extra probe spawns at setup, never a
+        wrong reuse. (Include flags could be stripped from the key through
+        get_include_dir_flags to collapse that over-split, but a ~5ms probe is
+        not worth the added reasoning.)
         """
-        key = (compiler.for_machine, compiler.get_id(), tuple(compiler.get_exelist()))
+        arglist = self._without_forced_includes(args)
+        key = (compiler.for_machine, compiler.get_id(),
+               tuple(compiler.get_exelist()), tuple(arglist))
         cached = self._gcc_include_chains.get(key)
         if cached is not None:
             return cached
-        arglist = self._without_forced_includes(args)
         cmd = compiler.get_exelist() + arglist + ['-E', '-v', '-x', 'c++', '-']
         block: T.List[str] = []
         try:
