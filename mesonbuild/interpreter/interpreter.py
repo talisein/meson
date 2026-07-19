@@ -4245,7 +4245,11 @@ class Interpreter(InterpreterBase, HoldableObject):
         # rather than silently misbuilding. This covers module consumers and
         # header-unit users too (uses_cpp_modules), not just providers -- they
         # all need the scan/collate pipeline that only the Ninja backend has.
-        if self.backend.name != 'ninja' and target.uses_cpp_modules():
+        # Gated on has_cpp_source() so the error names a target that compiles a
+        # C++ module TU: a pure-C consumer that merely links a provider has no
+        # such TU (uses_cpp_modules() is true only through the link walk), and
+        # the provider it links trips this same check on its own.
+        if self.backend.name != 'ninja' and target.uses_cpp_modules() and target.has_cpp_source():
             raise InvalidArguments(
                 f'Target {name!r} uses C++ modules, which are only supported '
                 f'with the Ninja backend (current backend: {self.backend.name}).')
@@ -4293,10 +4297,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # source (a C file in a mixed-language target) is compiled by another
         # language's rules and never scanned, so either would make the module
         # declaration a silent no-op -- the worst outcome for the mistake.
-        if compilers.is_header(fname):
-            return False
-        ext = os.path.splitext(fname)[1][1:]
-        return ext.lower() in compilers.lang_suffixes['cpp'] or ext == 'C'
+        return compilers.is_cpp_source(fname)
 
     @staticmethod
     def _target_compiles_generated(target: build.BuildTarget,

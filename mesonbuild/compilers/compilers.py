@@ -157,6 +157,32 @@ def is_source(fname: 'mesonlib.FileOrString') -> bool:
         fname = fname.fname
     return cached_is_source_by_name(fname)
 
+def source_scan_language(fname: 'mesonlib.FileOrString') -> T.Optional['Literal["cpp", "fortran"]']:
+    """The scanning language of a source, or None if it is not scanned.
+
+    The suffix alone decides this, and it is the only thing that does:
+    the C++ compiler also compiles sources with no modules in them (it
+    assembles .s/.S), so a source's compile edge belongs to the module
+    pipeline only if this says 'cpp' -- otherwise nothing scans it and
+    nothing declares its per-TU outputs.
+    """
+    if isinstance(fname, mesonlib.File):
+        fname = fname.fname
+    ext = os.path.splitext(fname)[1][1:]
+    if ext.lower() in lang_suffixes['cpp'] or ext == 'C':
+        return 'cpp'
+    if ext.lower() in lang_suffixes['fortran']:
+        return 'fortran'
+    return None
+
+def is_cpp_source(fname: 'mesonlib.FileOrString') -> bool:
+    """Whether a source is a C++ translation unit of its own: a non-header
+    source the C++ compiler compiles (and the module pipeline scans). A header
+    is never a compile edge, and a non-C++ source is compiled by another
+    language's rules, so neither is a C++ TU.
+    """
+    return source_scan_language(fname) == 'cpp' and not is_header(fname)
+
 def is_assembly(fname: 'mesonlib.FileOrString') -> bool:
     if isinstance(fname, mesonlib.File):
         fname = fname.fname

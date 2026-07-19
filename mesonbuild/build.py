@@ -32,7 +32,7 @@ from .mesonlib import (
 from .options import OptionKey
 
 from .compilers import (
-    is_header, is_object, is_source, clink_langs, sort_clink,
+    is_header, is_object, is_source, is_cpp_source, clink_langs, sort_clink,
     is_known_suffix, detect_static_linker, LANGUAGES_USING_LDFLAGS,
     get_base_compile_args
 )
@@ -1767,6 +1767,20 @@ class BuildTarget(Target):
 
     def uses_fortran(self) -> bool:
         return 'fortran' in self.compilers
+
+    def has_cpp_source(self) -> bool:
+        # Whether the target compiles a C++ source of its own. Not the same
+        # question as 'cpp' in self.compilers: process_compilers also adds a
+        # language a target merely *links* (to pick the linker), so a Fortran or
+        # C program linking a C++ library carries a cpp compiler and no C++ TU.
+        for src in self.get_sources():
+            if is_cpp_source(src):
+                return True
+        for gen in self.get_generated_sources():
+            for out in gen.get_outputs():
+                if is_cpp_source(out):
+                    return True
+        return False
 
     def _has_cpp_module_source(self) -> bool:
         # Whether the target carries a module-interface source, marking it a

@@ -1098,7 +1098,19 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # blamed for cpp_std<c++20 (the C exe keeps cpp_std=none) nor, on Clang
         # without clang-scan-deps, for a missing scanner. The C main calls into
         # the modules-using library, so a green run also proves interop.
-        self.build_and_check_modules('209 c links cpp module')
+        #
+        # The module pipeline must also produce nothing for prog: it emits no
+        # collate/dyndep of its own ('name = prog' names a collate edge, never a
+        # link edge), and -- because prog's cpp_std=none diverges from the
+        # library's c++20 BMI class -- no BMI-only variant of the library is
+        # synthesized in prog's phantom class ('@bmi@'). Only the provider's
+        # single collate remains.
+        self.build_and_check_modules(
+            '209 c links cpp module',
+            ninja_not_contains=('name = prog', '@bmi@'))
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            collates = [ln for ln in f if ln.startswith('build ') and ': cpp_module_collate ' in ln]
+        self.assertEqual(len(collates), 1, 'only the provider collate should remain')
 
     @skip_if_not_language('fortran')
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))

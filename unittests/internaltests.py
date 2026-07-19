@@ -312,10 +312,6 @@ class InternalTests(unittest.TestCase):
         from mesonbuild import build
         be = NinjaBackend.__new__(NinjaBackend)
         be.ninja_has_dyndeps = True
-        # These mocks stand for real module targets: they compile a C++ source
-        # of their own. The pure-linker case (no C++ TU) is exercised
-        # separately in test_scanner_pure_c_consumer_not_blamed.
-        be._has_cpp_source = mock.MagicMock(return_value=True)
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = family
         cpp.get_id.return_value = {'gcc': 'gcc', 'msvc': 'msvc',
@@ -329,6 +325,10 @@ class InternalTests(unittest.TestCase):
         target.uses_cpp_modules.return_value = uses_modules
         target.uses_fortran.return_value = False
         target.extra_args = {'cpp': extra_args or []}
+        # These mocks stand for real module targets: they compile a C++ source
+        # of their own. The pure-linker case (no C++ TU) is exercised separately
+        # in test_scanner_pure_c_consumer_not_blamed.
+        target.has_cpp_source.return_value = True
         return be, target
 
     def test_scanner_clang_family_selects_p1689(self):
@@ -389,7 +389,7 @@ class InternalTests(unittest.TestCase):
         # where the family resolves to no scanner (Clang without clang-scan-deps
         # here), it must not be blamed for a missing tool it never needed.
         be, target = self._module_scanner_mock('clang', p1689=False)
-        be._has_cpp_source = mock.MagicMock(return_value=False)
+        target.has_cpp_source.return_value = False
         self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
         be.check_cpp_modules_scanner(target)  # must not raise
         # A real C++ TU on that same dead-end compiler still raises.
@@ -656,11 +656,11 @@ class InternalTests(unittest.TestCase):
 
         def check(std, uses_modules=True, has_cpp=True, has_cpp_source=True):
             be.get_target_option = mock.MagicMock(return_value=std)
-            be._has_cpp_source = mock.MagicMock(return_value=has_cpp_source)
             target = mock.MagicMock()
             target.for_machine = MachineChoice.HOST
             target.subproject = ''
             target.uses_cpp_modules.return_value = uses_modules
+            target.has_cpp_source.return_value = has_cpp_source
             target.compilers = {'cpp': mock.MagicMock()} if has_cpp else {}
             be.check_cpp_modules_std(target)
 
@@ -693,6 +693,7 @@ class InternalTests(unittest.TestCase):
         # A Fortran target uses Fortran's scanner, not this pipeline; say so,
         # or the mock answers every unstubbed predicate with a truthy mock.
         target.uses_fortran.return_value = False
+        target.has_cpp_source.return_value = True
         target.extra_args = {'cpp': []}
 
         r1 = be.target_uses_p1689_cpp_modules(target)
@@ -721,6 +722,7 @@ class InternalTests(unittest.TestCase):
             target.compilers = {'cpp': cpp}
             target.uses_cpp_modules.return_value = True
             target.uses_fortran.return_value = False
+            target.has_cpp_source.return_value = True
             target.extra_args = {'cpp': []}
             with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.'
                             'current_vs_supports_modules', return_value=vs_ok):

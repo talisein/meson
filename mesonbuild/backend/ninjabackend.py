@@ -1368,6 +1368,14 @@ class NinjaBackend(backends.Backend):
           pipeline). check_cpp_modules_fortran_mix reports the C++ modules such
           a target cannot have.
         - a target with no C++ compiler at all.
+        - a target that compiles no C++ source of its own: process_compilers
+          adds a language a target merely *links* (to pick the linker), so a
+          pure-C consumer of a module-providing C++ library carries a cpp
+          compiler and answers uses_cpp_modules() through the link walk, yet has
+          no compile edge to scan and no BMI to consume. Every stage below --
+          scanner selection, dyndeps, the collate, the BMI-class registry and
+          its variants, and header-unit provisioning -- would name outputs
+          nothing produces.
         """
         if not self.ninja_has_dyndeps:
             return False
@@ -1377,7 +1385,7 @@ class NinjaBackend(backends.Backend):
             return False
         if target.uses_fortran():
             return False
-        return 'cpp' in target.compilers
+        return 'cpp' in target.compilers and target.has_cpp_source()
 
     @lru_cache(maxsize=None)
     def cpp_module_scanner_for_target(self, target: build.BuildTargetTypes | build.Target) -> Literal['none', 'regex', 'p1689']:
@@ -1491,21 +1499,6 @@ class NinjaBackend(backends.Backend):
         elem.add_item('name', target.name)
         self.add_build(elem)
 
-    @classmethod
-    def _has_cpp_source(cls, target: build.BuildTarget) -> bool:
-        # Whether the target compiles a C++ source of its own. Not the same
-        # question as 'cpp' in target.compilers: process_compilers also adds a
-        # language a target merely *links* (to pick the linker), so a Fortran
-        # program linking a C++ library carries a cpp compiler and no C++ TU.
-        for src in target.get_sources():
-            if cls.source_scan_language(src) == 'cpp' and not compilers.is_header(src):
-                return True
-        for gen in target.get_generated_sources():
-            for out in gen.get_outputs():
-                if cls.source_scan_language(out) == 'cpp' and not compilers.is_header(out):
-                    return True
-        return False
-
     def check_cpp_modules_fortran_mix(self, target: build.BuildTarget) -> None:
         # A target with Fortran sources is scanned by the Fortran module
         # scanner, and a target gets one scanner: cpp_module_scanner_for_target
@@ -1525,7 +1518,7 @@ class NinjaBackend(backends.Backend):
                 'Fortran one, so its C++ modules would never be compiled as '
                 'modules. Move the C++ module sources into a C++ library and '
                 'link it from this target.')
-        if target.uses_cpp_modules() and self._has_cpp_source(target):
+        if target.uses_cpp_modules() and target.has_cpp_source():
             # It links a module provider and has C++ TUs of its own. Those TUs
             # are not module-enabled, so an `import` in one of them fails at
             # compile time; if none imports anything, the build is fine, so
@@ -1558,8 +1551,11 @@ class NinjaBackend(backends.Backend):
         # parse `export module` / `import`, so its cpp_std is irrelevant: 'cpp'
         # in compilers only means it links a C++ library (process_compilers adds
         # the language to pick the linker). A pure-C program linking a
-        # module-providing C++ library reaches here and must not be blamed.
-        if not self._has_cpp_source(target):
+        # module-providing C++ library reaches here and must not be blamed. This
+        # guard cannot fold into cpp_module_pipeline_applies the way the scanner
+        # check's did: this check runs even when the pipeline does not apply (a
+        # ninja too old for dyndep), so the gate does not screen the case here.
+        if not target.has_cpp_source():
             return
         from ..compilers.cpp import cpp_std_supports_modules
         std = str(self.get_target_option(target, OptionKey(
@@ -1580,19 +1576,15 @@ class NinjaBackend(backends.Backend):
         # The three conditions are the only three there are: the pipeline
         # applies, the target wants modules, and no scanner answered. Asking
         # pipeline-applies first keeps a target the pipeline never covered from
-        # being blamed on a missing tool that is installed and fine.
+        # being blamed on a missing tool that is installed and fine -- including
+        # a pure-C consumer that compiles no C++ source of its own, which the
+        # gate now screens (it has no compile that could consume a BMI, so a
+        # missing scanner cannot hurt it).
         if not self.cpp_module_pipeline_applies(target):
             return
         cpp = target.compilers['cpp']
         if not target.uses_cpp_modules() \
                 or self.cpp_module_scanner_for_target(target) != 'none':
-            return
-        # Same pure-linker case as check_cpp_modules_std: a target that compiles
-        # no C++ source of its own has no compile that could consume a BMI, so a
-        # missing scanner cannot hurt it. 'cpp' in compilers here only means it
-        # links a C++ module provider (process_compilers picks the linker); do
-        # not blame a pure-C consumer for a scanner it never needed.
-        if not self._has_cpp_source(target):
             return
         family = cpp.cpp_module_family()
         if family == 'clang':
@@ -3210,21 +3202,9 @@ class NinjaBackend(backends.Backend):
 
     @staticmethod
     def source_scan_language(src: FileOrString) -> T.Optional[Literal['cpp', 'fortran']]:
-        """The scanning language of a source, or None if it is not scanned.
-
-        The suffix alone decides this, and it is the only thing that does:
-        the C++ compiler also compiles sources with no modules in them (it
-        assembles .s/.S), so a source's compile edge belongs to the module
-        pipeline only if this says 'cpp' -- otherwise nothing scans it and
-        nothing declares its per-TU outputs.
-        """
-        fname = src.fname if isinstance(src, File) else src
-        ext = os.path.splitext(fname)[1][1:]
-        if ext.lower() in compilers.lang_suffixes['cpp'] or ext == 'C':
-            return 'cpp'
-        if ext.lower() in compilers.lang_suffixes['fortran']:
-            return 'fortran'
-        return None
+        """The scanning language of a source, or None if it is not scanned;
+        see compilers.source_scan_language, which owns the suffix inventory."""
+        return compilers.source_scan_language(src)
 
     def select_sources_to_scan(self, compiled_sources: T.List[str],
                                ) -> T.Iterable[T.Tuple[str, Literal['cpp', 'fortran']]]:
