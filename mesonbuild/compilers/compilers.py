@@ -1503,6 +1503,35 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_include_args(self, path: str, is_system: bool) -> T.List[str]:
         return []
 
+    def get_include_dir_flags(self) -> T.Tuple[T.Tuple[str, T.Optional[int]], ...]:
+        """The include-directory flags this compiler accepts, each paired with
+        the search-order rank at which its directories are consulted for a
+        quote-form ``#include`` (lower searched first), or None for a flag whose
+        directories are searched only after the compiler's own standard ones.
+
+        Consumed by the header-unit machinery, which both rewrites these flags'
+        directories (every flag participates) and resolves a spelling to a file
+        by walking the directories in search order (only ranked flags
+        participate: a None-ranked directory sits past the standard search path
+        a command-line walk cannot see, so a hit there is not trustworthy and
+        the resolver must defer to probing the compiler). Spelled in the unix
+        ``-`` form the flags carry before native conversion, which is the form
+        the header-unit args are in at resolution time. Longest spellings first
+        so a prefix match never shadows a longer flag.
+        """
+        if self.get_argument_syntax() == 'msvc':
+            # cl accepts -I directly and unix_args_to_native folds -iquote/
+            # -isystem/-idirafter into /I, all searched in command-line order
+            # ahead of cl's own directories, so every flag resolves and shares
+            # one rank.
+            return (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
+        # GCC/Clang quote-include order: -iquote, then -I, then -isystem (and
+        # the C++-only -cxx-isystem), then the standard directories, then
+        # -idirafter last -- past the standard directories, hence unranked for
+        # resolution.
+        return (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+                ('-iquote', 1), ('-I', 2))
+
     def get_depfile_format(self) -> str:
         return 'msvc' if self.get_argument_syntax() == 'msvc' else 'gcc'
 

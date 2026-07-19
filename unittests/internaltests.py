@@ -918,6 +918,13 @@ class InternalTests(unittest.TestCase):
             # the relevant/irrelevant split is only consulted for an empty
             # provider loop.
             cpp.split_bmi_args.return_value = ([], [])
+            # The backend resolves a unit's identity through the compiler's
+            # include-flag inventory; a real family shape drives the walk.
+            cpp.get_include_dir_flags.return_value = (
+                (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
+                if cid == 'msvc' else
+                (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+                 ('-iquote', 1), ('-I', 2)))
 
             def provision(tid, args):
                 target = mock.MagicMock()
@@ -983,6 +990,13 @@ class InternalTests(unittest.TestCase):
             cpp.get_module_cache_dir.return_value = 'gcm.cache'
             cpp.get_header_unit_consumer_args.return_value = []
             cpp.split_bmi_args.return_value = ([], [])
+            # The backend resolves a unit's identity through the compiler's
+            # include-flag inventory; a real family shape drives the walk.
+            cpp.get_include_dir_flags.return_value = (
+                (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
+                if cid == 'msvc' else
+                (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+                 ('-iquote', 1), ('-I', 2)))
 
             def provision(tid, incdir):
                 target = mock.MagicMock()
@@ -1005,6 +1019,79 @@ class InternalTests(unittest.TestCase):
             self.assertNotEqual(a, b, f'{cid}: two files sharing a spelling shared one BMI')
             self.assertTrue(a.endswith(suffix))
             self.assertTrue(b.endswith(suffix))
+
+    def test_include_dir_flags_inventory(self):
+        # The compiler owns the include-flag inventory the backend consumes.
+        # GCC/Clang rank the quote-include search order (iquote < I < isystem,
+        # and the C++-only cxx-isystem alongside isystem); -idirafter is
+        # unranked, searched past the standard directories where a command-line
+        # walk cannot follow. MSVC folds every spelling into /I, searched in
+        # command-line order, so all share one rank.
+        import types
+        from mesonbuild.compilers.compilers import Compiler
+        fn = Compiler.get_include_dir_flags
+        gcc = fn(types.SimpleNamespace(get_argument_syntax=lambda: 'gcc'))
+        msvc = fn(types.SimpleNamespace(get_argument_syntax=lambda: 'msvc'))
+        self.assertEqual(dict(gcc), {'-cxx-isystem': 3, '-idirafter': None,
+                                     '-isystem': 3, '-iquote': 1, '-I': 2})
+        self.assertEqual(dict(msvc), {'-idirafter': 0, '-isystem': 0,
+                                      '-iquote': 0, '-I': 0})
+
+    def test_include_arg_parsers_consume_inventory(self):
+        # The three include-arg parsers consume the compiler inventory. For -I
+        # and -isystem alone their output is identical to the pre-inventory
+        # hard-coded behavior (regression pin); -iquote/-idirafter/-cxx-isystem
+        # are now recognized for extraction and rewriting too. Resolution walks
+        # GCC's actual search order and skips -idirafter, whose directories are
+        # searched past the standard ones a command-line walk cannot see.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        be._respell_dir = lambda d, class_tag=None, force_all=False: 'R:' + d
+        be._reclass_dir = lambda d, new_tag: 'C:' + d
+        cpp = mock.MagicMock()
+        cpp.get_include_dir_flags.return_value = (
+            ('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+            ('-iquote', 1), ('-I', 2))
+
+        base = ['-IjoinedA', '-I', 'sepA', '-isystem', 'sysSep',
+                '-isystemJoinedS', '-DFOO', '-Wall']
+        self.assertEqual(be._include_dirs_of(cpp, base),
+                         ['joinedA', 'sepA', 'sysSep', 'JoinedS'])
+        self.assertEqual(
+            be._respell_include_args(cpp, list(base), 'tag'),
+            ['-IR:joinedA', '-I', 'R:sepA', '-isystem', 'R:sysSep',
+             '-isystemR:JoinedS', '-DFOO', '-Wall'])
+        self.assertEqual(
+            be._reclass_include_args(cpp, list(base), 'tag'),
+            ['-IC:joinedA', '-I', 'C:sepA', '-isystem', 'C:sysSep',
+             '-isystemC:JoinedS', '-DFOO', '-Wall'])
+
+        new = ['-iquoteQ', '-idirafter', 'DA', '-cxx-isystem', 'CX']
+        self.assertEqual(be._include_dirs_of(cpp, new), ['Q', 'DA', 'CX'])
+        self.assertEqual(
+            be._respell_include_args(cpp, list(new), 'tag'),
+            ['-iquoteR:Q', '-idirafter', 'R:DA', '-cxx-isystem', 'R:CX'])
+        self.assertEqual(
+            be._reclass_include_args(cpp, list(new), 'tag'),
+            ['-iquoteC:Q', '-idirafter', 'C:DA', '-cxx-isystem', 'C:CX'])
+
+        with tempfile.TemporaryDirectory() as d:
+            for sub in ('inc', 'q', 'da'):
+                os.makedirs(os.path.join(d, sub))
+                with open(os.path.join(d, sub, 'h.h'), 'w', encoding='utf-8') as f:
+                    f.write('#pragma once\n')
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = d
+            # -I precedes -iquote on the command line, but GCC searches -iquote
+            # first, so the resolved key is the iquote path, not the -I one.
+            self.assertEqual(
+                be._header_unit_mapper_key(cpp, ['-Iinc', '-iquoteq'], 'h.h'),
+                os.path.join('q', 'h.h'))
+            # A file only under an -idirafter directory is left unresolved
+            # (None) -- deferred to the compiler probe rather than trusting a
+            # hit a standard directory could shadow unseen.
+            self.assertIsNone(
+                be._header_unit_mapper_key(cpp, ['-idirafterda'], 'h.h'))
 
     def test_cpp_header_units_rejected_on_unsupported_compiler(self):
         # Declaring cpp_header_units on a compiler without header-unit support
