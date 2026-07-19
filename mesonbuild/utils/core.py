@@ -186,8 +186,7 @@ def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     'gcm.cache/usr/include/c++/16/vector.gcm'. A Windows drive letter's colon
     is mangled to a hyphen the same way ('.' and '..' components are, since a
     literal colon there would read as an NTFS alternate-data-stream separator):
-    'C:/Users/x/vector' -> 'gcm.cache/C-/Users/x/vector.gcm' (confirmed against
-    real GCC's own "compiled module file is ..." diagnostic on WinLibs 16).
+    'C:/Users/x/vector' -> 'gcm.cache/C-/Users/x/vector.gcm'.
 
     Backslashes are kept verbatim: GCC does not split the name on them or
     collapse a '.'/'..' fused to the rest by one, it just writes them into the

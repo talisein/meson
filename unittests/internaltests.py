@@ -1820,8 +1820,7 @@ Thread model: posix'''), '21.9.0')
         # GCC's default header-unit CMI naming under the cache root: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path
         # is appended as-is under the cache root. A Windows drive letter's
-        # colon is mangled the same way, to a hyphen -- confirmed against real
-        # GCC's own "compiled module file is ..." diagnostic on WinLibs 16.
+        # colon is mangled the same way, to a hyphen.
         from mesonbuild.utils.core import default_cmi_path
         cases = {
             './util.h': 'gcm.cache/,/util.h.gcm',
