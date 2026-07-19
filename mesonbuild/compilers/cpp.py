@@ -51,13 +51,14 @@ else:
 # C++20 and newer as the base c++NN names (both the draft alias c++2a and the
 # final c++20). Modules need C++20, so this is also the module-capable set;
 # keeping it as the source ALL_STDS is built from means a future standard is one
-# edit, here. The gnu++/vc++ spellings are handled by prefix-stripping below,
-# not listed, so those variants (incl. vc++23) need no separate upkeep.
+# edit, here. Prefix-stripping (cpp_std_supports_modules) covers the gnu++/vc++
+# spellings for the MODULE check only -- ALL_STDS membership is what option
+# validation asserts against, so every advertised vc++ spelling must be listed.
 CPP20_PLUS_STDS = ['c++2a', 'c++2b', 'c++2c', 'c++20', 'c++23', 'c++26']
 ALL_STDS = ['c++98', 'c++0x', 'c++03', 'c++1y', 'c++1z', 'c++11', 'c++14', 'c++17']
 ALL_STDS += CPP20_PLUS_STDS
 ALL_STDS += [f'gnu{std[1:]}' for std in ALL_STDS]
-ALL_STDS += ['vc++11', 'vc++14', 'vc++17', 'vc++20', 'vc++latest', 'c++latest']
+ALL_STDS += ['vc++11', 'vc++14', 'vc++17', 'vc++20', 'vc++23', 'vc++latest', 'c++latest']
 
 # Just the standard token (the part after the c++/gnu++/vc++ prefix) of each
 # module-capable std, plus 'latest'. cpp_std_supports_modules compares this
