@@ -1705,7 +1705,7 @@ class NinjaBackend(backends.Backend):
                 self._header_unit_class_subdir_for(target.for_machine, compiler,
                                                    self._bmi_class_key_of(target))
             if tag is not None and self._header_unit_aliasing_available():
-                commands = self._reclass_include_args(list(commands), tag)
+                commands = self._reclass_include_args(compiler, list(commands), tag)
                 rel_src = self._reclass_path(rel_src, tag)
                 if self._declares_system_header_unit(target.cpp_header_units):
                     # A system unit (import <h>;) is named through the built-in
@@ -2545,26 +2545,56 @@ class NinjaBackend(backends.Backend):
         alias = self._respell_dir(head, class_tag, force_all)
         return None if alias is None else os.path.join(alias, tail)
 
-    def _respell_include_args(self, args: T.List[str],
-                              class_tag: T.Optional[str] = None,
-                              force_all: bool = False) -> T.List[str]:
-        out: T.List[str] = []
+    @staticmethod
+    def _iter_include_args(inventory: T.Sequence[T.Tuple[str, T.Optional[int]]],
+                           args: T.Iterable[str]
+                           ) -> T.Iterator[T.Tuple[str, str, T.Optional[str], T.Optional[int], bool]]:
+        """Classify each token of a compile command against `inventory`
+        ((flag, rank) pairs, longest first). Yields ('pass', arg, None, None,
+        False) for a token that is not an include flag, or ('inc', flag, dir,
+        rank, joined) for an include flag and its directory, in both the joined
+        ('-Idir') and separated ('-I', 'dir') spellings. A trailing separated
+        flag with no following token yields dir None, dropped by every consumer.
+        """
         it = iter(args)
         for arg in it:
-            for flag in ('-I', '-isystem'):
+            for flag, rank in inventory:
                 if arg == flag:
-                    out.append(arg)
-                    nxt = next(it, None)
-                    if nxt is not None:
-                        out.append(self._respell_dir(nxt, class_tag, force_all) or nxt)
+                    yield 'inc', flag, next(it, None), rank, False
                     break
                 if arg.startswith(flag):
-                    d = arg[len(flag):]
-                    out.append(flag + (self._respell_dir(d, class_tag, force_all) or d))
+                    yield 'inc', flag, arg[len(flag):], rank, True
                     break
             else:
-                out.append(arg)
+                yield 'pass', arg, None, None, False
+
+    @staticmethod
+    def _map_include_args(inventory: T.Sequence[T.Tuple[str, T.Optional[int]]],
+                          args: T.Iterable[str],
+                          transform: T.Callable[[str], str]) -> T.List[str]:
+        """A compile command with every include directory rewritten through
+        `transform`, each flag's joined-or-separated spelling preserved and
+        every non-include token passed through untouched.
+        """
+        out: T.List[str] = []
+        for kind, flag, d, _rank, joined in NinjaBackend._iter_include_args(inventory, args):
+            if kind == 'pass':
+                out.append(flag)
+            elif joined:
+                assert d is not None, 'a joined include flag always carries a directory'
+                out.append(flag + transform(d))
+            else:
+                out.append(flag)
+                if d is not None:
+                    out.append(transform(d))
         return out
+
+    def _respell_include_args(self, compiler: Compiler, args: T.List[str],
+                              class_tag: T.Optional[str] = None,
+                              force_all: bool = False) -> T.List[str]:
+        return self._map_include_args(
+            compiler.get_include_dir_flags(), args,
+            lambda d: self._respell_dir(d, class_tag, force_all) or d)
 
     def _reclass_dir(self, d: str, new_tag: T.Optional[str]) -> str:
         """A build-relative directory respelled through the alias root of
@@ -2600,23 +2630,11 @@ class NinjaBackend(backends.Backend):
             return p
         return os.path.join(self._reclass_dir(head, new_tag), tail)
 
-    def _reclass_include_args(self, args: T.List[str], new_tag: T.Optional[str]) -> T.List[str]:
-        out: T.List[str] = []
-        it = iter(args)
-        for arg in it:
-            for flag in ('-I', '-isystem'):
-                if arg == flag:
-                    out.append(arg)
-                    nxt = next(it, None)
-                    if nxt is not None:
-                        out.append(self._reclass_dir(nxt, new_tag))
-                    break
-                if arg.startswith(flag):
-                    out.append(flag + self._reclass_dir(arg[len(flag):], new_tag))
-                    break
-            else:
-                out.append(arg)
-        return out
+    def _reclass_include_args(self, compiler: Compiler, args: T.List[str],
+                              new_tag: T.Optional[str]) -> T.List[str]:
+        return self._map_include_args(
+            compiler.get_include_dir_flags(), args,
+            lambda d: self._reclass_dir(d, new_tag))
 
     def _header_unit_aliasing_available(self) -> bool:
         """Whether this build tree can make the directory links a per-class GCC
@@ -2674,23 +2692,13 @@ class NinjaBackend(backends.Backend):
                 and bool(target.cpp_header_units)
                 and self.target_uses_p1689_cpp_modules(target))
 
-    @staticmethod
-    def _include_dirs_of(args: T.Iterable[str]) -> T.List[str]:
-        # The include search path of a compile command, in order, in both the
-        # joined ('-Idir') and separated ('-I', 'dir') spellings.
-        dirs: T.List[str] = []
-        it = iter(args)
-        for arg in it:
-            for flag in ('-I', '-isystem'):
-                if arg == flag:
-                    nxt = next(it, None)
-                    if nxt is not None:
-                        dirs.append(nxt)
-                    break
-                if arg.startswith(flag):
-                    dirs.append(arg[len(flag):])
-                    break
-        return dirs
+    def _include_dirs_of(self, compiler: Compiler,
+                         args: T.Iterable[str]) -> T.List[str]:
+        # The include search path of a compile command, in command-line order,
+        # every include flag the compiler accepts (see get_include_dir_flags).
+        return [d for kind, _flag, d, _rank, _joined
+                in self._iter_include_args(compiler.get_include_dir_flags(), args)
+                if kind == 'inc' and d is not None]
 
     @staticmethod
     def _without_forced_includes(args: T.Iterable[str]) -> T.List[str]:
@@ -2721,19 +2729,31 @@ class NinjaBackend(backends.Backend):
                 out.append(arg)
         return out
 
-    def _header_unit_mapper_key(self, args: T.Union['CompilerArgs', T.List[str]],
+    def _header_unit_mapper_key(self, compiler: Compiler,
+                                args: T.Union['CompilerArgs', T.List[str]],
                                 spelling: str) -> T.Optional[str]:
         """The path a GCC module mapper would have to name a header unit by:
         the header as resolved on the include path, which is what an importer
         looks the unit up as. None when the spelling resolves nowhere on this
         target's -I path -- a system header out of the compiler's own search
         path, whose location we would have to probe the compiler to learn.
+
+        Directories are walked in the compiler's actual search order, not
+        command-line order, so a first hit is the file the compiler would open:
+        an -iquote entry precedes an -I entry regardless of how they were
+        spelled. A directory searched only after the compiler's standard ones
+        (-idirafter) is skipped -- a hit there could be shadowed by a standard
+        directory this walk cannot see, so it is left to the probe fallback.
         """
         if any(c.isspace() for c in spelling):
             # A File-spelled unit already carries its path.
             return spelling
         build_dir = self.environment.get_build_dir()
-        for d in self._include_dirs_of(args):
+        ranked = [(rank, d) for kind, _flag, d, rank, _joined
+                  in self._iter_include_args(compiler.get_include_dir_flags(), args)
+                  if kind == 'inc' and d is not None and rank is not None]
+        ranked.sort(key=lambda rd: rd[0])
+        for _rank, d in ranked:
             if os.path.isfile(os.path.join(build_dir, d, spelling)):
                 return os.path.join(d, spelling)
         return None
@@ -2750,7 +2770,7 @@ class NinjaBackend(backends.Backend):
         found: '..' is not collapsed, so a header reached two ways has two names.
         None when the header resolves nowhere.
         """
-        key = self._header_unit_mapper_key(args, spelling) if mode == 'user' else None
+        key = self._header_unit_mapper_key(compiler, args, spelling) if mode == 'user' else None
         if key is None:
             # Off the -I path: a system header, or a quote-form spelling falling
             # through to the compiler's own search path.
@@ -2857,7 +2877,7 @@ class NinjaBackend(backends.Backend):
         build_dir = self.environment.get_build_dir()
         def real(d: str) -> str:
             return os.path.normcase(os.path.realpath(os.path.join(build_dir, d)))
-        user = {real(d) for d in self._include_dirs_of(arglist)}
+        user = {real(d) for d in self._include_dirs_of(compiler, arglist)}
         chain: T.List[str] = []
         seen: T.Set[str] = set()
         for d in block:
@@ -5239,8 +5259,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # alike but resolving to different files are different units. The
             # identity is the resolved real path, or the spelling itself for a
             # unit with none -- a system unit, or a user one off the -I path.
-            ident = self._header_unit_identity(args, mode, spelling)
-            canon = self._canonical_header_unit(args, mode, spelling, ident)
+            ident = self._header_unit_identity(compiler, args, mode, spelling)
+            canon = self._canonical_header_unit(compiler, args, mode, spelling, ident)
             base = f'{mode}:{ident if ident is not None else canon}'
             if is_gcc and mode == 'user' and class_subdir is not None \
                     and self._header_unit_aliasing_available():
@@ -5252,7 +5272,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # the CMI to that scan-named path. On a non-spaced tree the two
                 # spellings differ and the CMI records the real path; on a spaced
                 # tree both are the space-free alias and coincide.
-                scan_args = self._reclass_include_args(list(args), class_subdir) + chain_args
+                scan_args = self._reclass_include_args(compiler, list(args), class_subdir) + chain_args
                 scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
                 compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
                 if scan_name is None or compile_name is None:
@@ -5300,7 +5320,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # the alias root, so the CMI path it mangles to is colon-free
                 # even on Windows; default_cmi_path keeps the drive-letter mangling
                 # for the degraded path alone.
-                scan_args = self._reclass_include_args(list(args), class_subdir) + chain_args
+                scan_args = self._reclass_include_args(compiler, list(args), class_subdir) + chain_args
                 scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
                 compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
                 if scan_name is not None and compile_name is not None \
@@ -5440,7 +5460,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         elem.add_orderdep(self._header_unit_generated_deps(owner, spelling))
         self.add_build(elem)
 
-    def _canonical_header_unit(self, args: T.Union['CompilerArgs', T.List[str]],
+    def _canonical_header_unit(self, compiler: Compiler,
+                               args: T.Union['CompilerArgs', T.List[str]],
                                mode: str, spelling: str,
                                ident: T.Optional[str] = None) -> str:
         """The spelling that builds the BMI for whatever file `spelling` names.
@@ -5454,12 +5475,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         otherwise; the header is realpath'd once either way.
         """
         if ident is None:
-            ident = self._header_unit_identity(args, mode, spelling)
+            ident = self._header_unit_identity(compiler, args, mode, spelling)
         if ident is None:
             return spelling
         return self._header_unit_group.setdefault((mode, ident), spelling)
 
-    def _header_unit_identity(self, args: T.Union['CompilerArgs', T.List[str]],
+    def _header_unit_identity(self, compiler: Compiler,
+                              args: T.Union['CompilerArgs', T.List[str]],
                               mode: str, spelling: str) -> T.Optional[str]:
         """Which file a declared header unit names, for grouping its spellings.
 
@@ -5474,7 +5496,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         """
         if mode != 'user':
             return None
-        key = self._header_unit_mapper_key(args, spelling)
+        key = self._header_unit_mapper_key(compiler, args, spelling)
         if key is None:
             return None
         return os.path.realpath(os.path.join(self.environment.get_build_dir(), key))
@@ -5928,7 +5950,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             class_key = compiler.get_bmi_class_key(
                 list(target.get_single_compile_base_args(compiler)) + list(commands))
             tag = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
-            return self._respell_include_args(list(commands), tag)
+            return self._respell_include_args(compiler, list(commands), tag)
         return list(commands)
 
     # Returns a dictionary, mapping from each compiler src type (e.g. 'c', 'cpp', etc.) to a list of compiler arg strings
