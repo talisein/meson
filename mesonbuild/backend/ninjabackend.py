@@ -1823,11 +1823,9 @@ class NinjaBackend(backends.Backend):
             self.warn_on_clang_modules_ccache(cpp)
 
         ddis: T.List[str] = []
-        mappers: T.List[str] = []
         for src, lang in self.select_sources_to_scan(compiled_sources):
             if lang == 'cpp':
                 ddis.append(self.get_ddi_file_for(source2object[src]))
-                mappers.append(source2object[src] + '.mapper')
 
         dep_provmaps: T.List[str] = []
         dep_private_maps: T.List[T.Tuple[str, str, str]] = []
@@ -1847,27 +1845,49 @@ class NinjaBackend(backends.Backend):
         dyndep_file = self.get_dep_scan_file_for(target)[1]
         provmap_file = self.get_provided_modules_file_for(target)
         private_map_file = self.get_private_modules_file_for(target)
-        elem = NinjaBuildElement(self.all_outputs, [dyndep_file, provmap_file, private_map_file],
-                                 'cpp_module_collate', sorted(ddis))
+        # A target's own public provides are always named in the shared class
+        # cache (BMIDIR): a private provide is redirected to --private-bmi-dir
+        # in DEPARGS instead (_module_collate_depargs), never here.
+        self._add_module_collate_edge(
+            cpp, [dyndep_file, provmap_file, private_map_file], ddis,
+            dyndep_file, provmap_file, self._module_shared_bmi_dir_for(target),
+            self._module_collate_depargs(target, cpp, dep_provmaps, dep_private_maps),
+            target.name, dep_provmaps, dep_private_maps)
+
+    def _add_module_collate_edge(self, cpp: Compiler, outputs: T.List[str],
+                                 ddis: T.List[str], dyndep: str, provmap: str,
+                                 bmidir: str, depargs: T.List[str], name: str,
+                                 dep_provmaps: T.List[str],
+                                 dep_private_maps: T.List[T.Tuple[str, str, str]],
+                                 extra_deps: T.Sequence[str] = ()) -> None:
+        """One cpp_module_collate edge, in the shape a target's own collate and
+        a BMI-only variant's share. The caller passes the outputs, the resolved
+        dyndep/provmap/bmidir and the finished DEPARGS; `extra_deps` names any
+        input beyond the dependency maps (a variant depends on its provider's
+        own private-modules.json, which a target instead *produces*).
+        """
+        family = cpp.cpp_module_family()
+        elem = NinjaBuildElement(self.all_outputs, outputs, 'cpp_module_collate', sorted(ddis))
         if family == 'gcc':
-            # The per-TU module mappers the compile edges rebuild on. They
-            # are written copy-if-different, so restat keeps an unchanged
-            # mapper from recompiling its TU when a sibling module changes.
-            elem.implicit_outfilenames.extend(sorted(mappers))
+            # The per-TU module mappers the compile edges rebuild on, named off
+            # each scan (get_ddi_file_for appends '.ddi'). They are written
+            # copy-if-different, so restat keeps an unchanged mapper from
+            # recompiling its TU when a sibling module changes.
+            elem.implicit_outfilenames.extend(
+                d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
             elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
         if dep_private_maps:
             elem.add_dep([p for p, _, _ in dep_private_maps])
-        elem.add_item('DYNDEP', dyndep_file)
-        elem.add_item('PROVMAP', provmap_file)
-        # A target's own public provides are always named in the shared class
-        # cache: a private provide is redirected to --private-bmi-dir in
-        # DEPARGS below instead (_module_collate_depargs), never here.
-        elem.add_item('BMIDIR', self._module_shared_bmi_dir_for(target))
+        for d in extra_deps:
+            elem.add_dep(d)
+        elem.add_item('DYNDEP', dyndep)
+        elem.add_item('PROVMAP', provmap)
+        elem.add_item('BMIDIR', bmidir)
         elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
-        elem.add_item('DEPARGS', self._module_collate_depargs(target, cpp, dep_provmaps, dep_private_maps))
-        elem.add_item('name', target.name)
+        elem.add_item('DEPARGS', depargs)
+        elem.add_item('name', name)
         self.add_build(elem)
 
     def _module_collate_depargs(self, target: build.BuildTarget, cpp: Compiler,
@@ -1909,11 +1929,11 @@ class NinjaBackend(backends.Backend):
         a compiler-agnostic privacy key the way --interface-source (a
         genuinely Clang-only concern) does.
         """
-        depargs: T.List[str] = ['--private-map', self.get_private_modules_file_for(target),
-                                self.private_map_display_for(target)]
+        head: T.List[str] = ['--private-map', self.get_private_modules_file_for(target),
+                             self.private_map_display_for(target)]
         private_dir = self._module_private_bmi_dir_for(target)
         if private_dir is not None:
-            depargs += ['--private-bmi-dir', private_dir]
+            head += ['--private-bmi-dir', private_dir]
             if target.all_cpp_modules_private():
                 # Nothing can link this target, so every module it provides is
                 # private by construction: no per-source list is needed, or
@@ -1923,33 +1943,74 @@ class NinjaBackend(backends.Backend):
                 # cpp_private_module_interfaces) takes the branch below
                 # instead -- privatizing its public provides too would name
                 # their BMIs in the private dir no compile writes them to.
-                depargs += ['--all-provides-private']
+                head += ['--all-provides-private']
             else:
                 for p in sorted(self._private_module_interface_objs(target)):
-                    depargs += ['--private-interface-object', p]
-        for path, tid, display in dep_private_maps:
-            depargs += ['--dep-private-map', path, tid, display]
-        for pm in dep_provmaps:
-            depargs += ['--dep-provmap', pm]
+                    head += ['--private-interface-object', p]
         family = cpp.cpp_module_family()
-        if family == 'clang':
-            depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
+        # Only Clang harvests a target's own BMIs into the shared cache; the
+        # interface-extension check the harvest stamp gates on runs in lockstep,
+        # so the declared extension-less interfaces are named only then.
+        harvests = family == 'clang'
+        interface_sources: T.List[str] = []
+        if harvests:
             # Declared interfaces, internal partitions and private interfaces
             # are all compiled as interface units (Clang emits a BMI only for
             # those), so pass all three as source paths the collator's
             # interface check accepts.
-            for p in sorted(self._module_interface_paths(target)
-                            | self._internal_partition_paths(target)
-                            | self._private_module_interface_paths(target)):
-                depargs += ['--interface-source', p]
+            interface_sources = sorted(self._module_interface_paths(target)
+                                       | self._internal_partition_paths(target)
+                                       | self._private_module_interface_paths(target))
+        header_unit_bmis: T.List[T.Tuple[str, str]] = []
         if family == 'gcc':
-            depargs += ['--mapper-suffix', '.mapper']
-            depargs += ['--default-cmi-root', cpp.get_module_cache_dir()]
             self.provision_header_units(target, cpp)
-            depargs += self._header_unit_bmi_args(
-                cpp, self._target_header_unit_bmis.get(target.get_id(), []))
+            header_unit_bmis = self._target_header_unit_bmis.get(target.get_id(), [])
+        return self._collate_depargs(
+            cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
+            harvests=harvests, interface_sources=interface_sources,
+            header_unit_bmis=header_unit_bmis, header_units=target.cpp_header_units)
+
+    def _collate_depargs(self, cpp: Compiler, head: T.List[str], *,
+                         dep_provmaps: T.List[str],
+                         dep_private_maps: T.List[T.Tuple[str, str, str]],
+                         harvests: bool, interface_sources: T.List[str],
+                         header_unit_bmis: T.List[T.Tuple[str, str]],
+                         header_units: T.List[str]) -> T.List[str]:
+        """Assemble the collator flags shared by a target's own collate and a
+        BMI-only variant's. Only the `head` genuinely differs between the two
+        (--private-map plus a target's private-provide flags, vs a variant's
+        --own-private-map); everything past it is one sequence. `harvests` gates
+        the harvest stamp (a target harvests only on Clang, a variant always),
+        and `interface_sources` is the set named for the extension check that
+        stamp turns on -- empty when nothing harvests, so it is left unguarded.
+        """
+        depargs = list(head)
+        for path, tid, display in dep_private_maps:
+            depargs += ['--dep-private-map', path, tid, display]
+        for pm in dep_provmaps:
+            depargs += ['--dep-provmap', pm]
+        if harvests:
+            depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
+        family = cpp.cpp_module_family()
+        if family == 'gcc':
+            # A GCC collate writes the per-TU module mappers (--mapper-suffix,
+            # in lockstep with the compile edges' get_module_mapper_args paths)
+            # its BMI lookups go through. A mapper disables GCC's default
+            # module->CMI naming outright, so it must also name every header
+            # unit the TU imports: the one the compile computes a name for that
+            # differs from the scan's, paired outright (--header-unit-bmi), and
+            # the scan-reported names by reproducing the default naming under
+            # the shared cache (--default-cmi-root).
+            depargs += ['--mapper-suffix', '.mapper',
+                        '--default-cmi-root', cpp.get_module_cache_dir()]
+            depargs += self._header_unit_bmi_args(cpp, header_unit_bmis)
+        for p in interface_sources:
+            depargs += ['--interface-source', p]
         if family == 'msvc':
-            for hu in target.cpp_header_units:
+            # cl reports header-unit requires from a cold scan, so the declared
+            # units are passed for the collator to flag an import of one never
+            # declared (GCC cannot, so it is omitted there).
+            for hu in header_units:
                 mode, spelling = self._parse_header_unit(hu, self.build_to_src)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
         return depargs
@@ -2131,45 +2192,21 @@ class NinjaBackend(backends.Backend):
         # generate(), which always declares this file as an output, empty
         # JSON list or not.
         own_private_map = self.get_private_modules_file_for(provider)
-        elem = NinjaBuildElement(self.all_outputs, [variant.dyndep, variant.provmap],
-                                 'cpp_module_collate', sorted(ddis))
-        if family == 'gcc':
-            # As on a target collate: the variant compiles rebuild on these.
-            elem.implicit_outfilenames.extend(
-                d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
-            elem.add_item('restat', '1')
-        if dep_provmaps:
-            elem.add_dep(dep_provmaps)
-        if dep_private_maps:
-            elem.add_dep([p for p, _, _ in dep_private_maps])
-        elem.add_dep(own_private_map)
-        elem.add_item('DYNDEP', variant.dyndep)
-        elem.add_item('PROVMAP', variant.provmap)
-        elem.add_item('BMIDIR', cpp.get_module_cache_dir(info.subdir))
-        elem.add_item('BMISUFFIX', cpp.get_module_bmi_suffix())
-        depargs: T.List[str] = ['--own-private-map', own_private_map,
-                                self.private_map_display_for(provider)]
-        for path, tid, display in dep_private_maps:
-            depargs += ['--dep-private-map', path, tid, display]
-        for pm in dep_provmaps:
-            depargs += ['--dep-provmap', pm]
-        depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
-        if family == 'gcc':
-            depargs += ['--mapper-suffix', '.mapper',
-                        '--default-cmi-root', cpp.get_module_cache_dir()]
-            depargs += self._header_unit_bmi_args(cpp, hu_bmis)
-        for rec in recs:
-            depargs += ['--interface-source', os.path.normpath(rec.rel_src)]
-        if family == 'msvc':
-            # The provider's declared units, as in _module_collate_depargs:
-            # cl reports header-unit requires from the variant's scans too,
-            # and the collator checks them against the declared set.
-            for hu in provider.cpp_header_units:
-                mode, spelling = self._parse_header_unit(hu, self.build_to_src)
-                depargs += ['--header-unit', f'{mode}:{spelling}']
-        elem.add_item('DEPARGS', depargs)
-        elem.add_item('name', vid)
-        self.add_build(elem)
+        # A variant's BMIs always reach the shared cache through harvest edges,
+        # on every compiler, so it always stamps and always names its recompiled
+        # interfaces (unlike a target collate, which does so only on Clang).
+        head = ['--own-private-map', own_private_map,
+                self.private_map_display_for(provider)]
+        depargs = self._collate_depargs(
+            cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
+            harvests=True,
+            interface_sources=[os.path.normpath(rec.rel_src) for rec in recs],
+            header_unit_bmis=hu_bmis, header_units=provider.cpp_header_units)
+        self._add_module_collate_edge(
+            cpp, [variant.dyndep, variant.provmap], ddis,
+            variant.dyndep, variant.provmap, cpp.get_module_cache_dir(info.subdir),
+            depargs, vid, dep_provmaps, dep_private_maps,
+            extra_deps=[own_private_map])
         self._uses_dyndeps = True
         return variant
 

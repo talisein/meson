@@ -234,6 +234,74 @@ class InternalTests(unittest.TestCase):
         for cls, family in cases.items():
             self.assertEqual(cls.__new__(cls).cpp_module_family(), family, cls.__name__)
 
+    def test_collate_depargs_shared_assembly(self):
+        # A target's own collate and a BMI-only variant's collate both build
+        # their depaccumulate flags through _collate_depargs; only the head
+        # (--private-map vs --own-private-map) legitimately differs. Pin the
+        # exact per-family tail so a flag added for one site cannot silently
+        # drop from the other, and pin that the head is head-independent.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.build_to_src = '..'
+        cpp = mock.MagicMock()
+        cpp.get_module_bmi_suffix.return_value = '.gcm'
+        cpp.get_module_cache_dir.return_value = 'gcm.cache'
+
+        def depargs(family, head, *, harvests, interface_sources, header_units):
+            cpp.cpp_module_family.return_value = family
+            return be._collate_depargs(
+                cpp, head, dep_provmaps=['dep/pm.json'],
+                dep_private_maps=[('dep/priv.json', 'id0', 'disp0')],
+                harvests=harvests, interface_sources=interface_sources,
+                # A pair whose BMI is not its name's default path always emits.
+                header_unit_bmis=[('ustd', 'gcm.cache/z.gcm')],
+                header_units=header_units)
+
+        deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
+                '--dep-provmap', 'dep/pm.json']
+        # GCC target: no harvest stamp, the mapper/CMI flags, no interface list.
+        self.assertEqual(
+            depargs('gcc', ['--private-map', 'p.json', 'd'],
+                    harvests=False, interface_sources=[], header_units=[]),
+            ['--private-map', 'p.json', 'd'] + deps
+            + ['--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache',
+               '--header-unit-bmi', 'ustd', 'gcm.cache/z.gcm'])
+        # GCC variant: always harvests, so the mapper block *and* the recompiled
+        # interfaces, the interface list coming after the mapper block.
+        self.assertEqual(
+            depargs('gcc', ['--own-private-map', 'p.json', 'd'],
+                    harvests=True, interface_sources=['x.cc'], header_units=[]),
+            ['--own-private-map', 'p.json', 'd'] + deps
+            + ['--stamp-suffix', '.gcm.stamp',
+               '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache',
+               '--header-unit-bmi', 'ustd', 'gcm.cache/z.gcm',
+               '--interface-source', 'x.cc'])
+        # Clang: stamp plus the interface list, no mapper block.
+        self.assertEqual(
+            depargs('clang', ['--private-map', 'p.json', 'd'],
+                    harvests=True, interface_sources=['x.cc'], header_units=[]),
+            ['--private-map', 'p.json', 'd'] + deps
+            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc'])
+        # MSVC: the declared header units close the sequence. A non-empty list
+        # exercises the --header-unit branch (build_to_src drives the parse);
+        # header_units=[] on every case above pins it as a no-op there.
+        self.assertEqual(
+            depargs('msvc', ['--own-private-map', 'p.json', 'd'],
+                    harvests=True, interface_sources=['x.cc'],
+                    header_units=['<vec.h>', 'util.h']),
+            ['--own-private-map', 'p.json', 'd'] + deps
+            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc',
+               '--header-unit', 'system:vec.h', '--header-unit', 'user:util.h'])
+        # The head is the only per-site difference: identical kwargs under the
+        # two heads must agree on everything past it.
+        for family in ('gcc', 'clang', 'msvc'):
+            kw = dict(harvests=(family != 'gcc'),
+                      interface_sources=[] if family == 'gcc' else ['x.cc'],
+                      header_units=[])
+            tgt = depargs(family, ['--private-map', 'p.json', 'd'], **kw)
+            var = depargs(family, ['--own-private-map', 'p.json', 'd'], **kw)
+            self.assertEqual(tgt[3:], var[3:], family)
+
     def _module_scanner_mock(self, family, *, uses_modules=True, version='19.40',
                              p1689=False, cpp_modules_args=None, extra_args=None):
         # A NinjaBackend and a mocked C++ target wired for the scanner-selection
