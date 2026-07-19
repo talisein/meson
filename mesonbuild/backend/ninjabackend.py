@@ -5280,14 +5280,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 if scan_name is None or compile_name is None:
                     continue
                 key = f'{base}:{class_subdir}'
-                output = self._header_units.get(key)
-                if output is None:
-                    output = default_cmi_path(scan_name, cache_dir, suffix)
-                    mapper = self._class_header_unit_path(key, canon, '.mapper')
-                    self._write_header_unit_mapper(mapper, compile_name, output)
-                    self._add_header_unit_edge(output, rulename, args, canon, mode,
-                                               mapper, owner, is_msvc, is_gcc)
-                    self._header_units[key] = output
+                output = self._get_or_create_header_unit_edge(
+                    key, default_cmi_path(scan_name, cache_dir, suffix),
+                    compile_name, rulename, args, canon, mode, owner,
+                    is_msvc, is_gcc)
                 outputs.append(output)
                 # The pair carries the compile-computed name; the collate joins
                 # every name of this BMI into each importer's mapper, so a scan
@@ -5328,14 +5324,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 if scan_name is not None and compile_name is not None \
                         and scan_name != compile_name:
                     key = f'{base}:{class_subdir}'
-                    output = self._header_units.get(key)
-                    if output is None:
-                        output = default_cmi_path(scan_name, cache_dir, suffix)
-                        mapper = self._class_header_unit_path(key, canon, '.mapper')
-                        self._write_header_unit_mapper(mapper, compile_name, output)
-                        self._add_header_unit_edge(output, rulename, args, canon, mode,
-                                                   mapper, owner, is_msvc, is_gcc)
-                        self._header_units[key] = output
+                    output = self._get_or_create_header_unit_edge(
+                        key, default_cmi_path(scan_name, cache_dir, suffix),
+                        compile_name, rulename, args, canon, mode, owner,
+                        is_msvc, is_gcc)
                     outputs.append(output)
                     # The pair carries the compile-computed (real chain) name;
                     # the collate joins every name of this BMI into each
@@ -5388,23 +5380,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 flat = not mappable or class_key == owner_key
                 if flat:
                     key = base
-            output = self._header_units.get(key)
-            if output is None:
-                mapper: T.Optional[str] = None
-                if is_gcc and flat:
-                    assert name is not None, 'a unit GCC cannot name is skipped above'
-                    output = default_cmi_path(name, cache_dir, suffix)
-                else:
-                    output = self._class_header_unit_path(key, canon, suffix)
-                if mappable:
-                    # Under meson-private even when the BMI is not: written at
-                    # setup and never rebuilt, so it must not sit in a cache
-                    # directory the compiler owns and a user may clear.
-                    mapper = self._class_header_unit_path(key, canon, '.mapper')
-                    self._write_header_unit_mapper(mapper, name, output)
-                self._add_header_unit_edge(output, rulename, args, canon, mode,
-                                           mapper, owner, is_msvc, is_gcc)
-                self._header_units[key] = output
+            if is_gcc and flat:
+                assert name is not None, 'a unit GCC cannot name is skipped above'
+                output_path = default_cmi_path(name, cache_dir, suffix)
+            else:
+                output_path = self._class_header_unit_path(key, canon, suffix)
+            output = self._get_or_create_header_unit_edge(
+                key, output_path, name if mappable else None,
+                rulename, args, canon, mode, owner, is_msvc, is_gcc)
             outputs.append(output)
             if is_gcc:
                 # This target's scans read the unit at the default-named path
@@ -5431,6 +5414,33 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 seen_consumer_args.append(cargs)
                 consumer_args += cargs
         return outputs, consumer_args, bmis
+
+    def _get_or_create_header_unit_edge(self, key: str, output: str,
+                                        mapper_name: T.Optional[str],
+                                        rulename: str,
+                                        args: T.Union['CompilerArgs', T.List[str]],
+                                        canon: str, mode: str,
+                                        owner: T.Optional[build.BuildTarget],
+                                        is_msvc: bool, is_gcc: bool) -> str:
+        """This key's unit BMI, building its edge once. The first caller for a
+        key fixes the BMI at `output` and, when `mapper_name` is set, writes the
+        per-unit mapper that binds that name to it -- the key GCC resolves the
+        unit through. The mapper lives under meson-private even when the BMI does
+        not: written at setup and never rebuilt, it must not sit in a cache
+        directory the compiler owns and a user may clear. A naming that needs no
+        mapper passes None. Later callers for the key reuse the fixed BMI.
+        """
+        existing = self._header_units.get(key)
+        if existing is not None:
+            return existing
+        mapper: T.Optional[str] = None
+        if mapper_name is not None:
+            mapper = self._class_header_unit_path(key, canon, '.mapper')
+            self._write_header_unit_mapper(mapper, mapper_name, output)
+        self._add_header_unit_edge(output, rulename, args, canon, mode,
+                                   mapper, owner, is_msvc, is_gcc)
+        self._header_units[key] = output
+        return output
 
     def _add_header_unit_edge(self, output: str, rulename: str,
                               args: T.Union['CompilerArgs', T.List[str]],
