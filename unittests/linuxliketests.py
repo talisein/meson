@@ -33,7 +33,7 @@ from mesonbuild.compilers import (
     detect_c_compiler, detect_cpp_compiler, compiler_from_language,
 )
 from mesonbuild.compilers.c import AppleClangCCompiler, ElbrusCompiler
-from mesonbuild.compilers.cpp import AppleClangCPPCompiler
+from mesonbuild.compilers.cpp import AppleClangCPPCompiler, CPPCompiler
 from mesonbuild.compilers.objc import AppleClangObjCCompiler
 from mesonbuild.compilers.objcpp import AppleClangObjCPPCompiler
 from mesonbuild.dependencies.pkgconfig import PkgConfigDependency, PkgConfigCLI, PkgConfigInterface
@@ -48,7 +48,8 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .cppmodules import CppModulesTestMixin, regex_scanner_flag, requires_cpp_module_caps
+from .cppmodules import (CppModulesTestMixin, regex_scanner_flag,
+                         require_cpp_module_caps, requires_cpp_module_caps)
 from .helpers import *
 
 def _prepend_pkg_config_path(path: str) -> str:
@@ -1978,6 +1979,69 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                           compat_progs=('prog26',),
                                           compat_in_all_classes=True)
         self.check_gcc_module_mappers()
+
+    def _require_divergent_libcxx_std(self) -> CPPCompiler:
+        """Skip unless libc++'s std module is available and distinct from the
+        platform-default standard library, so two dependency('std') calls --
+        one default, one -stdlib=libc++ -- probe genuinely different standard
+        libraries. Uses the production probe directly (there is no libc++
+        capability token)."""
+        cpp = require_cpp_module_caps(self, 'modules', 'import_std', 'bmi_classes',
+                                      compiler='clang')
+        default_std = cpp.get_std_module_sources()
+        libcxx_std = cpp.get_std_module_sources(('-stdlib=libc++',))
+        if not libcxx_std or libcxx_std == default_std:
+            raise SkipTest("libc++'s std module is unavailable or matches the "
+                           'default standard library')
+        return cpp
+
+    def test_clang_import_std_divergent_stdlib(self):
+        # Two dependency('std') calls selecting different standard libraries in
+        # one build (a parent on the default stdlib, a subproject on libc++),
+        # each in its own executable never linked with the other. This is a
+        # legitimate mix -- the standard libraries never meet in a link -- and
+        # each gets its own synthesized std library from its own manifest: the
+        # first-probed (parent, libstdc++) keeps the bare name, the divergent
+        # one (subproject, libc++) gets a digest suffix. Both build and run.
+        self._require_divergent_libcxx_std()
+        testdir = os.path.join(self.unit_test_dir, '207 clang import std divergent stdlib')
+        self.init(testdir)
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        std_targets = sorted(t['name'] for t in self.introspect('--targets')
+                             if t['name'].startswith('__meson_cxx_std'))
+        self.assertEqual(len(std_targets), 2,
+                         f'expected two std libraries, got {std_targets}')
+        self.assertIn('__meson_cxx_std', std_targets,
+                      'the first-probed stdlib must keep the bare name')
+        digest_named = [t for t in std_targets if t != '__meson_cxx_std']
+        self.assertEqual(len(digest_named), 1)
+        self.assertTrue(digest_named[0].startswith('__meson_cxx_std_'),
+                        'the divergent stdlib must take a digest-suffixed name')
+        # Each executable compiles against its own standard library.
+        stdlibs = {}
+        for entry in self.get_compdb():
+            if entry['file'].endswith('main.cpp'):
+                target = 'cxxprog' if 'cxxlib' in entry['file'] else 'prog'
+                stdlibs[target] = '-stdlib=libc++' in entry['command']
+        self.assertEqual(stdlibs, {'prog': False, 'cxxprog': True})
+
+    def test_clang_import_std_stdlib_link_conflict(self):
+        # The impossible case: two standard libraries reaching one link (a
+        # default-stdlib executable that also links a libc++ module library,
+        # each pulling its own std). Meson must not silently miscompile it. The
+        # foreign std cannot be recompiled into the consumer's BMI class -- that
+        # class lacks -stdlib=libc++, so the libc++ interface sources fail to
+        # find their support headers -- so the build fails hard rather than
+        # linking mismatched standard libraries.
+        self._require_divergent_libcxx_std()
+        testdir = os.path.join(self.unit_test_dir, '208 clang import std stdlib link conflict')
+        self.init(testdir)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build(override_envvars=self.NO_CCACHE)
+        # The failing edge is the foreign (digest-named libc++) std library's
+        # BMI variant, tying the failure to the standard-library mix.
+        self.assertIn('__meson_cxx_std_', cm.exception.output)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
     def test_gcc_bmi_class_mapper_incrementality(self):

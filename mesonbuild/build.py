@@ -365,12 +365,19 @@ class Build:
         # build == host compilation the both caches should point to the same place.
         self.stdlibs: PerMachine[T.Dict[str, dependencies.Dependency]] = PerMachineDefaultable.default(
             environment.is_cross_build(), {}, {})
-        # Memoized synthetic dependency('std') result (import std). Stored here,
+        # Memoized synthetic dependency('std') results (import std). Stored here,
         # not on the Interpreter, because every subproject gets its own
-        # Interpreter but shares this Build; std must be synthesized once for the
-        # whole build. Keyed like stdlibs so Build.copy()/merge share it across
-        # subprojects.
-        self.cpp_std_module_deps: PerMachine[T.Dict[str, dependencies.Dependency]] = PerMachineDefaultable.default(
+        # Interpreter but shares this Build; a given standard library must be
+        # synthesized once for the whole build. Keyed like stdlibs (so
+        # Build.copy()/merge share it across subprojects) but by (spelling,
+        # stdlib identity): the identity is the probe result -- the module
+        # sources and the std-only extra args -- so one std library is
+        # synthesized per standard library actually selected. Divergent compile
+        # flags within one stdlib (cpp_std, -D, ...) are handled downstream by
+        # the BMI-class machinery sharing this archive; a different stdlib
+        # (Clang's -stdlib=libc++, a redirected --sysroot/--gcc-toolchain)
+        # probes differently and gets its own archive.
+        self.cpp_std_module_deps: PerMachine[T.Dict[T.Tuple, dependencies.Dependency]] = PerMachineDefaultable.default(
             environment.is_cross_build(), {}, {})
         self.dependency_overrides: PerMachine[T.Dict[T.Tuple, DependencyOverride]] = PerMachineDefaultable.default(
             environment.is_cross_build(), {}, {})

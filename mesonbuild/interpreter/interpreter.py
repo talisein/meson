@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io, sys, traceback
+import hashlib
 import dataclasses
 import functools
 
@@ -2006,10 +2007,21 @@ class Interpreter(InterpreterBase, HoldableObject):
         so 'std' folds in the threads dependency by default: the std module is
         built with the platform's thread flags and every consumer inherits
         them through the InternalDependency, making the flag uniform across
-        std sharers by construction. `dependency('std-nothreads')` opts out.
-        There is a single shared std module per machine, so the two spellings
-        cannot be mixed on one machine (a cross build synthesizes its own std
-        library per machine, each with a distinct target name).
+        std sharers by construction. `dependency('std-nothreads')` opts out;
+        the threads/nothreads spellings still cannot be mixed on one machine,
+        regardless of standard library.
+
+        One std library is synthesized per standard library the build actually
+        selects, keyed on the probe result (module sources + std-only extra
+        args) and memoized on Build. Consumers with divergent compile flags but
+        the same stdlib share one archive, its interface BMIs recompiled per
+        BMI class downstream; a different stdlib (Clang's -stdlib=libc++, a
+        redirected toolchain or sysroot) probes differently and gets its own
+        archive. A single link still cannot mix standard libraries -- a
+        foreign std archive reaching a target fails that target's build (its
+        interfaces cannot be recompiled into a BMI class configured for the
+        other stdlib), never silently links. A cross build synthesizes its
+        own std library per machine.
 
         'std' is reserved, but as for any reserved dependency name an explicit
         meson.override_dependency('std', ...) takes precedence over synthesis.
@@ -2030,20 +2042,20 @@ class Interpreter(InterpreterBase, HoldableObject):
         if override is not None:
             return override.dep
 
-        other = self.build.cpp_std_module_deps[for_machine].get(
-            'std-nothreads' if threads else 'std')
-        if other is not None and other.found():
+        # The threads/nothreads spellings share one machine regardless of
+        # stdlib: an entry of the other spelling under any stdlib identity
+        # blocks this one. Keys are (spelling, stdlib-identity) tuples.
+        if any(key[0] == ('std-nothreads' if threads else 'std') and dep.found()
+               for key, dep in self.build.cpp_std_module_deps[for_machine].items()):
             raise InterpreterException(
                 "dependency('std') and dependency('std-nothreads') cannot be mixed "
                 'on one machine: there is a single shared std module per machine, '
                 'built either with thread support (the default) or without. Use one '
                 'spelling everywhere on a machine.')
 
-        cached = self.build.cpp_std_module_deps[for_machine].get(name)
-        if cached is not None and (cached.found() or not required):
-            return cached
-
         cpp = self.compilers[for_machine].get('cpp')
+        probe_args: T.Tuple[str, ...] = ()
+        std_extra_args: T.List[str] = []
         if cpp is not None:
             # Compilers that serve more than one standard library (Clang)
             # probe which one these compiles will use, so hand them the same
@@ -2056,8 +2068,26 @@ class Interpreter(InterpreterBase, HoldableObject):
                 + tuple(self.build.global_args[for_machine].get('cpp', [])) \
                 + tuple(self.current_build_project().project_args[for_machine].get('cpp', []))
             sources = cpp.get_std_module_sources(probe_args)
+            # Std-only extra flags (Clang: -Wno-reserved-module-identifier and
+            # libc++'s support-header include dirs from the manifest). Part of
+            # the stdlib identity: two probes selecting different support dirs
+            # produce different archives. Empty when no std sources exist.
+            std_extra_args = cpp.get_std_module_extra_args(probe_args)
         else:
             sources = {}
+
+        # The stdlib identity: same probe result => shareable archive. Different
+        # standard library (or a redirected toolchain) probes different sources
+        # and support dirs, so it keys and synthesizes separately. The probe
+        # itself is cached at the compiler level (Clang lru_cache per args, GCC
+        # lazy_property, MSVC one env read), so running it before this memo
+        # lookup on every call is cheap.
+        stdlib_key = (tuple(sorted(sources.values())), tuple(std_extra_args))
+        memo_key = (name, stdlib_key)
+        cached = self.build.cpp_std_module_deps[for_machine].get(memo_key)
+        if cached is not None and (cached.found() or not required):
+            return cached
+
         if not sources:
             if required:
                 raise InterpreterException(
@@ -2067,7 +2097,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                     'module manifest and a P1689-capable clang-scan-deps).')
             mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
             dep = dependencies.NotFoundDependency(name, self.environment)
-            self.build.cpp_std_module_deps[for_machine][name] = dep
+            self.build.cpp_std_module_deps[for_machine][memo_key] = dep
             return dep
 
         if self.backend.name != 'ninja':
@@ -2098,18 +2128,32 @@ class Interpreter(InterpreterBase, HoldableObject):
                 T.cast('dependencies.base.DependencyObjectKWs',
                        {'native': for_machine, 'required': True}))
             libkwargs['dependencies'] = [threads_dep]
-        # Some compilers need extra flags on the std interface compiles only
-        # (Clang: -Wno-reserved-module-identifier, and libc++'s
-        # support-header include dirs from the manifest).
-        std_extra_args = cpp.get_std_module_extra_args(probe_args)
+        # The std-only extra flags (computed above as part of the stdlib
+        # identity) go on the std interface compiles.
         if std_extra_args:
             libkwargs['cpp_args'] = std_extra_args
         # The internal name mirrors CMake's __cmake_cxx_std_* convention: the
         # archive (lib__meson_cxx_std.a) is obviously synthesized, and cannot
         # collide with a user target named 'std'. Each machine synthesizes its
-        # own std library, so the build-machine variant takes a distinct name --
-        # a cross build would otherwise collide two targets on __meson_cxx_std.
-        libname = '__meson_cxx_std' if for_machine is not MachineChoice.BUILD else '__meson_cxx_std_build'
+        # own std library, so the build-machine variant takes a distinct base
+        # name -- a cross build would otherwise collide two targets on
+        # __meson_cxx_std.
+        base = '__meson_cxx_std' if for_machine is not MachineChoice.BUILD else '__meson_cxx_std_build'
+        # One archive per standard library. The first stdlib synthesized on a
+        # machine keeps the bare name; a second, divergent stdlib (Clang
+        # -stdlib=libc++, a redirected toolchain) gets a digest suffix so the
+        # two archives cannot collide on one target name. "First" is read off
+        # the memo itself -- shared via Build.copy()/merge, so it has the same
+        # lifetime as the synthesized deps -- where a prior found() entry means
+        # this machine already has one. Subproject evaluation order is
+        # deterministic, so which stdlib wins the bare name is stable across
+        # reconfigures.
+        if any(d.found() for d in self.build.cpp_std_module_deps[for_machine].values()):
+            digest = hashlib.sha256(
+                '\x00'.join([*stdlib_key[0], '\x00', *stdlib_key[1]]).encode()).hexdigest()[:8]
+            libname = f'{base}_{digest}'
+        else:
+            libname = base
         std_lib = self.func_static_lib(node, [libname, *srcs], libkwargs)
         # Mark it a module provider directly, rather than via the cpp_modules
         # keyword, so this internal target does not raise a spurious FeatureNew
@@ -2123,7 +2167,7 @@ class Interpreter(InterpreterBase, HoldableObject):
             self.project_version, libraries=[std_lib],
             ext_deps=[threads_dep] if threads_dep is not None else None,
             name=name)
-        self.build.cpp_std_module_deps[for_machine][name] = dep
+        self.build.cpp_std_module_deps[for_machine][memo_key] = dep
         return dep
 
     @FeatureNew('disabler', '0.44.0')
