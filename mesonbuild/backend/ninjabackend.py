@@ -5488,7 +5488,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         """
         elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
         elem.add_item('ARGS', args)
-        elem.add_item('SPELLING', spelling)
+        # GCC names the unit from the -c spelling verbatim and looks its BMI up
+        # by that name; the per-unit mapper this edge wires in is keyed on the
+        # forward-normalized name, as every backend-side key is. So the spelling
+        # fed to -c must be forward-slashed too, or GCC queries the mapper by a
+        # backslashed name (an absolute 'C:\\...' declared unit) it never holds.
+        # A no-op where the spelling is already forward-slashed.
+        elem.add_item('SPELLING', spelling.replace('\\', '/') if is_gcc else spelling)
         if is_msvc:
             elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
         else:
