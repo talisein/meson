@@ -2452,12 +2452,15 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         # The unit edges' declared outputs are the real BMIs (no stamps), at
-        # exactly the single-class paths -- the digest hashes '<mode>:<spelling>'
-        # alone; a class component may only appear once a build has divergent
-        # BMI classes.
+        # exactly the single-class paths -- the digest hashes the dedup key:
+        # '<mode>:<resolved real path>' for a user unit the include walk can
+        # resolve, '<mode>:<spelling>' for a system unit (no identity); a class
+        # component may only appear once a build has divergent BMI classes.
         hudir = os.path.join(self.builddir, 'meson-private', 'header-units')
         pcms = {p for p in os.listdir(hudir) if not p.endswith('.d')}
-        self.assertEqual(pcms, {f'util.h.{hashlib.sha1(b"user:util.h").hexdigest()[:16]}.pcm',
+        util_ident = os.path.realpath(os.path.join(
+            self.unit_test_dir, '158 clang header units', 'util.h'))
+        self.assertEqual(pcms, {f'util.h.{hashlib.sha1(f"user:{util_ident}".encode()).hexdigest()[:16]}.pcm',
                                 f'angleutil.h.{hashlib.sha1(b"system:angleutil.h").hexdigest()[:16]}.pcm'})
         # Clang has no header-unit directory lookup, so each consumer (and its
         # scan) names the unit BMIs with -fmodule-file=<pcm> -- the one waived
