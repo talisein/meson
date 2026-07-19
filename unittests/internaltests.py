@@ -1127,6 +1127,70 @@ class InternalTests(unittest.TestCase):
         with self.assertRaises(InvalidArguments):
             check('gcc', False, has_cpp=False)  # no C++ compiler at all
 
+    def test_cpp_std_dependency_not_required_on_non_ninja_backend(self):
+        # Synthesizing import std needs the Ninja backend. A required probe must
+        # fail configuration on vs2022/xcode; a not-required probe must degrade
+        # to not-found (and memoize it) rather than hard-error -- MSVC ships
+        # modules.json, so the sources probe succeeds and the backend check is
+        # what a graceful optional probe hits there.
+        from mesonbuild.interpreter.interpreter import Interpreter
+        from mesonbuild.interpreterbase import InterpreterException
+
+        for_machine = MachineChoice.HOST
+
+        def make_interp(backend_name):
+            interp = Interpreter.__new__(Interpreter)
+            interp.subproject = ''
+            interp.environment = mock.MagicMock()
+            interp.project_version = '1'
+            cpp = mock.MagicMock()
+            cpp.get_std_module_sources.return_value = {'std': '/std.cc'}
+            cpp.get_std_module_extra_args.return_value = []
+            interp.compilers = {for_machine: {'cpp': cpp}}
+            interp.coredata = mock.MagicMock()
+            interp.coredata.get_external_args.return_value = []
+            interp.build = mock.MagicMock()
+            interp.build.dependency_overrides = {for_machine: {}}
+            interp.build.cpp_std_module_deps = {for_machine: {}}
+            interp.build.global_args = {for_machine: {}}
+            interp.current_build_project = mock.MagicMock(
+                return_value=mock.MagicMock(project_args={for_machine: {}}))
+            interp.backend = mock.MagicMock()
+            interp.backend.name = backend_name
+            return interp
+
+        def call(interp, required):
+            kwargs = {'native': for_machine, 'required': required}
+            return interp._cpp_std_module_dependency(mock.MagicMock(), kwargs, threads=False)
+
+        # (a) required: false + non-ninja + sources found -> not-found, memoized.
+        interp = make_interp('vs2022')
+        dep = call(interp, False)
+        self.assertFalse(dep.found())
+        memo = interp.build.cpp_std_module_deps[for_machine]
+        self.assertEqual(list(memo.values()), [dep])
+        # A second identical call re-probes (the memo key is derived from the
+        # probe result; the compiler-level caches make that cheap) and returns
+        # the very same memoized object.
+        dep2 = call(interp, False)
+        self.assertIs(dep2, dep)
+        self.assertEqual(
+            interp.compilers[for_machine]['cpp'].get_std_module_sources.call_count, 2)
+
+        # (b) required: true (the default) + non-ninja -> the backend raise.
+        interp = make_interp('vs2022')
+        with self.assertRaises(InterpreterException) as cm:
+            interp._cpp_std_module_dependency(
+                mock.MagicMock(), {'native': for_machine}, threads=False)
+        self.assertIn('Ninja backend', str(cm.exception))
+
+        # (c) ninja backend: the backend check does not fire; synthesis proceeds
+        # (func_static_lib stubbed) and a found() dependency comes back.
+        interp = make_interp('ninja')
+        interp.func_static_lib = mock.MagicMock(return_value=mock.MagicMock())
+        dep = call(interp, False)
+        self.assertTrue(dep.found())
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the

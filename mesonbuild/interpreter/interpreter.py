@@ -2100,10 +2100,19 @@ class Interpreter(InterpreterBase, HoldableObject):
             self.build.cpp_std_module_deps[for_machine][memo_key] = dep
             return dep
 
+        # Synthesizing the std archive only works under Ninja. A required probe
+        # fails configuration there as before; a not-required probe degrades to
+        # not-found (memoized like the sources-unavailable path above) so an
+        # optional import-std probe still configures on vs2022/xcode.
         if self.backend.name != 'ninja':
-            raise InterpreterException(
-                "dependency('std') (C++ import std) is only supported with the "
-                f'Ninja backend (current backend: {self.backend.name}).')
+            if required:
+                raise InterpreterException(
+                    "dependency('std') (C++ import std) is only supported with the "
+                    f'Ninja backend (current backend: {self.backend.name}).')
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+            dep = dependencies.NotFoundDependency(name, self.environment)
+            self.build.cpp_std_module_deps[for_machine][memo_key] = dep
+            return dep
 
         # A single module-providing static library built from the standard
         # library's own interface sources. std must precede std.compat, but that
