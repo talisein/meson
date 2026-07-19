@@ -845,8 +845,17 @@ def run_p1689(argv: T.List[str]) -> int:
                         # that BMI joins in, so the reported name and the one the
                         # compile computes both resolve.
                         name = req['logical-name']
-                        bmi = class_units.get(name) or default_cmi_path(
-                            name, args.default_cmi_root, args.bmi_suffix)
+                        # The scan may report the name with Windows separators
+                        # (an absolute 'C:\\...' import spells its own
+                        # backslashes; -I-derived names are forward-slashed at
+                        # the compile edge). class_units keys and the default
+                        # CMI path are forward-normalized, so key the BMI lookup
+                        # by the forward form. The importer computes its query
+                        # name from its own source spelling, though, so the
+                        # mapper line it reads keeps the reported name.
+                        key = name.replace('\\', '/')
+                        bmi = class_units.get(key) or default_cmi_path(
+                            key, args.default_cmi_root, args.bmi_suffix)
                         for n in dict.fromkeys([name, *bmi_to_names.get(bmi, [])]):
                             maplines.append(f'{n} {bmi}')
                     continue

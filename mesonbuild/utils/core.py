@@ -189,6 +189,14 @@ def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     'C:/Users/x/vector' -> 'gcm.cache/C-/Users/x/vector.gcm' (confirmed against
     real GCC's own "compiled module file is ..." diagnostic on WinLibs 16).
 
+    Backslashes are kept verbatim: GCC does not split the name on them or
+    collapse a '.'/'..' fused to the rest by one, it just writes them into the
+    string (Windows resolves them as separators on disk, GCC does not). Only a
+    leading drive colon is still mangled, even when a backslash fuses the drive
+    to the path: 'C:\\b\\x\\util.h' -> 'gcm.cache/C-\\b\\x\\util.h.gcm', and
+    '.\\util.h' -> 'gcm.cache/.\\util.h.gcm' unchanged. So a backslash-fused
+    component stays one component here.
+
     Scan edges carry no mapper -- one would disable default naming for named
     modules too, whose names only the scan itself supplies -- so a scan reaches a
     unit only here, at the path its own class-embedded name mangles to. The
@@ -198,7 +206,11 @@ def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     why it lives here rather than in either of them.
     """
     parts = logical_name.split('/')
-    if len(parts) > 1 and len(parts[0]) == 2 and parts[0][1] == ':' and parts[0][0].isalpha():
-        parts[0] = parts[0][0] + '-'
+    # Only a leading drive colon is mangled, and only there. Match it on the
+    # first '/'-component's 'X:' prefix even when a backslash fuses the drive
+    # to the rest ('C:\\b\\x' arrives as one component); everything after the
+    # colon, backslashes included, is preserved.
+    if parts and len(parts[0]) >= 2 and parts[0][1] == ':' and parts[0][0].isalpha():
+        parts[0] = parts[0][0] + '-' + parts[0][2:]
     parts = [',' * len(p) if p in ('.', '..') else p for p in parts]
     return f'{cache_dir}/' + '/'.join(p for p in parts if p) + suffix

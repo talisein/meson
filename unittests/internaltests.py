@@ -1829,6 +1829,12 @@ Thread model: posix'''), '21.9.0')
             '../srcx/hdr.h': 'gcm.cache/,,/srcx/hdr.h.gcm',
             '/usr/include/c++/16/vector': 'gcm.cache/usr/include/c++/16/vector.gcm',
             'C:/Users/x/vector': 'gcm.cache/C-/Users/x/vector.gcm',
+            # Backslashes are kept verbatim (GCC does not split on them): a
+            # backslash-fused component stays one component, only a leading
+            # drive colon still mangling. These are GCC's own default paths.
+            '.\\util.h': 'gcm.cache/.\\util.h.gcm',
+            './..\\srcx\\inc/hdr.h': 'gcm.cache/,/..\\srcx\\inc/hdr.h.gcm',
+            'C:\\Users\\x\\vector': 'gcm.cache/C-\\Users\\x\\vector.gcm',
         }
         for name, want in cases.items():
             self.assertEqual(default_cmi_path(name, 'gcm.cache', '.gcm'), want, name)

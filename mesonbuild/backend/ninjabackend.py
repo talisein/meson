@@ -2592,6 +2592,34 @@ class NinjaBackend(backends.Backend):
                     out.append(transform(d))
         return out
 
+    def _gcc_module_forward_slash_includes(self, compiler: Compiler,
+                                            args: T.Union['CompilerArgs', T.List[str]]
+                                            ) -> T.Union['CompilerArgs', T.List[str]]:
+        """`args` with every include-search directory forward-slashed, other
+        tokens untouched -- for a GCC module edge (scan, compile, or header-unit
+        build).
+
+        GCC derives a header unit's logical-name from the -I entry's spelling
+        verbatim: reached through '-I..\\dir' a header is named
+        './..\\dir/hdr.h', through '-I../dir' it is named './../dir/hdr.h'.
+        Every backend-side key for the unit -- the mapper key an importer looks
+        it up by, the default CMI path its BMI is written to -- is
+        forward-normalized. Hand GCC a backslashed include dir and the two sides
+        name one unit two ways, so its BMI is built where neither the scan nor a
+        compile looks (and, reached by a bare filename off '-I..\\dir', GCC even
+        collapses the '..' the scan keeps). Forward-slashing the include dirs
+        keeps every derivation on one name.
+
+        Returns `args` unchanged when no include dir holds a backslash (any
+        non-Windows host, so those build files stay byte-identical).
+        """
+        inv = compiler.get_include_dir_flags()
+        if not any(d and '\\' in d
+                   for _kind, _flag, d, _rank, _joined
+                   in self._iter_include_args(inv, args)):
+            return args
+        return self._map_include_args(inv, args, lambda d: d.replace('\\', '/'))
+
     def _respell_include_args(self, compiler: Compiler, args: T.List[str],
                               class_tag: T.Optional[str] = None,
                               force_all: bool = False) -> T.List[str]:
@@ -5076,6 +5104,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
+            if family == 'gcc':
+                # The unit's own build reaches the header off these -I dirs and
+                # GCC names it from their spelling, which the mapper key and
+                # default CMI path must match: forward-slash them (a no-op off
+                # Windows). Include dirs are BMI-irrelevant, so the class key is
+                # unchanged.
+                args = self._gcc_module_forward_slash_includes(compiler, args)
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
             if family == 'gcc':
@@ -6228,6 +6263,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         header_deps += istd_dep
         if extra_args is not None:
             commands.extend(extra_args)
+
+        if is_module_edge and compiler.cpp_module_family() == 'gcc':
+            # The scan and compile below share `commands`; a GCC module edge
+            # must see forward-slashed include dirs so the header-unit names it
+            # derives from them match the backend's forward-normalized keys.
+            commands = self._gcc_module_forward_slash_includes(compiler, commands)
 
         element = NinjaBuildElement(self.all_outputs, rel_obj, compiler_name, rel_src)
         self.add_header_deps(target, element, header_deps)
