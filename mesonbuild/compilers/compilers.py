@@ -1711,7 +1711,9 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
-                                private_output: bool = False) -> T.List[str]:
+                                private_output: bool = False,
+                                *, emit_output: bool = True,
+                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.
 
         ``class_subdir`` selects a per-BMI-equivalence-class subdirectory of
@@ -1727,8 +1729,21 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         meaningful when ``private_dir`` is set, says whether *this specific
         compile*, if it produces a BMI, writes it to ``private_dir`` rather
         than the shared cache -- the mixed public/private case a library can
-        have that a wholly-private executable cannot. Returns [] for
-        compilers/targets that do not use the module pipeline.
+        have that a wholly-private executable cannot.
+
+        ``emit_output``, when False, drops the directory-addressed BMI output
+        destination a family bakes into this flag set (only MSVC has one:
+        /ifcOutput <dir>/). A BMI-variant compile names its own explicit-file
+        output in the build rule, so it asks for the args without that pair;
+        families that carry no output destination here (GCC steers by module
+        mapper, Clang writes next to the object via a compile-site
+        -fmodule-output) ignore it. ``existing_args`` is the command the caller
+        has assembled so far: a family that appends a ccache-defeating flag
+        pair (Clang's -fmodules -fno-modules) omits it when the caller already
+        passed -fmodules of their own, so that flag stays in force and is not
+        cancelled by the trailing -fno-modules; families with no such pair
+        ignore it. Returns [] for compilers/targets that do not use the module
+        pipeline.
         """
         return []
 

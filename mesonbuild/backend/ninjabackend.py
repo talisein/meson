@@ -2118,17 +2118,14 @@ class NinjaBackend(backends.Backend):
             cpp, provider, args.copy(), class_key,
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
             vid, None)
-        modargs = cpp.get_module_compile_args(info.subdir)
-        if family == 'clang' and '-fmodules' in args:
-            # Same shape as the compile-edge dance in generate_single_compile.
-            modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
-        if family == 'msvc':
-            # The variant rule names its own explicit-file /ifcOutput; drop
-            # the directory pair, keep /ifcSearchDir for the class cache
-            # lookup (the variant's own imports resolve there).
-            i = modargs.index('/ifcOutput')
-            del modargs[i:i + 2]
-        args += modargs
+        # The variant rule names its own explicit-file BMI output, so it asks
+        # the compiler for module args without the directory-addressed output
+        # pair (emit_output=False); the class cache stays searchable for the
+        # variant's own imports. existing_args lets the compiler drop a
+        # ccache-defeat pair the caller already carries (Clang), the same fold
+        # as the compile edge in generate_single_compile.
+        args += cpp.get_module_compile_args(info.subdir, emit_output=False,
+                                            existing_args=args)
         args += hu_args
 
         self.generate_bmi_variant_compile_rule(cpp)
@@ -6124,16 +6121,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
             private_output = private_dir is not None and self._is_private_module_source(target, src)
+            # existing_args=commands lets the compiler drop its ccache-defeat
+            # pair when the user already turned on implicit Clang modules
+            # themselves (via cpp_args, add_project_arguments, ...; all those
+            # channels are in `commands` by now): the pair's trailing
+            # -fno-modules would silently cancel their flag, and their own
+            # -fmodules already makes ccache stand aside.
             modargs = compiler.get_module_compile_args(
-                self._bmi_class_subdir_for(target), private_dir, private_output)
+                self._bmi_class_subdir_for(target), private_dir, private_output,
+                existing_args=commands)
             module_family = compiler.cpp_module_family()
-            if module_family == 'clang' and '-fmodules' in commands:
-                # The user turned on implicit Clang modules themselves (via
-                # cpp_args, add_project_arguments, ...; all those channels are
-                # in `commands` by now). Drop the ccache-defeating pair: its
-                # trailing -fno-modules would silently cancel their flag, and
-                # their -fmodules already makes ccache stand aside.
-                modargs = [a for a in modargs if a not in {'-fmodules', '-fno-modules'}]
             commands += modargs
             # cl and clang need each module-interface unit flagged explicitly
             # (GCC infers it from the source). Detected by extension as

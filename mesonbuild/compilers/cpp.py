@@ -478,7 +478,9 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
-                                private_output: bool = False) -> T.List[str]:
+                                private_output: bool = False,
+                                *, emit_output: bool = True,
+                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
         # Imports resolve by name lookup in the shared cache (the target's
         # class subdir of it, when BMI classes are in play). Producers write
         # their BMI next to the object (-fmodule-output, added per interface
@@ -489,11 +491,12 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # own, is searched first: a private import resolves there, never in
         # the shared cache. The shared class cache is still listed, since the
         # target may also import its dependencies' public modules, or (for a
-        # library) have public modules of its own. private_output is unused
-        # here: unlike MSVC's directory-addressed /ifcOutput, Clang's own BMI
-        # never has a compile-time output directory to steer -- the harvest
-        # edge decides per-source, private or shared, where a Clang interface's
-        # BMI is published (see the backend's Clang harvest call site).
+        # library) have public modules of its own. private_output and
+        # emit_output are both unused here: unlike MSVC's directory-addressed
+        # /ifcOutput, Clang's own BMI never has a compile-time output directory
+        # to steer -- the harvest edge decides per-source, private or shared,
+        # where a Clang interface's BMI is published (see the backend's Clang
+        # harvest call site).
         #
         # -fmodules -fno-modules exists to defeat ccache. ccache does not
         # track the contents of BMIs (they never appear in preprocessed
@@ -504,12 +507,16 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # effect; this pair buys Clang the same refusal. The pair is a no-op
         # to Clang itself: the driver cancels it before cc1. Do not pass
         # -fmodules alone -- that enables the unrelated implicit
-        # Clang-header-modules feature. The backend drops the pair when the
-        # user passed -fmodules themselves: their flag must stay in effect,
-        # and it keeps ccache away on its own.
+        # Clang-header-modules feature. Omitted when the caller already passed
+        # -fmodules (existing_args): their flag must stay in effect, not be
+        # cancelled by the trailing -fno-modules, and it keeps ccache away on
+        # its own.
         paths = [private_dir] if private_dir is not None else []
         paths.append(self.get_module_cache_dir(class_subdir))
-        return [f'-fprebuilt-module-path={p}' for p in paths] + ['-fmodules', '-fno-modules']
+        args = [f'-fprebuilt-module-path={p}' for p in paths]
+        if '-fmodules' not in existing_args:
+            args += ['-fmodules', '-fno-modules']
+        return args
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # After xmake's speculative Clang strip list. Defines are deliberately
@@ -845,22 +852,25 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
-                                private_output: bool = False) -> T.List[str]:
+                                private_output: bool = False,
+                                *, emit_output: bool = True,
+                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
         # The modules flag enables named modules. -Mno-modules stops GCC from
         # writing its make-style module dependency rules (phony
         # '<name>.c++-module' targets and an order-only
         # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
         # gcc-deps parser cannot handle that shape, and module ordering is
-        # carried by the dyndep instead. BMI generation is unaffected.
-        # class_subdir/private_dir/private_output are all unused: GCC carries
-        # no cache dir on the command line. Every BMI a compile resolves, in
-        # any class or a target-private directory, is named by the per-TU
-        # module mapper instead (get_module_mapper_args), whose contents the
-        # collator resolves (--private-bmi-dir/--private-interface-object at the
-        # collator, in lockstep with this target's own privacy), which the
+        # carried by the dyndep instead. BMI generation is unaffected. Every
+        # arg here is unused: GCC carries no cache dir on the command line, so
+        # there is no output pair to drop for emit_output; every BMI a compile
+        # resolves, in any class or a target-private directory, is named by the
+        # per-TU module mapper instead (get_module_mapper_args), whose contents
+        # the collator resolves (--private-bmi-dir/--private-interface-object at
+        # the collator, in lockstep with this target's own privacy), which the
         # backend adds to compile edges only -- a scan resolves no named
         # modules, and header units stay in the default-named cache the
-        # mapper-less scan already finds.
+        # mapper-less scan already finds. GCC has no ccache-defeat pair to
+        # suppress either, so existing_args is unused.
         return [self._named_modules_flag(), '-Mno-modules']
 
     def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
@@ -1360,7 +1370,9 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
-                                private_output: bool = False) -> T.List[str]:
+                                private_output: bool = False,
+                                *, emit_output: bool = True,
+                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
         # Read and write BMIs by directory, shared by every compile. /interface
         # is per interface-unit and is added at the compile site, not here. The
         # trailing slash marks /ifcOutput as a directory; a forward slash avoids
@@ -1376,6 +1388,11 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # one) is written to. A wholly-private executable (Stage 7) always
         # passes private_output=True for its own compiles; a library mixing
         # public and private interfaces passes it per source.
+        #
+        # emit_output=False omits the /ifcOutput pair entirely: a BMI-variant
+        # compile supplies its own explicit-file /ifcOutput in the build rule
+        # and only needs the /ifcSearchDir entries to resolve its imports.
+        # existing_args is unused: cl has no ccache-defeat flag pair to drop.
         cache = self.get_module_cache_dir(class_subdir)
         if private_dir is not None:
             out = private_dir if private_output else cache
@@ -1383,7 +1400,8 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         else:
             out = cache
             args = ['/ifcSearchDir', out]
-        args += ['/ifcOutput', f'{out}/']
+        if emit_output:
+            args += ['/ifcOutput', f'{out}/']
         return args
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
