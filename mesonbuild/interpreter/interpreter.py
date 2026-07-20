@@ -4492,21 +4492,25 @@ class Interpreter(InterpreterBase, HoldableObject):
         self.project_args_frozen = True
         return target
 
+    def _require_cpp_p1689_capability(self, name: str, target: build.BuildTarget,
+                                      kwarg: str, feature: str) -> None:
+        cpp = target.compilers.get('cpp')
+        if cpp is None or cpp.cpp_module_family() == 'none' \
+                or not cpp.supports_cpp_modules_p1689():
+            got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
+            raise InvalidArguments(
+                f'Target {name!r} declares {kwarg}, which requires a '
+                f'C++ compiler with {feature} in the P1689 module '
+                f'pipeline (GCC >= 14, MSVC >= 19.32, or Clang with a '
+                f'P1689-capable clang-scan-deps); got {got}.')
+
     def _check_cpp_header_units_supported(self, name: str, target: build.BuildTarget) -> None:
         # cpp_header_units is only acted on by the P1689 pipeline (GCC, MSVC,
         # and Clang backends all build header units); on any other compiler
         # the declaration would be silently dropped (no BMI).
         if not target.cpp_header_units:
             return
-        cpp = target.compilers.get('cpp')
-        if cpp is None or cpp.cpp_module_family() == 'none' \
-                or not cpp.supports_cpp_modules_p1689():
-            got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
-            raise InvalidArguments(
-                f'Target {name!r} declares cpp_header_units, which requires a '
-                f'C++ compiler with header-unit support in the P1689 module '
-                f'pipeline (GCC >= 14, MSVC >= 19.32, or Clang with a '
-                f'P1689-capable clang-scan-deps); got {got}.')
+        self._require_cpp_p1689_capability(name, target, 'cpp_header_units', 'header-unit support')
 
     @staticmethod
     def _is_cpp_module_source(fname: str) -> bool:
@@ -4693,14 +4697,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # kwargs, a silently-dropped privacy declaration is a correctness
         # footgun, not a portability inconvenience -- the module would be
         # published and globally claimed exactly as if it were public.
-        cpp = target.compilers.get('cpp')
-        if cpp is None or cpp.cpp_module_family() == 'none' \
-                or not cpp.supports_cpp_modules_p1689():
-            got = f'{cpp.get_id()} {cpp.version}' if cpp else 'no C++ compiler'
-            raise InvalidArguments(
-                f'Target {name!r} declares cpp_private_module_interfaces, which requires a '
-                f'C++ compiler with module support in the P1689 pipeline (GCC >= 14, MSVC, '
-                f'or Clang with a P1689-capable clang-scan-deps); got {got}.')
+        self._require_cpp_p1689_capability(name, target, 'cpp_private_module_interfaces', 'module support')
 
     def add_stdlib_info(self, target: build.BuildTarget) -> None:
         for l in target.compilers.keys():
