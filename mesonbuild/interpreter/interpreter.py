@@ -2194,6 +2194,25 @@ class Interpreter(InterpreterBase, HoldableObject):
                     'module manifest and a P1689-capable clang-scan-deps).')
             return not_found()
 
+        # A manifest that exists but names a std-library source that does not
+        # is a mispackaged standard library (seen where a distro's libc++
+        # manifest resolves its source-path to a directory the real .cppm files
+        # were not shipped under). Trusting it would synthesize build edges
+        # pointing at nonexistent .cppm and fail deep in the backend with a
+        # cryptic 'missing and no known rule to make it'; fail here instead, at
+        # configure time, naming the file so the packaging bug is obvious. A
+        # required probe raises; an optional one degrades like any other
+        # unavailable stdlib (and is memoized by not_found()).
+        missing = sorted(p for p in sources.values() if not os.path.exists(p))
+        if missing:
+            if required:
+                manifest = cpp.get_std_module_manifest(probe_args) if cpp is not None else ''
+                in_manifest = f" declared in manifest '{manifest}'" if manifest else ''
+                raise InterpreterException(
+                    f"C++ standard library module source '{missing[0]}'{in_manifest} "
+                    'does not exist; the standard library may be mispackaged.')
+            return not_found()
+
         # Synthesizing the std archive only works under Ninja. A genvslite
         # (gen_lite) vs backend compiles through per-buildtype Ninja build
         # dirs, so it has the pipeline and is treated as Ninja here (mirrors

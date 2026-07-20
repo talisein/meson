@@ -47,7 +47,7 @@ from mesonbuild.interpreterbase import (
 from mesonbuild.mesonlib import (
     FileMode, LibType, MachineChoice, PerMachine, SimpleABC, Version, is_windows, is_osx,
     is_cygwin, is_openbsd, search_version, MesonException, EnvironmentException, python_command,
-    version_check_to_range,
+    version_check_to_range, windows_proof_rmtree,
 )
 from mesonbuild.options import OptionKey, UserBooleanOption
 from mesonbuild.interpreter.type_checking import (
@@ -1565,6 +1565,14 @@ Thread model: posix'''), '21.9.0')
         from mesonbuild.interpreterbase import InterpreterException
 
         for_machine = MachineChoice.HOST
+        # The std sources the probe reports must exist on disk (the interpreter
+        # rejects a mispackaged stdlib whose manifest names a missing source),
+        # so point the mock at a real file rather than a synthetic path.
+        tdir = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, tdir)
+        std_src = os.path.join(tdir, 'std.cc')
+        with open(std_src, 'w', encoding='utf-8') as f:
+            f.write('')
 
         def make_interp(backend_name, gen_lite=False):
             interp = Interpreter.__new__(Interpreter)
@@ -1572,7 +1580,7 @@ Thread model: posix'''), '21.9.0')
             interp.environment = mock.MagicMock()
             interp.project_version = '1'
             cpp = mock.MagicMock()
-            cpp.get_std_module_sources.return_value = {'std': '/std.cc'}
+            cpp.get_std_module_sources.return_value = {'std': std_src}
             cpp.get_std_module_extra_args.return_value = []
             interp.compilers = {for_machine: {'cpp': cpp}}
             interp.coredata = mock.MagicMock()
@@ -1634,6 +1642,120 @@ Thread model: posix'''), '21.9.0')
         interp.func_static_lib = mock.MagicMock(return_value=mock.MagicMock())
         dep = call(interp, False)
         self.assertTrue(dep.found())
+
+    def test_parse_std_module_manifest(self):
+        # The shared *.modules.json parser resolves each is-std-library entry's
+        # source-path relative to the manifest and reports the absolute paths
+        # verbatim -- it does NOT drop entries whose file is missing (existence
+        # is validated separately, where required-vs-optional is known). A
+        # well-formed manifest whose source exists yields the sources dict
+        # unchanged; a mispackaged one still reports its (nonexistent) path so
+        # the caller can name it in a diagnostic.
+        from mesonbuild.compilers.cpp import _parse_std_module_manifest
+
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 'std.cppm')
+            with open(src, 'w', encoding='utf-8') as f:
+                f.write('')
+            manifest = os.path.join(d, 'libc++.modules.json')
+            data = {'modules': [
+                {'logical-name': 'std', 'source-path': 'std.cppm',
+                 'is-std-library': True},
+                # A non-std-library entry is ignored entirely.
+                {'logical-name': 'other', 'source-path': 'other.cppm'},
+            ]}
+            with open(manifest, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            sources, incdirs = _parse_std_module_manifest(manifest)
+            self.assertEqual(sources, {'std': src})
+            self.assertEqual(incdirs, [])
+
+            # A source-path pointing outside the shipped tree resolves to a
+            # path that does not exist; the parser reports it as-is (the caller
+            # validates existence).
+            bad = {'modules': [
+                {'logical-name': 'std', 'source-path': '../nope/std.cppm',
+                 'is-std-library': True},
+            ]}
+            with open(manifest, 'w', encoding='utf-8') as f:
+                json.dump(bad, f)
+            sources, _ = _parse_std_module_manifest(manifest)
+            missing = os.path.normpath(os.path.join(d, '../nope/std.cppm'))
+            self.assertEqual(sources, {'std': missing})
+            self.assertFalse(os.path.exists(missing))
+
+    def test_cpp_std_dependency_mispackaged_stdlib(self):
+        # A manifest that resolves cleanly but names a std-library source that
+        # is not on disk (a mispackaged standard library, e.g. a distro libc++
+        # whose manifest source-path points where the .cppm were not shipped)
+        # must be rejected at configure time -- before any backend generation --
+        # rather than trusted into build edges that fail cryptically in ninja.
+        # A required probe raises a clear error naming the missing source (and
+        # the manifest); an optional probe degrades to not-found like any other
+        # unavailable stdlib.
+        from mesonbuild.interpreter.interpreter import Interpreter
+        from mesonbuild.interpreterbase import InterpreterException
+
+        for_machine = MachineChoice.HOST
+
+        def make_interp(sources, manifest=''):
+            interp = Interpreter.__new__(Interpreter)
+            interp.subproject = ''
+            interp.environment = mock.MagicMock()
+            interp.project_version = '1'
+            cpp = mock.MagicMock()
+            cpp.get_std_module_sources.return_value = sources
+            cpp.get_std_module_extra_args.return_value = []
+            cpp.get_std_module_manifest.return_value = manifest
+            interp.compilers = {for_machine: {'cpp': cpp}}
+            interp.coredata = mock.MagicMock()
+            interp.coredata.get_external_args.return_value = []
+            interp.build = mock.MagicMock()
+            interp.build.dependency_overrides = {for_machine: {}}
+            interp.build.cpp_std_module_deps = {for_machine: {}}
+            interp.build.global_args = {for_machine: {}}
+            interp.current_build_project = mock.MagicMock(
+                return_value=mock.MagicMock(project_args={for_machine: {}}))
+            interp.backend = mock.MagicMock()
+            interp.backend.name = 'ninja'
+            interp.backend.gen_lite = False
+            interp.func_static_lib = mock.MagicMock(return_value=mock.MagicMock())
+            return interp
+
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, 'std.cppm')  # never created
+            manifest = os.path.join(d, 'libc++.modules.json')
+
+            # Required (the default): raises, naming the missing source and the
+            # manifest, and mentioning the mispackaging.
+            interp = make_interp({'std': missing}, manifest)
+            with self.assertRaises(InterpreterException) as cm:
+                interp._cpp_std_module_dependency(
+                    mock.MagicMock(), {'native': for_machine})
+            msg = str(cm.exception)
+            self.assertIn(missing, msg)
+            self.assertIn(manifest, msg)
+            self.assertIn('mispackaged', msg)
+            # No build edges were synthesized: the failure fired before
+            # func_static_lib could declare the std target.
+            interp.func_static_lib.assert_not_called()
+
+            # Optional: degrades to not-found (memoized), no raise.
+            interp = make_interp({'std': missing}, manifest)
+            dep = interp._cpp_std_module_dependency(
+                mock.MagicMock(), {'native': for_machine, 'required': False})
+            self.assertFalse(dep.found())
+            interp.func_static_lib.assert_not_called()
+
+            # Positive control: once the source exists the same required probe
+            # validates clean and synthesis proceeds.
+            with open(missing, 'w', encoding='utf-8') as f:
+                f.write('')
+            interp = make_interp({'std': missing}, manifest)
+            dep = interp._cpp_std_module_dependency(
+                mock.MagicMock(), {'native': for_machine})
+            self.assertTrue(dep.found())
+            interp.func_static_lib.assert_called_once()
 
     def test_dependency_fallbacks_external_candidate(self):
         # The external_candidate seam: when set, a caller-supplied synthesis

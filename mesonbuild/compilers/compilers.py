@@ -1909,6 +1909,14 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return {}
 
+    def get_std_module_manifest(self, extra_args: T.Tuple[str, ...] = ()) -> str:
+        """Path to the stdlib module manifest these compiles select.
+
+        Names the manifest in a mispackaged-stdlib diagnostic when a declared
+        module source does not exist; '' for compilers that do not probe one.
+        """
+        return ''
+
     def get_std_module_extra_args(self, extra_args: T.Tuple[str, ...] = ()) -> T.List[str]:
         """Extra compile args for the synthesized std module library.
 

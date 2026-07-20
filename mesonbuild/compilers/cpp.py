@@ -556,8 +556,8 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return [f'-fmodule-file={bmi_path}']
 
     @functools.lru_cache(maxsize=None)
-    def _std_module_info(self, extra_args: T.Tuple[str, ...]) -> T.Tuple[T.Dict[str, str], T.List[str]]:
-        """(std module sources, extra -isystem dirs) for the selected stdlib.
+    def _std_module_info(self, extra_args: T.Tuple[str, ...]) -> T.Tuple[T.Dict[str, str], T.List[str], str]:
+        """(std module sources, extra -isystem dirs, manifest path) for the stdlib.
 
         Unlike GCC, Clang serves two standard libraries, so which manifest to
         read is decided by probing which stdlib these compiles will actually
@@ -579,26 +579,31 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
             try:
                 p, out, _ = Popen_safe(cmd)
             except OSError:
-                return {}, []
+                return {}, [], ''
         if p.returncode != 0:
-            return {}, []
+            return {}, [], ''
         manifest_name = 'libc++.modules.json' if '_LIBCPP_VERSION' in out else 'libstdc++.modules.json'
         try:
             _, out, _ = Popen_safe(self.get_exelist(ccache=False) + list(extra_args)
                                    + [f'-print-file-name={manifest_name}'])
         except OSError:
-            return {}, []
+            return {}, [], ''
         manifest = out.strip()
         if not manifest or not os.path.isfile(manifest):
-            return {}, []
-        return _parse_std_module_manifest(manifest)
+            return {}, [], ''
+        sources, incdirs = _parse_std_module_manifest(manifest)
+        return sources, incdirs, manifest
 
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules."""
         return self._std_module_info(tuple(extra_args))[0]
 
+    def get_std_module_manifest(self, extra_args: T.Tuple[str, ...] = ()) -> str:
+        """Path to the stdlib module manifest these compiles select, '' if none."""
+        return self._std_module_info(tuple(extra_args))[2]
+
     def get_std_module_extra_args(self, extra_args: T.Tuple[str, ...] = ()) -> T.List[str]:
-        sources, incdirs = self._std_module_info(tuple(extra_args))
+        sources, incdirs, _ = self._std_module_info(tuple(extra_args))
         if not sources:
             return []
         # The std interface sources declare the reserved module name on
@@ -941,28 +946,33 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
                 '-E', '-MD', '-MQ', target, '-MF', depfile, '-o', f'{outfile}.pp']
 
     @lazy_property
-    def _std_module_sources(self) -> T.Dict[str, str]:
+    def _std_module_info(self) -> T.Tuple[T.Dict[str, str], str]:
         # Locate the standard library's module-interface sources from the
         # selected libstdc++'s manifest. The manifest maps std ->
         # bits/std.cc and std.compat -> bits/std.compat.cc, each flagged
-        # is-std-library; source paths are relative to the manifest. Empty when
-        # the toolchain is too old to ship the std module (GCC < 15) or has no
+        # is-std-library; source paths are relative to the manifest. Returns
+        # ({logical-name: source path}, manifest path); empty/'' when the
+        # toolchain is too old to ship the std module (GCC < 15) or has no
         # manifest.
         if version_compare(self.version, '<15'):
-            return {}
+            return {}, ''
         try:
             _, out, _ = Popen_safe(
                 self.get_exelist(ccache=False) + ['-print-file-name=libstdc++.modules.json'])
         except OSError:
-            return {}
+            return {}, ''
         manifest = out.strip()
         if not manifest or not os.path.isfile(manifest):
-            return {}
-        return _parse_std_module_manifest(manifest)[0]
+            return {}, ''
+        return _parse_std_module_manifest(manifest)[0], manifest
 
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules."""
-        return self._std_module_sources
+        return self._std_module_info[0]
+
+    def get_std_module_manifest(self, extra_args: T.Tuple[str, ...] = ()) -> str:
+        """Path to the stdlib module manifest these compiles select, '' if none."""
+        return self._std_module_info[1]
 
 
 class QccCPPCompiler(QccCompiler, GnuCPPCompiler):
