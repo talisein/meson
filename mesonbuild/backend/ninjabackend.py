@@ -619,6 +619,14 @@ class BmiVariant:
 HEADER_UNIT_ALIAS_ROOT = 'meson-private/imap'
 
 
+class _AliasRootCollision(Exception):
+    """Signalled by _place_dir_alias when the candidate spelling is already
+    this run's alias root for a *different* real directory -- a digest
+    collision. The caller resolves it by lengthening the newcomer's digest and
+    retrying, leaving the incumbent's already-placed link untouched.
+    """
+
+
 class NinjaBackend(backends.Backend):
 
     def __init__(self, build: T.Optional[build.Build]):
@@ -2422,6 +2430,19 @@ class NinjaBackend(backends.Backend):
         anchored one."""
         return NinjaBackend._alias_root_prefix() in s.replace('\\', '/')
 
+    @staticmethod
+    def _alias_root_digest(real_dir: str, class_tag: T.Optional[str]) -> str:
+        """The full sha256 hex an alias-root spelling truncates.
+
+        The None keying hashes the directory alone -- its path is the whole
+        identity. A class tag folds in so one directory yields a distinct root
+        per class; the NUL separator keeps two (tag, dir) splits from colliding
+        on their concatenation.
+        """
+        if class_tag is None:
+            return hashlib.sha256(real_dir.encode()).hexdigest()
+        return hashlib.sha256((class_tag + '\0' + real_dir).encode()).hexdigest()
+
     def _dir_alias_root(self, real_dir: str,
                         class_tag: T.Optional[str] = None) -> T.Optional[str]:
         """A build-relative alias root for a directory, reached through a link
@@ -2442,30 +2463,66 @@ class NinjaBackend(backends.Backend):
 
         The root is a pure function of (real_dir, class_tag): two classes over
         one directory get two roots, and one class across reconfigures gets the
-        same root. The link is a symlink on POSIX; on Windows a directory
-        symlink where the build has the privilege for it, else an NTFS junction
-        (see _make_dir_link).
+        same root -- *unless* two roots collide on their truncated digest (see
+        below). The link is a symlink on POSIX; on Windows a directory symlink
+        where the build has the privilege for it, else an NTFS junction (see
+        _make_dir_link).
+
+        The spelling truncates a sha256 to 12 hex digits, so two distinct
+        (dir, tag) inputs colliding there is astronomically unlikely -- but not
+        impossible, and two roots sharing a spelling would be two names for one
+        link, silently misnaming every unit under one of them. Guard it:
+        allocation is first-come-wins, so on a collision with a root this run
+        already placed for a *different* real directory, the newcomer lengthens
+        its own digest one hex digit at a time until it separates while the
+        incumbent's link stands. That makes a collided root's length depend on
+        which directory this generation happened to allocate first -- it is
+        order-dependent by construction, not order-independent. On real inputs
+        nothing collides at 12 digits, so the loop runs once and the spelling is
+        exactly the 12-hex root.
         """
         try:
             return self._dir_aliases[(real_dir, class_tag)]
         except KeyError:
             pass
-        # The None keying hashes the directory alone -- its path is the whole
-        # identity. A class tag folds in so one directory yields a distinct root
-        # per class; the separator keeps two (tag, dir) splits from colliding.
-        if class_tag is None:
-            digest = hashlib.sha256(real_dir.encode()).hexdigest()[:12]
-        else:
-            digest = hashlib.sha256(
-                (class_tag + '\0' + real_dir).encode()).hexdigest()[:12]
-        return self._place_dir_alias(real_dir, class_tag,
-                                     f'{self._alias_root_prefix()}{digest}')
+        full = self._alias_root_digest(real_dir, class_tag)
+        # Start at 12 digits (the historical spelling) and lengthen only on a
+        # genuine in-run collision. The cap is the full digest: reaching it
+        # would mean two directories share an entire sha256, which does not
+        # happen, so the fall-through past the loop is unreachable in practice
+        # and degrades to no alias rather than misnaming.
+        for length in range(12, len(full) + 1):
+            try:
+                return self._place_dir_alias(
+                    real_dir, class_tag,
+                    f'{self._alias_root_prefix()}{full[:length]}')
+            except _AliasRootCollision:
+                continue
+        self._dir_aliases[(real_dir, class_tag)] = None
+        return None
 
     def _place_dir_alias(self, real_dir: str, class_tag: T.Optional[str],
                          rel: str) -> T.Optional[str]:
         # The shared half of the alias-root makers: create (or adopt) the link
         # at `rel` and register it both ways, so idempotency and re-classing
         # behave the same whichever spelling the root uses.
+        #
+        # `rel` may already be a root this run placed, and the meaning splits on
+        # which directory it stands for:
+        #  - the SAME real directory (a different class tag whose digest happened
+        #    to truncate here): a hit -- the link is already right, adopt it.
+        #  - a DIFFERENT real directory: an in-run digest collision. Report it so
+        #    the caller lengthens the newcomer's digest; the incumbent's link,
+        #    already emitted into that root's args, must not move.
+        # A `rel` NOT in the in-run registry but present on disk as a link is a
+        # stale root from a prior run (a moved source dir, a dropped class): it
+        # is remove-and-replaced below, exactly as before.
+        incumbent = self._alias_root_real.get(rel.replace('\\', '/'))
+        if incumbent is not None:
+            if self._same_dir(incumbent, real_dir):
+                self._dir_aliases[(real_dir, class_tag)] = rel
+                return rel
+            raise _AliasRootCollision
         alias: T.Optional[str] = None
         abs_alias = os.path.join(self.environment.get_build_dir(), rel)
         try:

@@ -1218,6 +1218,103 @@ Thread model: posix'''), '21.9.0')
             self.assertIn('not_a_link_dir', priv_entries)
             self.assertIn('.canary', priv_entries)
 
+    def test_dir_alias_root_collision_lengthens_newcomer(self):
+        # Two distinct real directories whose 12-hex alias-root digests collide
+        # must not end up two names for one link. Allocation is first-come-wins:
+        # the directory allocated first keeps the 12-digit spelling, and the
+        # newcomer lengthens its own digest by one digit until it separates,
+        # never disturbing the incumbent's already-placed link. A real 12-hex
+        # collision is astronomically unlikely, so force one by patching the
+        # digest helper to hand both directories the same full hash.
+        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
+        with tempfile.TemporaryDirectory() as d:
+            build = os.path.join(d, 'build')
+            real_a = os.path.join(d, 'a')
+            real_b = os.path.join(d, 'b')
+            for p in (build, real_a, real_b):
+                os.makedirs(p)
+
+            def make_backend():
+                be = NinjaBackend.__new__(NinjaBackend)
+                be._dir_aliases = {}
+                be._alias_root_real = {}
+                be.environment = mock.MagicMock()
+                be.environment.get_build_dir.return_value = build
+                return be
+
+            collide = staticmethod(lambda real_dir, class_tag: 'f' * 64)
+            with mock.patch.object(NinjaBackend, '_alias_root_digest', collide):
+                be = make_backend()
+                first = be._dir_alias_root(real_a)
+                if first is None:
+                    raise unittest.SkipTest('platform cannot make a directory link here')
+                second = be._dir_alias_root(real_b)
+                self.assertIsNotNone(second)
+
+                # First-come keeps the 12-digit spelling; the newcomer is one
+                # digit longer, and the two are distinct.
+                self.assertEqual(first, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 12}')
+                self.assertEqual(second, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 13}')
+                self.assertEqual(len(os.path.basename(second)),
+                                 len(os.path.basename(first)) + 1)
+
+                # Each root reaches its own real directory; the incumbent's link
+                # was never moved to point at the newcomer.
+                self.assertTrue(os.path.samefile(os.path.join(build, first), real_a))
+                self.assertTrue(os.path.samefile(os.path.join(build, second), real_b))
+
+                # A fresh backend, allocating in the same order, reproduces both
+                # roots by reading the on-disk links -- the incumbent adopted,
+                # the newcomer again pushed one digit longer -- with neither
+                # link disturbed. (The order dependence is the point: the first
+                # dir allocated wins the short spelling.)
+                be2 = make_backend()
+                self.assertEqual(be2._dir_alias_root(real_a), first)
+                self.assertEqual(be2._dir_alias_root(real_b), second)
+                self.assertTrue(os.path.samefile(os.path.join(build, first), real_a))
+                self.assertTrue(os.path.samefile(os.path.join(build, second), real_b))
+
+    def test_dir_alias_root_reclaims_stale_link(self):
+        # A collision is only ever with a root THIS run placed. A link left on
+        # disk by an earlier run, for a directory that has since vanished and is
+        # not in this run's registry, is stale -- it must be remove-and-replaced
+        # at the same spelling (no lengthening), the way a moved source dir has
+        # always been reclaimed.
+        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
+        with tempfile.TemporaryDirectory() as d:
+            build = os.path.join(d, 'build')
+            real_a = os.path.join(d, 'a')
+            real_b = os.path.join(d, 'b')
+            for p in (build, real_a, real_b):
+                os.makedirs(p)
+
+            def make_backend():
+                be = NinjaBackend.__new__(NinjaBackend)
+                be._dir_aliases = {}
+                be._alias_root_real = {}
+                be.environment = mock.MagicMock()
+                be.environment.get_build_dir.return_value = build
+                return be
+
+            collide = staticmethod(lambda real_dir, class_tag: 'f' * 64)
+            with mock.patch.object(NinjaBackend, '_alias_root_digest', collide):
+                be = make_backend()
+                stale = be._dir_alias_root(real_a)
+                if stale is None:
+                    raise unittest.SkipTest('platform cannot make a directory link here')
+                self.assertEqual(stale, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 12}')
+
+                # The directory the stale link points at is gone; a fresh run
+                # (empty registry) reaches for the same spelling for a different
+                # directory. With the incumbent absent from the in-run registry,
+                # this is the stale-link case: reclaim the 12-digit spelling.
+                import shutil
+                shutil.rmtree(real_a)
+                be2 = make_backend()
+                reclaimed = be2._dir_alias_root(real_b)
+                self.assertEqual(reclaimed, stale)
+                self.assertTrue(os.path.samefile(os.path.join(build, reclaimed), real_b))
+
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both
         # parse a declared header unit into (mode, spelling); they share
