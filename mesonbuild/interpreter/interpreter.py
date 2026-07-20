@@ -2168,6 +2168,19 @@ class Interpreter(InterpreterBase, HoldableObject):
         if cached is not None and (cached.found() or not required):
             return cached
 
+        def not_found() -> Dependency:
+            """Degrade a not-required probe, memoizing the answer.
+
+            Every branch below that cannot synthesize either raises (when this
+            is the last candidate and it is required) or lands here, so the
+            memo records the failure once and a later optional probe with the
+            same key is answered from it rather than re-running the probe.
+            """
+            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
+            dep = dependencies.NotFoundDependency(name, self.environment)
+            self.build.cpp_std_module_deps[for_machine][memo_key] = dep
+            return dep
+
         if not sources:
             if required:
                 raise InterpreterException(
@@ -2175,10 +2188,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                     'need a C++ compiler that ships the standard library as modules '
                     '(GCC >= 15 with libstdc++.modules.json, or Clang with a stdlib '
                     'module manifest and a P1689-capable clang-scan-deps).')
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
-            dep = dependencies.NotFoundDependency(name, self.environment)
-            self.build.cpp_std_module_deps[for_machine][memo_key] = dep
-            return dep
+            return not_found()
 
         # Synthesizing the std archive only works under Ninja. A genvslite
         # (gen_lite) vs backend compiles through per-buildtype Ninja build
@@ -2194,10 +2204,7 @@ class Interpreter(InterpreterBase, HoldableObject):
                 raise InterpreterException(
                     "dependency('std') (C++ import std) is only supported with the "
                     f'Ninja backend (current backend: {self.backend.name}).')
-            mlog.log('Dependency', mlog.bold(name), 'found:', mlog.red('NO'))
-            dep = dependencies.NotFoundDependency(name, self.environment)
-            self.build.cpp_std_module_deps[for_machine][memo_key] = dep
-            return dep
+            return not_found()
 
         # A single module-providing static library built from the standard
         # library's own interface sources. std must precede std.compat, but that
