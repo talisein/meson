@@ -3137,6 +3137,20 @@ class NinjaBackend(backends.Backend):
         this resolution takes both or neither, or its mapper key would not
         match what the edge asks for.
 
+        The flag rides here and nowhere else, and that is deliberate. Only the
+        scan edges (and the scan-name probes that mirror them) need a system
+        unit to resolve through the aliased chain, so only they compose their
+        args with this function's result. The compile and the header-unit-build
+        edges keep the real, unflagged chain on purpose: their __FILE__,
+        diagnostics and debug info must name the header's real path, not an
+        alias. The two sides do not drift because the scan name a unit is stored
+        under is itself probe-derived under these very args (see
+        _provision_header_unit_edges), while the compile name is probed under
+        the bare args -- one function feeds both, so turning the flag on for one
+        edge and off for the other is impossible without changing this seam. A
+        pinning test asserts the build edge is composed from the bare args, with
+        no chain arg on it.
+
         GCC dedups include directories by identity, so an alias of a built-in
         directory substitutes it at the built-in's own position -- search order
         and include_next are preserved, only the text a resolved system header

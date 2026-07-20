@@ -1079,6 +1079,68 @@ Thread model: posix'''), '21.9.0')
         for name, _bmi in bmis:
             self.assertFalse(be._has_space(name), name)
 
+    def test_system_header_unit_build_edge_omits_chain_args(self):
+        # -fno-canonical-system-headers and the aliased -isystem chain ride the
+        # SCAN edges only (see _gcc_system_chain_isystem_args): a system unit's
+        # scan resolves through the aliased chain, but its build edge -- and the
+        # compile that follows -- must keep the real, unflagged chain so __FILE__,
+        # diagnostics and debug info name the header's real path. Pin that the
+        # build edge is composed from the bare args, with no chain arg on it, so
+        # a future one-sided change to that seam fails loudly here.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        cpp = mock.MagicMock()
+        cpp.cpp_module_family.return_value = 'gcc'
+
+        bare = ['-Iprog.p', '-std=c++23']
+        chain = ['-fno-canonical-system-headers', '-isystem', 'meson-private/i/aaaaa']
+
+        def gcc_name(_compiler, a, _mode, _spell):
+            # The scan (chain args present) names the unit through the alias; the
+            # compile (bare args) names it by the real system path. They differ,
+            # which is what makes the aliased system branch take the edge.
+            return 'scan/vector' if '-fno-canonical-system-headers' in a else 'real/vector'
+
+        seen_edge_args = []
+
+        def capture_edge(key, output, mapper_name, rulename, edge_args,
+                         canon, mode, owner, is_msvc, is_gcc):
+            seen_edge_args.append(list(edge_args))
+            return 'BMI'
+
+        with mock.patch.object(NinjaBackend, 'get_compiler_rule_name', return_value='RULE'), \
+                mock.patch.object(NinjaBackend, '_header_unit_spelling',
+                                  return_value=('system', 'vector')), \
+                mock.patch.object(NinjaBackend, '_header_unit_identity',
+                                  return_value=None), \
+                mock.patch.object(NinjaBackend, '_canonical_header_unit',
+                                  return_value='vector'), \
+                mock.patch.object(NinjaBackend, '_header_unit_aliasing_available',
+                                  return_value=True), \
+                mock.patch.object(NinjaBackend, '_declares_system_header_unit',
+                                  return_value=True), \
+                mock.patch.object(NinjaBackend, '_gcc_system_chain_isystem_args',
+                                  return_value=chain), \
+                mock.patch.object(NinjaBackend, '_reclass_include_args',
+                                  return_value=[]), \
+                mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
+                                  side_effect=gcc_name), \
+                mock.patch.object(NinjaBackend, '_get_or_create_header_unit_edge',
+                                  side_effect=capture_edge), \
+                mock.patch('mesonbuild.backend.ninjabackend.default_cmi_path',
+                           return_value='CMI'):
+            be._provision_header_unit_edges(
+                cpp, ['vector'], bare, ('cls',), 'sub', 'decl', None)
+
+        # The build edge was composed, and from the bare args: no chain arg (the
+        # flag or an aliased -isystem) may have leaked onto it.
+        self.assertEqual(len(seen_edge_args), 1,
+                         f'expected one build edge, got {seen_edge_args}')
+        self.assertEqual(seen_edge_args[0], bare)
+        for arg in chain:
+            self.assertNotIn(arg, seen_edge_args[0],
+                             f'chain arg {arg!r} leaked onto the system build edge')
+
     def test_check_header_unit_names_defeated_alias_branch(self):
         # A defeated alias (real path spaced and shorter than the alias) gets
         # its own diagnosis: the alias was placed but GCC discarded it, distinct
