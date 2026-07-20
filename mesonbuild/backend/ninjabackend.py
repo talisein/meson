@@ -721,6 +721,11 @@ class NinjaBackend(backends.Backend):
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
         self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
         self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
+        # Normalized declared-source paths per (target id, module kwarg). The
+        # _is_declared_* predicates ask once per compiled source, so without
+        # this the whole set is rebuilt per source; the declarations it is
+        # built from are frozen by generation time.
+        self._target_module_kwarg_paths: T.Dict[T.Tuple[str, str], T.Set[str]] = {}
 
     def create_phony_target(self, dummy_outfile: str, rulename: str, phony_infilenames: ListifiedStr) -> NinjaBuildElement:
         '''
@@ -3266,7 +3271,8 @@ class NinjaBackend(backends.Backend):
         # Normalized build-root-relative paths of the sources this target
         # declares as private module interfaces (cpp_private_module_interfaces),
         # the same comparable key as _module_interface_paths.
-        return self._module_kwarg_paths(target, target.cpp_private_module_interfaces)
+        return self._module_kwarg_paths(target, target.cpp_private_module_interfaces,
+                                        'cpp_private_module_interfaces')
 
     def _private_module_interface_objs(self, target: build.BuildTarget) -> T.Set[str]:
         """Build-root-relative object paths of this target's own private
@@ -5053,9 +5059,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return 'user', hu
 
     def _module_kwarg_paths(self, target: build.BuildTarget,
-                            entries: T.Sequence[T.Union[str, File, 'build.CustomTarget', 'build.CustomTargetIndex', 'build.GeneratedList']]) -> T.Set[str]:
+                            entries: T.Sequence[T.Union[str, File, 'build.CustomTarget', 'build.CustomTargetIndex', 'build.GeneratedList']],
+                            kwarg: str) -> T.Set[str]:
         # Normalized build-root-relative paths of the sources a module kwarg
-        # declares. This is the form rel_src and the P1689 scan's source-path
+        # declares, cached per (target, kwarg) -- `kwarg` names which
+        # declaration `entries` came from and is only ever the cache
+        # discriminator. Callers read the set and never mutate it.
+        #
+        # This is the form rel_src and the P1689 scan's source-path
         # take, so the per-source interface flags, the Clang harvest edge and
         # the collator all decide interface-ness from one comparable key and
         # cannot drift. A generated entry keys on its build-tree output path
@@ -5063,6 +5074,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # object forms declare every C++ output, a string names one; a source
         # a generated output shadows is disambiguated at setup, so both the
         # static and generated keys may safely be added for a string.
+        cache_key = (target.get_id(), kwarg)
+        cached = self._target_module_kwarg_paths.get(cache_key)
+        if cached is not None:
+            return cached
+
         paths: T.Set[str] = set()
         gen_sources = target.get_generated_sources()
 
@@ -5090,10 +5106,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             else:
                 f = File.from_source_file(self.source_dir, target.get_subdir(), entry)
                 paths.add(os.path.normpath(f.rel_to_builddir(self.build_to_src)))
+        self._target_module_kwarg_paths[cache_key] = paths
         return paths
 
     def _module_interface_paths(self, target: build.BuildTarget) -> T.Set[str]:
-        return self._module_kwarg_paths(target, target.cpp_module_interfaces)
+        return self._module_kwarg_paths(target, target.cpp_module_interfaces,
+                                        'cpp_module_interfaces')
 
     def _is_declared_module_interface(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
         # Whether src is one of target's declared cpp_module_interfaces sources.
@@ -5111,7 +5129,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # an interface file extension for it) -- so a generated internal
         # partition, which cannot be recognised by extension, has this kwarg as
         # its only channel on MSVC.
-        return self._module_kwarg_paths(target, target.cpp_internal_partitions)
+        return self._module_kwarg_paths(target, target.cpp_internal_partitions,
+                                        'cpp_internal_partitions')
 
     def _is_declared_internal_partition(self, target: build.BuildTarget, src: 'FileOrString') -> bool:
         # Whether src is one of target's declared cpp_internal_partitions sources.
