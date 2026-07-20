@@ -5432,8 +5432,14 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                             # The compile resolves the alias spelling to the one
                             # BMI through the mapper; the link only serves the
                             # mapper-less scan. So the pair names that BMI, not
-                            # the link.
-                            if alias_compile is not None:
+                            # the link. A mapper key holds no whitespace, so a
+                            # spaced name -- GCC discarding the space-free alias
+                            # for the shorter, spaced real path, likelier here
+                            # than for canon since this spelling is longer -- is
+                            # not paired at all; the unit keeps GCC's default
+                            # naming at that real path (check_header_unit_names
+                            # reports it).
+                            if alias_compile is not None and not self._has_space(alias_compile):
                                 bmis.append((alias_compile, output))
                     continue
                 # A spaced compile name means GCC discarded the space-free alias

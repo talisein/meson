@@ -1028,6 +1028,57 @@ Thread model: posix'''), '21.9.0')
             self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'), './inc/hdr.h')
             probe.assert_not_called()
 
+    def test_provision_header_unit_edges_drops_spaced_alias_spelling(self):
+        # A file declared under several spellings builds one BMI, and each extra
+        # spelling becomes an extra mapper name for it. That name comes from
+        # _header_unit_gcc_name, which adopts a spaced real path when GCC
+        # discards the space-free alias for the shorter real one -- and a longer
+        # spelling loses that length race more readily than the canonical one.
+        # A mapper key holds no whitespace, so a spaced extra spelling must never
+        # be paired into bmis (whence it would become a --header-unit-bmi argv
+        # entry / mapper key); the unit keeps GCC's default naming there.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        cpp = mock.MagicMock()
+        cpp.cpp_module_family.return_value = 'gcc'
+
+        canon, spelling = 'canon/hdr.h', 'aliased/spelled/hdr.h'
+
+        def gcc_name(_compiler, _args, _mode, spell):
+            # The canonical spelling wins its alias; the extra spelling loses it
+            # and is named by the spaced real path.
+            return 'free-name/hdr.h' if spell == canon else 'C:/s p/hdr.h'
+
+        with mock.patch.object(NinjaBackend, 'get_compiler_rule_name', return_value='RULE'), \
+                mock.patch.object(NinjaBackend, '_header_unit_spelling',
+                                  return_value=('user', spelling)), \
+                mock.patch.object(NinjaBackend, '_header_unit_identity',
+                                  return_value='ID'), \
+                mock.patch.object(NinjaBackend, '_canonical_header_unit',
+                                  return_value=canon), \
+                mock.patch.object(NinjaBackend, '_header_unit_aliasing_available',
+                                  return_value=True), \
+                mock.patch.object(NinjaBackend, '_declares_system_header_unit',
+                                  return_value=False), \
+                mock.patch.object(NinjaBackend, '_reclass_include_args',
+                                  return_value=[]), \
+                mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
+                                  side_effect=gcc_name), \
+                mock.patch.object(NinjaBackend, '_get_or_create_header_unit_edge',
+                                  return_value='BMI'), \
+                mock.patch.object(NinjaBackend, '_alias_header_unit_link',
+                                  return_value='LINK'), \
+                mock.patch('mesonbuild.backend.ninjabackend.default_cmi_path',
+                           return_value='CMI'):
+            _outputs, _cargs, bmis = be._provision_header_unit_edges(
+                cpp, ['hdr.h'], [], ('cls',), 'sub', 'decl', None)
+
+        # The canonical (space-free) name is paired; the spaced extra spelling is
+        # not. No pair may carry whitespace.
+        self.assertIn(('free-name/hdr.h', 'BMI'), bmis)
+        for name, _bmi in bmis:
+            self.assertFalse(be._has_space(name), name)
+
     def test_check_header_unit_names_defeated_alias_branch(self):
         # A defeated alias (real path spaced and shorter than the alias) gets
         # its own diagnosis: the alias was placed but GCC discarded it, distinct
