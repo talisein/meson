@@ -14,7 +14,7 @@ from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_osx, windows_proof_rmtree, windows_proof_rm
 )
 from mesonbuild.compilers import (
-    detect_objc_compiler, detect_objcpp_compiler
+    detect_cpp_compiler, detect_objc_compiler, detect_objcpp_compiler
 )
 from mesonbuild.mesonlib import EnvironmentException, MesonException
 from mesonbuild.programs import ExternalProgram
@@ -183,6 +183,17 @@ class FailureTests(BasePlatformTests):
         # the source suffix alone (a .ixx with no module kwargs) is handled
         # natively by MSBuild, so the vs backend must configure it without
         # error. The kwarg-driven cases refuse; this suffix-only case does not.
+        #
+        # Unlike its two refusal neighbours, this test needs a skip guard: they
+        # assert an InvalidArguments raised during interpretation, before any
+        # backend generation, so they are environment-independent. This test
+        # instead lets init() succeed all the way into vs solution generation,
+        # which requires Windows and a real MSVC toolchain -- so skip elsewhere.
+        if not is_windows():
+            raise unittest.SkipTest('vs solution generation requires Windows')
+        cc = detect_cpp_compiler(get_fake_env(), MachineChoice.HOST)
+        if cc.get_argument_syntax() != 'msvc':
+            raise unittest.SkipTest('Test only applies when MSVC tools are available.')
         with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
             f.write('int main(void) { return 0; }\n')
         with open(os.path.join(self.srcdir, 'pkg.ixx'), 'w', encoding='utf-8') as f:
