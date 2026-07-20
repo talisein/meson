@@ -1039,6 +1039,55 @@ class CppModulesTestMixin:
             self.assertNotIn(spaced_marker, line,
                              f'a mapper carries a spaced-path unit line: {line!r}')
 
+    def _header_unit_edge_args(self, basename: str) -> T.Tuple[T.List[str], str]:
+        """The (ARGS, SPELLING) of the GCC header-unit build edge for `basename`,
+        read from build.ninja -- the include path and spelling GCC resolves the
+        unit through."""
+        args: T.List[str] = []
+        spelling = ''
+        in_edge = False
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build ') and 'HEADER_UNIT' in line:
+                    out = line[len('build '):].partition(': ')[0].strip()
+                    in_edge = basename in os.path.basename(out)
+                elif in_edge and line.startswith(' ARGS ='):
+                    val = line.partition('=')[2].strip()
+                    args = re.findall(r'"([^"]*)"', val) or val.split()
+                elif in_edge and line.startswith(' SPELLING ='):
+                    spelling = line.partition('=')[2].strip().strip('"')
+                elif in_edge and not line.startswith(' '):
+                    in_edge = False
+        return args, spelling
+
+    def assert_alias_carried(self, basename: str) -> None:
+        """GCC actually resolves the spaced user header unit `basename` through
+        its space-free imap alias, not the header's real path. GCC keeps the
+        shorter of the two, so a deep checkout keeps the alias but a short one
+        discards it for the shorter real path (shorter-wins) -- which the
+        mapper-keyed build cannot survive. Probing under the unit's own build
+        args, require the alias to be carried, so a short-checkout box fails
+        here with a pointed message rather than a mysterious downstream error.
+        A no-op where no alias is in play (an unspaced checkout)."""
+        args, spelling = self._header_unit_edge_args(basename)
+        if not any('meson-private/imap/' in a.replace('\\', '/') for a in args):
+            return
+        cpp = self.host_cpp_compiler()
+        cmd = cpp.get_exelist(ccache=False) + args + ['-E', '-H', '-x', 'c++', '-']
+        p = subprocess.run(cmd, input=f'#include "{spelling}"\n', capture_output=True,
+                           text=True, cwd=self.builddir)
+        resolved = next((l[2:].strip() for l in p.stderr.splitlines()
+                         if l.startswith('. ')), None)
+        self.assertIsNotNone(resolved, f'could not probe the resolved name of {spelling!r}')
+        self.assertNotIn(' ', resolved,
+            f'the space-free alias for header unit {basename!r} was defeated by a '
+            f'shorter real path at this checkout depth (GCC resolved it to '
+            f'{resolved!r}) -- see the shorter-wins degrade. Move the checkout to a '
+            'deeper path, or one without spaces.')
+        self.assertIn('meson-private/imap/', resolved.replace('\\', '/'),
+                      f'header unit {basename!r} is not resolved through its imap '
+                      f'alias (got {resolved!r})')
+
     def assert_space_machinery_dormant(self, out: str,
                                        builddir: T.Optional[str] = None) -> None:
         """The negative contract: on an unspaced path the space machinery must

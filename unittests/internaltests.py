@@ -972,6 +972,90 @@ Thread model: posix'''), '21.9.0')
             self.assertEqual(out.count('-isystem'), len(free))
             self.assertEqual(len(placed), len(free))
 
+    def test_header_unit_gcc_name_adopts_defeated_alias(self):
+        # A user header unit reached through a space-free imap alias is textual
+        # by default, but GCC's shorter-of-two canonicalization can discard the
+        # alias for the header's shorter real path. _header_unit_gcc_name probes
+        # the real name and adopts it only when it proves GCC named the unit by
+        # a spaced path; a winning alias keeps the textual name, and an
+        # unaliased name never probes at all (dormancy/cost).
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        be = NinjaBackend.__new__(NinjaBackend)
+        cpp = mock.MagicMock()
+        aliased = 'meson-private/imap/abc123def456/hdr.h'
+
+        # (i) aliased name, probe reports a spaced real path -> adopt it.
+        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
+                mock.patch.object(NinjaBackend, '_probe_header_unit_path',
+                                  return_value='/short sp/hdr.h') as probe:
+            name = be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h')
+            self.assertTrue(be._has_space(name), name)
+            probe.assert_called_once()
+
+        # (ii) aliased name, probe reports the space-free alias (alias won) ->
+        # keep the textual name unchanged.
+        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
+                mock.patch.object(NinjaBackend, '_probe_header_unit_path', return_value=aliased):
+            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'),
+                             './' + aliased)
+
+        # (iii) aliased name, probe fails -> keep the textual name.
+        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
+                mock.patch.object(NinjaBackend, '_probe_header_unit_path', return_value=None):
+            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'),
+                             './' + aliased)
+
+        # (iv) an unaliased name never probes.
+        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value='inc/hdr.h'), \
+                mock.patch.object(NinjaBackend, '_probe_header_unit_path') as probe:
+            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'), './inc/hdr.h')
+            probe.assert_not_called()
+
+    def test_check_header_unit_names_defeated_alias_branch(self):
+        # A defeated alias (real path spaced and shorter than the alias) gets
+        # its own diagnosis: the alias was placed but GCC discarded it, distinct
+        # from an alias that could not be placed at all.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, 's p')
+            os.makedirs(src)
+            hdr = os.path.join(src, 'hdr.h')
+            with open(hdr, 'w', encoding='utf-8'):
+                pass
+            build = os.path.join(d, 'b')
+            os.makedirs(build)
+            be = NinjaBackend.__new__(NinjaBackend)
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = build
+            be.environment.get_source_dir.return_value = src
+            cpp = mock.MagicMock()
+            target = mock.MagicMock()
+            target.name = 't'
+            target.compilers = {'cpp': cpp}
+            target.cpp_header_units = ['hdr.h']
+            spaced_real = hdr.replace('\\', '/')
+
+            def run(mapper_key):
+                be._warned_header_unit_names = set()
+                with mock.patch.object(NinjaBackend, '_header_unit_spelling',
+                                       return_value=('user', 'hdr.h')), \
+                        mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
+                                          return_value=spaced_real), \
+                        mock.patch.object(NinjaBackend, '_header_unit_mapper_key',
+                                          return_value=mapper_key), \
+                        mock.patch('mesonbuild.backend.ninjabackend.mlog.warning') as warn:
+                    be.check_header_unit_names(target, [])
+                return warn.call_args[0][0]
+
+            # An alias was placed (imap in the textual name) but defeated.
+            defeated = run('meson-private/imap/abc123def456/hdr.h')
+            self.assertIn('discarded it', defeated)
+            self.assertIn('real path is shorter', defeated)
+            # No alias in the textual name: the platform could not place one.
+            unplaced = run('s p/hdr.h')
+            self.assertIn('could not place one', unplaced)
+            self.assertNotIn('discarded it', unplaced)
+
     def test_dir_alias_root_keying(self):
         # An alias root is a pure function of (real_dir, class_tag): the same
         # keying must land on the same root across calls (idempotent

@@ -2797,12 +2797,27 @@ class NinjaBackend(backends.Backend):
         header, the compiler's own search path) is absolute. The text is kept as
         found: '..' is not collapsed, so a header reached two ways has two names.
         None when the header resolves nowhere.
+
+        The textual spelling is authoritative, with one exception: a user unit
+        reached through a space-free alias (a spaced source tree respelled) can
+        be defeated by GCC's shorter-of-two canonicalization -- GCC keeps the
+        shorter of the alias spelling and the header's real path, and where the
+        real path is shorter it names the unit by that (spaced) path, discarding
+        the alias the textual key reports. That the textual key cannot see, so
+        when an alias is in play the real name is probed and adopted only if it
+        proves GCC named the unit by a path holding whitespace. A winning alias
+        probes back space-free and the textual key stands unchanged; an
+        unaliased name never probes.
         """
         key = self._header_unit_mapper_key(compiler, args, spelling) if mode == 'user' else None
         if key is None:
             # Off the -I path: a system header, or a quote-form spelling falling
             # through to the compiler's own search path.
             key = self._probe_header_unit_path(compiler, args, mode, spelling)
+        elif 'meson-private/imap/' in key.replace('\\', '/'):
+            probed = self._probe_header_unit_path(compiler, args, mode, spelling)
+            if probed is not None and self._has_space(probed):
+                key = probed
         if key is None:
             return None
         is_abs = os.path.isabs(key)
@@ -3103,6 +3118,17 @@ class NinjaBackend(backends.Backend):
                     'which Meson cannot rename. Install the C++ compiler at a path '
                     'without spaces, or stop declaring compiler-owned headers as '
                     'header units and #include this one instead.', fatal=False)
+            elif (self._header_unit_mapper_key(compiler, args, spelling) or '') \
+                    .replace('\\', '/').find('meson-private/imap/') != -1:
+                # An alias was placed but GCC discarded it: it keeps the shorter
+                # of the alias spelling and the header's real path, and here the
+                # real path is the shorter, so the unit is named by that spaced
+                # path after all.
+                mlog.warning(head +
+                    'Meson placed a space-free alias to hide the space, but GCC '
+                    'discarded it: it keeps the shorter of the alias and the '
+                    'header\'s real path, and here the real path is shorter. Move '
+                    'the project to a path without spaces.', fatal=False)
             else:
                 mlog.warning(head +
                     'Meson routes such a header through a space-free alias, but '
@@ -5344,35 +5370,44 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
                 if scan_name is None or compile_name is None:
                     continue
-                key = f'{base}:{class_subdir}'
-                output = self._get_or_create_header_unit_edge(
-                    key, default_cmi_path(scan_name, cache_dir, suffix),
-                    compile_name, rulename, args, canon, mode, owner,
-                    is_msvc, is_gcc)
-                outputs.append(output)
-                # The pair carries the compile-computed name; the collate joins
-                # every name of this BMI into each importer's mapper, so a scan
-                # reporting the alias name and a compile asking the real one both
-                # resolve. A pair whose name is the BMI's own stem is redundant
-                # with --default-cmi-root reconstruction and suppressed there.
-                bmis.append((compile_name, output))
-                if spelling != canon:
-                    # An extra declared spelling of the same file: one BMI, an
-                    # extra name for it. A scan through the alias reaches the unit
-                    # only at that spelling's own default path, so link the BMI
-                    # there; the compile resolves it through the mapper.
-                    alias_scan = self._header_unit_gcc_name(compiler, scan_args, mode, spelling)
-                    alias_compile = self._header_unit_gcc_name(compiler, args, mode, spelling)
-                    if alias_scan is not None:
-                        link = self._alias_header_unit_link(alias_scan, output, cache_dir, suffix)
-                        if link not in outputs:
-                            outputs.append(link)
-                        # The compile resolves the alias spelling to the one BMI
-                        # through the mapper; the link only serves the mapper-less
-                        # scan. So the pair names that BMI, not the link.
-                        if alias_compile is not None:
-                            bmis.append((alias_compile, output))
-                continue
+                if not self._has_space(compile_name):
+                    key = f'{base}:{class_subdir}'
+                    output = self._get_or_create_header_unit_edge(
+                        key, default_cmi_path(scan_name, cache_dir, suffix),
+                        compile_name, rulename, args, canon, mode, owner,
+                        is_msvc, is_gcc)
+                    outputs.append(output)
+                    # The pair carries the compile-computed name; the collate
+                    # joins every name of this BMI into each importer's mapper,
+                    # so a scan reporting the alias name and a compile asking the
+                    # real one both resolve. A pair whose name is the BMI's own
+                    # stem is redundant with --default-cmi-root reconstruction
+                    # and suppressed there.
+                    bmis.append((compile_name, output))
+                    if spelling != canon:
+                        # An extra declared spelling of the same file: one BMI,
+                        # an extra name for it. A scan through the alias reaches
+                        # the unit only at that spelling's own default path, so
+                        # link the BMI there; the compile resolves it through the
+                        # mapper.
+                        alias_scan = self._header_unit_gcc_name(compiler, scan_args, mode, spelling)
+                        alias_compile = self._header_unit_gcc_name(compiler, args, mode, spelling)
+                        if alias_scan is not None:
+                            link = self._alias_header_unit_link(alias_scan, output, cache_dir, suffix)
+                            if link not in outputs:
+                                outputs.append(link)
+                            # The compile resolves the alias spelling to the one
+                            # BMI through the mapper; the link only serves the
+                            # mapper-less scan. So the pair names that BMI, not
+                            # the link.
+                            if alias_compile is not None:
+                                bmis.append((alias_compile, output))
+                    continue
+                # A spaced compile name means GCC discarded the space-free alias
+                # for the shorter, spaced real path, which no mapper can hold.
+                # The per-class aliased path cannot name this unit; fall through
+                # to the shared flat naming, mapper-less at that real path's
+                # default. check_header_unit_names reports it.
             if is_gcc and mode == 'system' and chain_args:
                 # The per-class path for a system unit on a multi-class machine.
                 # Its name is the built-in chain path the compiler resolves it

@@ -1465,6 +1465,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                      setup_not_contains=['divergent dialects',
                                                          'cannot name a header unit'])
         self.check_gcc_module_mappers()
+        # This fixture's own path is spaced, so the units are named through the
+        # imap alias -- unless a short checkout defeats it (shorter-wins).
+        self.assert_alias_carried('util.h')
         import glob
         mappers = glob.glob(os.path.join(self.builddir, '*', 'main.cpp.*.mapper'))
         self.assertEqual(len(mappers), 1, f'expected one main.cpp mapper, got {mappers}')
@@ -1505,6 +1508,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         testdir = '173 header unit aliasing'
         self.build_and_check_modules(testdir, ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
+        # The fixture path is spaced, so the alias must carry the unit's name;
+        # a short checkout would defeat it (shorter-wins) and fail pointedly.
+        self.assert_alias_carried('header.hpp')
 
         self.new_builddir()
         self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
@@ -1717,6 +1723,65 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # No mapper carries the spaced compiler path -- the poison line the
         # degrade drops.
         self.assert_no_spaced_mapper_key(marker)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_shorter_wins_degrades(self):
+        # A user header unit under a short spaced source root: GCC discards the
+        # space-free alias for the shorter, spaced real path (shorter-wins).
+        # Meson detects the discard by probe, degrades the unit to its flat
+        # mapper-less default path (so it still builds), writes no spaced mapper
+        # key, and warns that the alias was placed but defeated. The importer
+        # then fails cleanly. The cell confirms the defeat actually occurred
+        # before asserting -- a root that was not short enough is a skip, not a
+        # false failure.
+        src = self.copy_fixture('173 header unit aliasing', spaced=True, deep=False)
+        out = self.init(src, extra_args=['-Dmode=plain'])
+        if 'discarded it' not in out:
+            raise SkipTest(
+                'the short spaced root did not defeat the alias here (GCC kept '
+                f'it); shorter-wins not provoked at {src!r}')
+        self.assertIn('a path containing whitespace', out)
+        self.assertIn('real path is shorter', out)
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('no such module', cm.exception.output)
+        self.assertIn('Building C++ header unit', cm.exception.output)
+        self.assert_no_spaced_mapper_key('s p')
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_deep_spaced_alias_wins(self):
+        # A user header unit under a deep spaced source root: the real path is
+        # longer than the alias, so GCC keeps the space-free alias and the unit
+        # builds, links and runs with no warning and no degrade. Guards the
+        # probe against a false-positive on a working spaced-alias project.
+        src = self.copy_fixture('173 header unit aliasing', spaced=True, deep=True)
+        out = self.init(src, extra_args=['-Dmode=plain'])
+        self.assertNotIn('a path containing whitespace', out)
+        self.assertNotIn('discarded it', out)
+        self.assert_alias_carried('header.hpp')
+        self.build()
+        self.run_tests()
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_unspaced_no_probes(self):
+        # An unspaced source needs no alias and no probe: the space machinery
+        # stays dormant and _run_header_probe is never called (the shorter-wins
+        # detector only probes an aliased name). Pins zero cost off the spaced
+        # path.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        src = self.copy_fixture('173 header unit aliasing', spaced=False)
+        orig = NinjaBackend._run_header_probe
+        calls: list = []
+
+        def counting(be, compiler, arglist, mode, spelling):
+            calls.append((mode, spelling))
+            return orig(be, compiler, arglist, mode, spelling)
+        with mock.patch.object(NinjaBackend, '_run_header_probe', counting):
+            out = self.init(src, extra_args=['-Dmode=plain'], inprocess=True)
+        self.assert_space_machinery_dormant(out)
+        self.assertEqual(calls, [], f'an unspaced header-unit build probed the compiler: {calls}')
+        self.build()
+        self.run_tests()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_header_unit_alias_root_pruning(self):
