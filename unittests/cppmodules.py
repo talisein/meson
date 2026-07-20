@@ -83,6 +83,27 @@ _regex_flag_cache: T.Dict[T.Tuple[str, str], T.Optional[str]] = {}
 _bmionly_cache: T.Dict[T.Tuple[str, str], bool] = {}
 
 
+# Binaries that wear a compiler driver's name while being a caching front end
+# for one. A path resolving to one of these names is not a compiler and its
+# directory is not a toolchain root.
+_COMPILER_CACHE_STEMS = frozenset({'ccache', 'distcc', 'sccache', 'buildcache'})
+
+
+def _is_compiler_cache(exe: str) -> bool:
+    """Whether `exe` ultimately resolves to a compiler-cache binary."""
+    stem = os.path.splitext(os.path.basename(os.path.realpath(exe)))[0]
+    return stem.lower() in _COMPILER_CACHE_STEMS
+
+
+def _which_real_driver(name: str) -> T.Optional[str]:
+    """The first `name` on PATH that is not a compiler-cache masquerade."""
+    for d in os.get_exec_path():
+        found = shutil.which(name, path=d)
+        if found and not _is_compiler_cache(found):
+            return found
+    return None
+
+
 @functools.lru_cache(maxsize=None)
 def _host_cpp_compiler() -> T.Optional[CPPCompiler]:
     try:
@@ -136,10 +157,11 @@ def _bmionly_probe_builds(cpp: CPPCompiler) -> bool:
     """Compile a trivial interface unit in the compiler's BMI-only mode and
     check that a BMI appears and no object does (a failing rc, a missing BMI
     or a stray object all mean the mode is unusable)."""
-    if cpp.get_id() == 'msvc':
+    family = cpp.cpp_module_family()
+    if family == 'msvc':
         src = 'mod.ixx'
         attempts = [['/nologo', '/std:c++20', '/c', '/interface', '/ifcOnly', src]]
-    elif cpp.get_id() == 'clang':
+    elif family == 'clang':
         src = 'mod.cppm'
         attempts = [['-std=c++20', '--precompile', src, '-o', 'mod.pcm']]
     else:
@@ -160,7 +182,7 @@ def _bmionly_probe_builds(cpp: CPPCompiler) -> bool:
             if p.returncode != 0:
                 continue
             produced = [name for root, _, files in os.walk(tmpdir) for name in files]
-            if any(name.endswith(('.gcm', '.pcm', '.ifc')) for name in produced) \
+            if any(name.endswith(cpp.get_module_bmi_suffix()) for name in produced) \
                     and not any(name.endswith(('.o', '.obj')) for name in produced):
                 return True
     return False
@@ -250,7 +272,10 @@ def requires_cpp_module_caps(*tokens: str,
 # The flag that names a specific BMI on a consumer command line. Commands must
 # never carry one: modules are mapped via the module mapper / prebuilt-path
 # machinery, not per-BMI flags, or the command lines would change with the
-# module graph.
+# module graph. Keyed by cpp_module_family(), not by compiler id: the families
+# are exactly the three that have such a flag ('none' never reaches a module
+# test), while an id would raise KeyError on every clang-derived compiler that
+# carries an id of its own -- intel-llvm, armltdclang, emscripten.
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
 
@@ -323,7 +348,8 @@ class CppModulesTestMixin:
             path = self.bmi_path(name)
             self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
         if ninja_args_not_contains is None:
-            ninja_args_not_contains = (cpp.get_module_bmi_suffix(), _BMI_MAP_FLAG[cpp.get_id()])
+            ninja_args_not_contains = (cpp.get_module_bmi_suffix(),
+                                       _BMI_MAP_FLAG[cpp.cpp_module_family()])
         if ninja_args_not_contains or ninja_not_contains:
             with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
                 contents = f.read()
@@ -606,7 +632,7 @@ class CppModulesTestMixin:
         """The header-unit BMIs `target`'s own compiles resolve for `basename`.
         Read from its per-TU module mappers on GCC, where no unit BMI path
         reaches a command line; from the compile edge's flags elsewhere."""
-        if self.host_cpp_compiler().get_id() != 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() != 'gcc':
             return self.header_unit_digests(basename, edges=f'{target}.p/')
         bmis: T.Set[str] = set()
         # The private dir carries the target's output suffix (prog.p on
@@ -800,15 +826,26 @@ class CppModulesTestMixin:
         # leaves ['g++', '-m32']), so the driver is the first entry.
         cmd = cpp.get_exelist(ccache=False)
         exe = cmd[0] if cmd else None
-        if exe and os.path.isabs(exe) and os.path.isfile(exe):
+        if not exe:
+            return None
+        if not (os.path.isabs(exe) and os.path.isfile(exe)):
+            exe = shutil.which(exe)
+        if exe is None or not _is_compiler_cache(exe):
             return exe
-        return shutil.which(exe) if exe else None
+        # A compiler-cache masquerade: distros put a directory of links named
+        # after the drivers early on PATH (/usr/lib64/ccache/g++), each
+        # pointing at the cache binary. Its realpath's directory is the
+        # cache's, so the caller would derive a "toolchain root" of /usr and
+        # the rungs would go on to link and probe ccache itself instead of a
+        # compiler. Look further down PATH for a real driver of the same
+        # name; None if there is none, so the rung skips honestly.
+        return _which_real_driver(os.path.basename(exe))
 
     def _probe_system_header(self, cpp: 'CPPCompiler', header: str) -> T.Optional[str]:
         """The path the compiler resolves ``#include <header>`` to, read from
         its own diagnostic output. None when the probe cannot resolve it."""
         exe = cpp.get_exelist(ccache=False)
-        if cpp.get_id() in ('msvc', 'clang-cl'):
+        if cpp.get_argument_syntax() == 'msvc':
             with tempfile.TemporaryDirectory() as d:
                 src = os.path.join(d, 'p.cpp')
                 with open(src, 'w', encoding='utf-8') as f:

@@ -31,7 +31,7 @@ from mesonbuild.mesonlib import (
 )
 from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
-    detect_c_compiler, detect_cpp_compiler, compiler_from_language,
+    detect_c_compiler, detect_cpp_compiler, detect_static_linker, compiler_from_language,
 )
 from mesonbuild.compilers.c import AppleClangCCompiler, ElbrusCompiler
 from mesonbuild.compilers.cpp import AppleClangCPPCompiler, CPPCompiler
@@ -1065,13 +1065,25 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # on the build machine (same arch), so cross-built programs can be run
         # by test(). The caller keeps the returned handle alive for the file's
         # lifetime and points self.meson_cross_files at it.
+        # Name the binaries Meson itself detected, not whatever 'gcc'/'g++'
+        # happen to resolve to: CI sets CXX per job, so re-detecting by name
+        # can pick a different compiler than the one the capability tokens
+        # were probed from -- and on an image carrying only g++-15 there is no
+        # bare 'g++' at all, which would write cpp = 'None' and hard-error.
+        env = get_fake_env()
+        cpp = self.host_cpp_compiler()
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        ar = detect_static_linker(env, cc)
+        # strip has no compiler handle to ask; omit the entry rather than
+        # interpolate a None, which leaves Meson to find it as it normally would.
+        strip = shutil.which('strip')
+        binaries = [f'c = {cc.get_exelist(ccache=False)!r}',
+                    f'cpp = {cpp.get_exelist(ccache=False)!r}',
+                    f'ar = {ar.exelist!r}']
+        if strip:
+            binaries.append(f'strip = {strip!r}')
         crossfile = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8')
-        crossfile.write(textwrap.dedent(f'''\
-            [binaries]
-            c = '{shutil.which('gcc')}'
-            cpp = '{shutil.which('g++')}'
-            ar = '{shutil.which('ar')}'
-            strip = '{shutil.which('strip')}'
+        crossfile.write('[binaries]\n' + '\n'.join(binaries) + '\n' + textwrap.dedent('''\
 
             [host_machine]
             system = 'linux'
@@ -1283,7 +1295,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                          'same-class declarers must share one unit BMI')
         self.assertNotEqual(per_prog['prog23'], per_prog['prog20'],
                             'divergent dialect classes must not share a unit BMI')
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
@@ -1308,7 +1320,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         for prog in ('prog20', 'prog23'):
             self.assertFalse(self.header_unit_bmis_of(prog, 'util.h'),
                              f'{prog} inherits util.h; it must name no unit BMI itself')
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
@@ -1492,7 +1504,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # (ninja >= 1.12), reaping the dead topology's declared outputs;
         # stale class-cache BMIs and owner claims stay on disk, inert, like
         # the harvest cache in general.
-        gcc = self.host_cpp_compiler().get_id() == 'gcc'
+        gcc = self.host_cpp_compiler().cpp_module_family() == 'gcc'
         testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
         self.init(testdir, extra_args=['-Dwithfoo=false'])
         self.build(override_envvars=self.NO_CCACHE)
@@ -2070,9 +2082,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='clang')
     def test_clang_import_std_bmi_classes(self):
+        # The fixture's divergent class is c++26. Ask Meson's own
+        # version-filtered std table whether this compiler offers it, rather
+        # than hand-rolling a version floor here.
         cpp = self.host_cpp_compiler()
-        if version_compare(cpp.version, '<17.0.0'):
-            raise SkipTest('-std=c++26 requires clang 17')
+        std_opt = cpp.get_options()[cpp.form_compileropt_key('std')]
+        if 'c++26' not in std_opt.choices:
+            raise SkipTest(f'{cpp.get_id()} {cpp.version} does not offer -std=c++26')
         self.check_import_std_bmi_classes('167 import std bmi classes',
                                           progs=('prog23', 'prog26'),
                                           compat_progs=('prog26',))
@@ -2255,7 +2271,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertNotEqual(per_prog['progfoo'], per_prog['prog'],
                             'divergent classes must not share a unit BMI')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
@@ -2605,7 +2621,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      ninja_args_not_contains=(),
                                      setup_not_contains=['cannot name a header unit'])
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             # This fixture's path contains spaces, so its units are named
             # through a space-free alias -- and it is the one fixture that
             # combines a subdirectory importer with an upward-relative spelling,
@@ -2635,7 +2651,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      setup_not_contains=['cannot name a header unit'])
         units = self.header_unit_bmis('header.hpp')
         self.assertEqual(len(units), 2, f'expected one BMI per class, got {units}')
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             per_prog = {}
             for prog in ('prog', 'progfoo'):
                 alias_bmi = self.assert_alias_mapper_key(prog, 'foo_aliased.cpp')
@@ -2656,7 +2672,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # misses the declared unit's CMI and the scan fails with GCC's own
         # message; Clang normalizes the resolved file and matches it.
         self.new_builddir()
-        if self.host_cpp_compiler().get_id() == 'gcc':
+        if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.init(os.path.join(self.unit_test_dir, testdir),
                       extra_args=['-Dmode=undeclared'])
             with self.assertRaises(subprocess.CalledProcessError) as cm:

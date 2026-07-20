@@ -402,6 +402,23 @@ Thread model: posix'''), '21.9.0')
         for cls, family in cases.items():
             self.assertEqual(cls.__new__(cls).cpp_module_family(), family, cls.__name__)
 
+    def test_bmi_map_flag_keyed_by_family(self):
+        # The module test driver's table of "the flag that names a BMI on a
+        # consumer command line" must be keyed by cpp_module_family(), whose
+        # whole domain it covers. Keyed by compiler id it would raise KeyError
+        # -- not SkipTest -- on every clang-derived compiler that carries an id
+        # of its own.
+        from mesonbuild.compilers.cpp import (
+            IntelLLVMCPPCompiler, ArmLtdClangCPPCompiler, EmscriptenCPPCompiler)
+        from .cppmodules import _BMI_MAP_FLAG
+        for cls in (IntelLLVMCPPCompiler, ArmLtdClangCPPCompiler, EmscriptenCPPCompiler):
+            cpp = cls.__new__(cls)
+            self.assertNotIn(cpp.get_id(), _BMI_MAP_FLAG, cls.__name__)
+            with self.assertRaises(KeyError):
+                _BMI_MAP_FLAG[cpp.get_id()]
+            self.assertEqual(_BMI_MAP_FLAG[cpp.cpp_module_family()], '-fmodule-file',
+                             cls.__name__)
+
     def test_collate_depargs_shared_assembly(self):
         # A target's own collate and a BMI-only variant's collate both build
         # their depaccumulate flags through _collate_depargs; only the head

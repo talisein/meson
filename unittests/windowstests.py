@@ -23,7 +23,7 @@ from mesonbuild.mesonlib import (
 )
 from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
-    detect_c_compiler, detect_d_compiler, compiler_from_language,
+    detect_c_compiler, detect_d_compiler, detect_static_linker, compiler_from_language,
 )
 from mesonbuild.programs import ExternalProgram
 import mesonbuild.dependencies.base
@@ -1702,11 +1702,27 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         nfdir = tempfile.mkdtemp()
         self.addCleanup(windows_proof_rmtree, nfdir)
         nf = os.path.join(nfdir, 'spaced-gcc.ini')
+        # The C driver and ar are the fabricated tree's counterparts of the
+        # ones Meson detected, found by name in the fabricated bin dir --
+        # never re-spelled as 'gcc.exe'/'ar.exe'. Real installs decorate the
+        # stems (x86_64-w64-mingw32-gcc.exe, gcc-ar.exe) and the fabricated
+        # copy need not carry a bare 'gcc.exe' at all; where the mirror has no
+        # counterpart, the real binary still works, only unspaced -- the space
+        # under test is the C++ driver's.
+        env = get_fake_env()
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        ar = detect_static_linker(env, cc)
+
+        def mirrored(real: str) -> str:
+            cand = os.path.join(bindir, os.path.basename(real))
+            if os.path.isfile(cand):
+                return cand
+            return real if os.path.isabs(real) else (shutil.which(real) or real)
         with open(nf, 'w', encoding='utf-8') as f:
             f.write('[binaries]\n')
-            f.write(f"c = {os.path.join(bindir, 'gcc.exe').replace(os.sep, '/')!r}\n")
+            f.write(f"c = {mirrored(cc.get_exelist(ccache=False)[0]).replace(os.sep, '/')!r}\n")
             f.write(f"cpp = {gxx.replace(os.sep, '/')!r}\n")
-            f.write(f"ar = {os.path.join(bindir, 'ar.exe').replace(os.sep, '/')!r}\n")
+            f.write(f"ar = {mirrored(ar.exelist[0]).replace(os.sep, '/')!r}\n")
         src = self.copy_fixture('197 header unit forced include', spaced=False)
         out = self.init(src, extra_args=['--native-file', nf, '-Dmode=ok'])
         # The warning names the compiler's own location, not the project, and
