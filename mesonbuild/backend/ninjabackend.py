@@ -3076,15 +3076,38 @@ class NinjaBackend(backends.Backend):
                     'spelling or the dependency that provides the header, or drop it '
                     'from cpp_header_units.', fatal=False)
                 continue
-            mlog.warning(
+            head = (
                 f'Target {target.name!r} imports the C++ header unit {spelling!r}, '
                 f'which resolves to {key!r} -- a path containing whitespace. GCC '
                 'resolves modules through a module mapper, and a mapper cannot name '
-                'a header unit whose path contains a space: the compile will fail '
-                'with "no such module". Meson normally routes such a header through '
-                'a space-free alias, but could not create one here (creating it needs '
-                'symlink support, which Windows does not give unprivileged builds). '
-                'Move the source tree to a path without spaces.', fatal=False)
+                'a header unit whose path contains a space, so a source that imports '
+                'this unit will fail to compile with "no such module". Meson builds '
+                'the BMI at its default path regardless. ')
+            # The space's origin decides what the user can do about it. A system
+            # unit is named through the compiler's own search chain, and a user
+            # unit resolving outside the source and build trees fell through to
+            # that same chain: the space is in the compiler's install location,
+            # which no include path of Meson's can respell. Otherwise the space
+            # is in the project's own path, where a space-free alias would
+            # normally hide it -- named here only because the platform could not
+            # place one.
+            build_dir = self.environment.get_build_dir()
+            resolved = os.path.normcase(os.path.realpath(os.path.join(build_dir, key)))
+            src = os.path.normcase(os.path.realpath(self.environment.get_source_dir()))
+            bld = os.path.normcase(os.path.realpath(build_dir))
+            in_project = (resolved == src or resolved.startswith(src + os.sep)
+                          or resolved == bld or resolved.startswith(bld + os.sep))
+            if mode == 'system' or not in_project:
+                mlog.warning(head +
+                    'The space is inside the compiler\'s own install location, '
+                    'which Meson cannot rename. Install the C++ compiler at a path '
+                    'without spaces, or stop declaring compiler-owned headers as '
+                    'header units and #include this one instead.', fatal=False)
+            else:
+                mlog.warning(head +
+                    'Meson routes such a header through a space-free alias, but '
+                    'could not place one for this path. Move the project to a path '
+                    'without spaces.', fatal=False)
 
     def warn_on_preincluded_header_units(self, target: build.BuildTarget,
                                          args: T.Union['CompilerArgs', T.List[str]]) -> None:

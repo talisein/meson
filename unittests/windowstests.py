@@ -19,7 +19,7 @@ import mesonbuild.coredata
 import mesonbuild.modules.gnome
 from mesonbuild.mesonlib import (
     MachineChoice, is_windows, is_cygwin, python_command, version_compare,
-    EnvironmentException
+    EnvironmentException, windows_proof_rmtree
 )
 from mesonbuild.options import OptionKey
 from mesonbuild.compilers import (
@@ -1673,6 +1673,50 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             self.assertNotIn('imap', f.read())
         self.build()
         self.run_tests()
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_compiler_owned_space_degrades(self):
+        # A compiler-owned system header unit under a spaced install prefix
+        # cannot be named in a mapper: a mapper key ends at the first space, and
+        # the compile keeps the real (spaced) chain no matter how the scan is
+        # aliased. The contract is a documented degrade -- the unit still builds
+        # at its default path, no mapper carries the spaced key, setup names the
+        # space's true origin (the compiler's own location, not the project),
+        # and a source that imports the unit fails to compile with "no such
+        # module". The source is copied to an unspaced path so the only space in
+        # play is the compiler's; the spaced prefix itself is fabricated (probe
+        # the host, else link+reprobe, else the opt-in copy rung, else skip).
+        cpp = self.host_cpp_compiler()
+        gxx = self.fabricate_spaced_gcc_prefix(cpp)
+        resolved = self._shell_probe_vector(gxx)
+        self.assertIsNotNone(resolved, 'fabricated compiler cannot resolve <vector>')
+        marker = os.path.dirname(resolved)  # the spaced compiler include dir
+        self.assertIn(' ', marker)
+        bindir = os.path.dirname(gxx)
+        nfdir = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, nfdir)
+        nf = os.path.join(nfdir, 'spaced-gcc.ini')
+        with open(nf, 'w', encoding='utf-8') as f:
+            f.write('[binaries]\n')
+            f.write(f"c = {os.path.join(bindir, 'gcc.exe').replace(os.sep, '/')!r}\n")
+            f.write(f"cpp = {gxx.replace(os.sep, '/')!r}\n")
+            f.write(f"ar = {os.path.join(bindir, 'ar.exe').replace(os.sep, '/')!r}\n")
+        src = self.copy_fixture('197 header unit forced include', spaced=False)
+        out = self.init(src, extra_args=['--native-file', nf, '-Dmode=ok'])
+        # The warning names the compiler's own location, not the project, and
+        # does not offer the move-the-project remedy that only fits a source
+        # space.
+        self.assertIn('a path containing whitespace', out)
+        self.assertIn("compiler's own install location", out)
+        self.assertNotIn('Move the project', out)
+        # The unit BMI builds; the importer fails cleanly at its own compile.
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('no such module', cm.exception.output)
+        self.assertIn('Building C++ header unit', cm.exception.output)
+        # No mapper carries the spaced compiler path -- the poison line the
+        # degrade drops.
+        self.assert_no_spaced_mapper_key(marker)
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_header_unit_alias_root_pruning(self):
