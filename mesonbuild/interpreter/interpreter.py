@@ -2164,11 +2164,16 @@ class Interpreter(InterpreterBase, HoldableObject):
             self.build.cpp_std_module_deps[for_machine][memo_key] = dep
             return dep
 
-        # Synthesizing the std archive only works under Ninja. A required probe
-        # fails configuration there as before; a not-required probe degrades to
-        # not-found (memoized like the sources-unavailable path above) so an
-        # optional import-std probe still configures on vs2022/xcode.
-        if self.backend.name != 'ninja':
+        # Synthesizing the std archive only works under Ninja. A genvslite
+        # (gen_lite) vs backend compiles through per-buildtype Ninja build
+        # dirs, so it has the pipeline and is treated as Ninja here (mirrors
+        # the same allowance in add_target's module-target gate). A required
+        # probe fails configuration on any other backend as before; a
+        # not-required probe degrades to not-found (memoized like the
+        # sources-unavailable path above) so an optional import-std probe
+        # still configures on vs2022/xcode.
+        backend_has_pipeline = self.backend.name == 'ninja' or getattr(self.backend, 'gen_lite', False)
+        if not backend_has_pipeline:
             if required:
                 raise InterpreterException(
                     "dependency('std') (C++ import std) is only supported with the "

@@ -1377,17 +1377,20 @@ Thread model: posix'''), '21.9.0')
             check('gcc', False, has_cpp=False)  # no C++ compiler at all
 
     def test_cpp_std_dependency_not_required_on_non_ninja_backend(self):
-        # Synthesizing import std needs the Ninja backend. A required probe must
-        # fail configuration on vs2022/xcode; a not-required probe must degrade
-        # to not-found (and memoize it) rather than hard-error -- MSVC ships
-        # modules.json, so the sources probe succeeds and the backend check is
-        # what a graceful optional probe hits there.
+        # Synthesizing import std needs the Ninja backend, or a genvslite vs
+        # backend (which compiles through per-buildtype Ninja build dirs and
+        # so has the pipeline too -- mirrors add_target's module-target
+        # gate). A required probe must fail configuration on a plain
+        # vs2022/xcode; a not-required probe must degrade to not-found (and
+        # memoize it) rather than hard-error -- MSVC ships modules.json, so
+        # the sources probe succeeds and the backend check is what a graceful
+        # optional probe hits there.
         from mesonbuild.interpreter.interpreter import Interpreter
         from mesonbuild.interpreterbase import InterpreterException
 
         for_machine = MachineChoice.HOST
 
-        def make_interp(backend_name):
+        def make_interp(backend_name, gen_lite=False):
             interp = Interpreter.__new__(Interpreter)
             interp.subproject = ''
             interp.environment = mock.MagicMock()
@@ -1404,8 +1407,16 @@ Thread model: posix'''), '21.9.0')
             interp.build.global_args = {for_machine: {}}
             interp.current_build_project = mock.MagicMock(
                 return_value=mock.MagicMock(project_args={for_machine: {}}))
+            # A real (non-VS) backend object has no 'gen_lite' attribute at
+            # all, which is why the interpreter uses getattr(..., False); a
+            # bare MagicMock would instead auto-fabricate a truthy attribute
+            # and mask the backend check entirely, so it is set explicitly
+            # here to mirror a real backend instance (vs2010backend.py always
+            # sets it to a bool; other backends lack it, and getattr's
+            # default covers that case).
             interp.backend = mock.MagicMock()
             interp.backend.name = backend_name
+            interp.backend.gen_lite = gen_lite
             return interp
 
         def call(interp, required):
@@ -1436,6 +1447,14 @@ Thread model: posix'''), '21.9.0')
         # (c) ninja backend: the backend check does not fire; synthesis proceeds
         # (func_static_lib stubbed) and a found() dependency comes back.
         interp = make_interp('ninja')
+        interp.func_static_lib = mock.MagicMock(return_value=mock.MagicMock())
+        dep = call(interp, False)
+        self.assertTrue(dep.found())
+
+        # (d) genvslite vs backend (gen_lite=True): treated like Ninja, same
+        # as add_target's module-target gate -- synthesis proceeds rather
+        # than the backend check firing.
+        interp = make_interp('vs2022', gen_lite=True)
         interp.func_static_lib = mock.MagicMock(return_value=mock.MagicMock())
         dep = call(interp, False)
         self.assertTrue(dep.found())

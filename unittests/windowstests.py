@@ -334,6 +334,50 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             for build_dir in glob(self.builddir + '_*', recursive=False):
                 shutil.rmtree(build_dir)
 
+    @skipIf(is_cygwin(), 'Test only applicable to Windows')
+    def test_cpp_modules_genvslite_import_std_setup(self):
+        # dependency('std') must not be refused on a genvslite vs backend:
+        # like the suffix-inferred module target above, it compiles through
+        # per-buildtype Ninja build dirs and has the scan/collate pipeline
+        # that synthesizes the std archive. Only the final _vs wrapper
+        # configure instantiates the vs2022 backend object, which is exactly
+        # where the gate used to see backend.name == 'vs2022' and wrongly
+        # refuse it.
+        if self.backend is not Backend.ninja:
+            raise SkipTest('Test only applies when using the Ninja backend')
+        testdir = os.path.join(self.unit_test_dir, '150 msvc import std')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        if cc.get_argument_syntax() != 'msvc':
+            raise SkipTest('Test only applies when MSVC tools are available.')
+        try:
+            self.init(testdir, extra_args=['--genvslite', 'vs2022', '-Dcpp_std=vc++latest'])
+            self.assertTrue(os.path.exists(os.path.join(self.builddir + '_vs', 'msvc import std.sln')))
+        finally:
+            for build_dir in glob(self.builddir + '_*', recursive=False):
+                shutil.rmtree(build_dir)
+
+    @skipIf(is_cygwin(), 'Test only applicable to Windows')
+    def test_cpp_modules_native_vs_backend_import_std_refused(self):
+        # Unlike genvslite, the native vs backend has no import-std machinery
+        # of its own: MSBuild's own module scan handles a suffix-inferred
+        # named module, but nothing on that backend synthesizes the std
+        # archive, so dependency('std') must stay refused there with the
+        # Ninja-backend error.
+        if self.backend is not Backend.ninja:
+            raise SkipTest('Test drives its own vs2022 backend; run it under the Ninja backend.')
+        testdir = os.path.join(self.unit_test_dir, '150 msvc import std')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        if cc.get_argument_syntax() != 'msvc':
+            raise SkipTest('Test only applies when MSVC tools are available.')
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir, extra_args=['--backend=vs2022', '-Dcpp_std=vc++latest'])
+        self.assertIn(
+            "dependency('std') (C++ import std) is only supported with the "
+            "Ninja backend (current backend: vs2022).",
+            cm.exception.stdout)
+
     def test_install_pdb_introspection(self):
         testdir = os.path.join(self.platform_test_dir, '1 basic')
 
