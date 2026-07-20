@@ -155,26 +155,44 @@ class FailureTests(BasePlatformTests):
             self.assertMesonRaises(contents, match)
 
     def test_cpp_modules_need_ninja_backend(self):
-        # A target that uses C++ modules must error clearly on a non-Ninja
-        # backend (the scan/dyndep pipeline is Ninja-only) rather than silently
-        # misbuilding.
+        # The module kwargs drive scan/collate machinery only Ninja has, so a
+        # vs backend refuses them by name (MSBuild has no equivalent and would
+        # silently drop them) -- unlike a bare .ixx / .cppm source, which the vs
+        # backend admits because MSBuild scans it natively (see the suffix test
+        # below). This is the cpp_modules-bool shape of that refusal.
         with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
             f.write('int main(void) { return 0; }\n')
         self.assertMesonRaises(
             "executable('prog', 'main.cpp', cpp_modules: true)",
-            'only supported with the Ninja backend',
+            r'sets cpp_modules,.*need the Ninja backend',
             extra_args=['--backend=vs2022'])
 
     def test_cpp_header_units_need_ninja_backend(self):
         # A target that only declares header units (no module-interface source,
-        # not a module provider) still needs the Ninja-only pipeline, so it must
-        # error on a non-Ninja backend rather than silently misbuilding.
+        # not a module provider) still needs the Ninja-only pipeline, so a vs
+        # backend refuses it by name rather than silently misbuilding.
         with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
             f.write('int main(void) { return 0; }\n')
         self.assertMesonRaises(
             "executable('prog', 'main.cpp', cpp_header_units: ['util.h'])",
-            'only supported with the Ninja backend',
+            r'sets cpp_header_units,.*need the Ninja backend',
             extra_args=['--backend=vs2022'])
+
+    def test_cpp_modules_suffix_inferred_allowed_on_vs(self):
+        # The counterpart to the two refusals above: module use inferred from
+        # the source suffix alone (a .ixx with no module kwargs) is handled
+        # natively by MSBuild, so the vs backend must configure it without
+        # error. The kwarg-driven cases refuse; this suffix-only case does not.
+        with open(os.path.join(self.srcdir, 'main.cpp'), 'w', encoding='utf-8') as f:
+            f.write('int main(void) { return 0; }\n')
+        with open(os.path.join(self.srcdir, 'pkg.ixx'), 'w', encoding='utf-8') as f:
+            f.write('export module pkg;\n')
+        with open(self.mbuild, 'w', encoding='utf-8') as f:
+            f.write("project('suffix modules', 'cpp')\n")
+            f.write("executable('prog', 'main.cpp', 'pkg.ixx')\n")
+        # No exception: reaching generation without InvalidArguments is the check.
+        self.init(self.srcdir, extra_args=['--backend=vs2022'], inprocess=True,
+                  override_envvars={'MESON_FORCE_BACKTRACE': '1'})
 
     def test_apple_frameworks_dependency(self):
         if not is_osx():

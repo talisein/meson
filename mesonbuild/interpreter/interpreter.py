@@ -4436,10 +4436,41 @@ class Interpreter(InterpreterBase, HoldableObject):
         # C++ module TU: a pure-C consumer that merely links a provider has no
         # such TU (uses_cpp_modules() is true only through the link walk), and
         # the provider it links trips this same check on its own.
-        if self.backend.name != 'ninja' and target.uses_cpp_modules() and target.has_cpp_source():
-            raise InvalidArguments(
-                f'Target {name!r} uses C++ modules, which are only supported '
-                f'with the Ninja backend (current backend: {self.backend.name}).')
+        #
+        # A genvslite (gen_lite) vs backend compiles through per-buildtype Ninja
+        # build dirs, so it has the pipeline and is treated as Ninja here.
+        backend_has_pipeline = self.backend.name == 'ninja' or getattr(self.backend, 'gen_lite', False)
+        if not backend_has_pipeline and target.uses_cpp_modules() and target.has_cpp_source():
+            # The module kwargs drive scan/collate machinery no backend but
+            # Ninja has, so on any other backend they would be silently dropped.
+            module_kwargs_set = [
+                kw for kw, val in (
+                    ('cpp_modules', target.cpp_modules),
+                    ('cpp_module_interfaces', target.cpp_module_interfaces),
+                    ('cpp_internal_partitions', target.cpp_internal_partitions),
+                    ('cpp_private_module_interfaces', target.cpp_private_module_interfaces),
+                    ('cpp_header_units', target.cpp_header_units),
+                ) if val
+            ]
+            if self.backend.name.startswith('vs') and not module_kwargs_set:
+                # Admit a target whose module use is inferred from source suffix
+                # alone (a .ixx / .cppm with no module kwargs): the native vs
+                # backend emits it as an ordinary compile and MSBuild's own
+                # module machinery scans it, produces the BMI, and orders the
+                # importers. Only the kwarg-driven features below have no vs
+                # equivalent.
+                pass
+            elif self.backend.name.startswith('vs'):
+                kwlist = ', '.join(module_kwargs_set)
+                raise InvalidArguments(
+                    f'Target {name!r} sets {kwlist}, which drive C++ module '
+                    f'machinery only the Ninja backend has; MSBuild builds a bare '
+                    f'.ixx / .cppm module source natively, but these kwargs need '
+                    f'the Ninja backend (current backend: {self.backend.name}).')
+            else:
+                raise InvalidArguments(
+                    f'Target {name!r} uses C++ modules, which are only supported '
+                    f'with the Ninja backend (current backend: {self.backend.name}).')
 
         # Every entry of the three module-source kwargs must name one of the
         # target's own sources, and each pair of them is either a contradiction

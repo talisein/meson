@@ -273,6 +273,67 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             for build_dir in suffixed_build_dirs:
                 shutil.rmtree(build_dir)
 
+    @skipIf(is_cygwin(), 'Test only applicable to Windows')
+    def test_cpp_modules_native_vs_backend(self):
+        # A real named-module project -- a .ixx provider imported by main.cpp,
+        # module use inferred from the source suffix with no module kwargs --
+        # must configure, build, and run on the native vs backend. Meson's
+        # Ninja-only module pipeline is not involved: MSBuild's own machinery
+        # scans the .ixx, produces the BMI, and orders the importer. The
+        # framework may itself be pinned to a non-ninja backend for a whole run
+        # (e.g. --backend=vs); this test drives its own vs2022 backend, so it
+        # only makes sense under the Ninja backend, like test_genvslite.
+        if self.backend is not Backend.ninja:
+            raise SkipTest('Test drives its own vs2022 backend; run it under the Ninja backend.')
+        testdir = os.path.join(self.unit_test_dir, '213 cpp modules native vs')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        if cc.get_argument_syntax() != 'msvc':
+            raise SkipTest('Test only applies when MSVC tools are available.')
+        msbuildprog = ExternalProgram('msbuild.exe')
+        if not msbuildprog.found():
+            raise SkipTest('msbuild.exe not found')
+
+        # The suffix-inferred module target must not be refused on the vs
+        # backend (setup would raise otherwise).
+        self.init(testdir, extra_args=['--backend=vs2022', '-Dcpp_std=vc++latest'])
+
+        # Build the generated solution through msbuild. See test_genvslite for
+        # why VSINSTALLDIR must be removed from the child environment.
+        current_env = os.environ.copy()
+        current_env.pop('VSINSTALLDIR', None)
+        subprocess.check_call(
+            ['msbuild', '-property:Configuration=debug',
+             os.path.join(self.builddir, 'modtest.sln')],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=current_env)
+
+        exe_path = os.path.join(self.builddir, 'modtest.exe')
+        self.assertTrue(os.path.exists(exe_path), 'native vs backend did not build the module exe')
+        rc = subprocess.run([exe_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(rc.returncode, 0, rc.stdout + rc.stderr)
+
+    @skipIf(is_cygwin(), 'Test only applicable to Windows')
+    def test_cpp_modules_genvslite_setup(self):
+        # genvslite compiles through per-buildtype Ninja build dirs, so a
+        # suffix-inferred module project must configure under it (the final _vs
+        # solution wrapper shares the target-creation checks and must not refuse
+        # the module target). Setup alone is the check; the Ninja build path is
+        # exercised by the module tests proper.
+        if self.backend is not Backend.ninja:
+            raise SkipTest('Test only applies when using the Ninja backend')
+        testdir = os.path.join(self.unit_test_dir, '213 cpp modules native vs')
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        cc = detect_c_compiler(env, MachineChoice.HOST)
+        if cc.get_argument_syntax() != 'msvc':
+            raise SkipTest('Test only applies when MSVC tools are available.')
+        try:
+            self.init(testdir, extra_args=['--genvslite', 'vs2022', '-Dcpp_std=vc++latest'])
+            self.assertTrue(os.path.exists(os.path.join(self.builddir + '_vs', 'modtest.sln')))
+        finally:
+            for build_dir in glob(self.builddir + '_*', recursive=False):
+                shutil.rmtree(build_dir)
+
     def test_install_pdb_introspection(self):
         testdir = os.path.join(self.platform_test_dir, '1 basic')
 
