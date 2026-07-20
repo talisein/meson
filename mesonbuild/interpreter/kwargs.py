@@ -417,7 +417,7 @@ class BuildTarget(BaseBuildTarget):
     link_early_args: T.List[str]
     c_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
     cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
-    cpp_modules: bool
+    cpp_modules: T.Optional[bool]
     cpp_header_units: T.List[str]
     cpp_module_interfaces: T.List[T.Union[str, File]]
     cpp_internal_partitions: T.List[T.Union[str, File]]

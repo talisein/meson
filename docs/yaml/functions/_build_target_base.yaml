@@ -171,14 +171,17 @@ kwargs:
   cpp_modules:
     type: bool
     since: 1.12.0
-    default: false
     description: |
-      Explicitly mark this target as using C++20 named modules, enabling the
-      module scan/collate pipeline even when the target has no
-      module-interface source of its own (for example a consumer whose sources
-      all use a non-module extension). A target that has a `.cppm`/`.ixx`
-      source, or that links a target which provides modules, is treated as
-      module-enabled automatically without this keyword.
+      A tristate that overrides how this target is classified for C++20 named
+      modules. When left unset (the default), classification is inferred: a
+      target that has a `.cppm`/`.ixx` source, or that links a target which
+      provides modules, is treated as module-enabled automatically. Set it to
+      `true` to mark the target module-enabled anyway, enabling the module
+      scan/collate pipeline even when the target has no module-interface source
+      of its own (for example a consumer whose sources all use a non-module
+      extension). Set it to `false` to opt the target out entirely: a
+      `.cppm`/`.ixx` source is then compiled as ordinary C++ (no module
+      pipeline, and no `cpp_std c++20` floor).
 
       The target's `native:` kwarg selects which machine it belongs to, and
       with it which machine's module cache its provided and imported modules

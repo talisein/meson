@@ -864,6 +864,39 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         with self.assertRaises((subprocess.CalledProcessError, RuntimeError)):
             self.init(testdir, extra_args=['-Dc_args=-Wbad-flag-does-not-exist'])
 
+    def test_cpp_modules_opt_out(self):
+        # cpp_modules is a tristate: unset infers module classification from the
+        # source suffix, true forces it, false opts out. Under cpp_std=c++17 the
+        # three states are told apart by whether the c++20 module floor fires at
+        # setup. Pure Meson classification, so the configure matrix is
+        # compiler-independent; the opted-out build (a .ixx compiled as ordinary
+        # C++) is checked on GCC, which accepts the extension without -x c++.
+        testdir = os.path.join(self.unit_test_dir, '218 cpp modules opt out')
+        floor_msg = 'require cpp_std c++20 or later'
+        # Opt-out: cpp_modules: false lifts the floor, so a .ixx configures at
+        # c++17.
+        self.init(testdir, extra_args=['-Dmode=optout'])
+        # Regression guard: the same .ixx with cpp_modules unset is still
+        # inferred a module interface and trips the floor -- proving the opt-out
+        # is what lifts it, not something else.
+        self.new_builddir()
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir, extra_args=['-Dmode=inferred'])
+        self.assertIn(floor_msg, cm.exception.stdout)
+        # cpp_modules: true forces module treatment onto a plain .cpp the suffix
+        # would never infer, so it trips the same floor.
+        self.new_builddir()
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir, extra_args=['-Dmode=forced'])
+        self.assertIn(floor_msg, cm.exception.stdout)
+        # On GCC the opted-out .ixx also builds and runs as ordinary C++.
+        env = get_fake_env(testdir, self.builddir, self.prefix)
+        if detect_cpp_compiler(env, MachineChoice.HOST).get_id() == 'gcc':
+            self.new_builddir()
+            self.init(testdir, extra_args=['-Dmode=optout'])
+            self.build()
+            self.run_tests()
+
     @requires_cpp_module_caps('modules', 'partitions', compiler='gcc')
     def test_gcc_cpp_modules(self):
         # The library provides a module, imported by an executable that merely

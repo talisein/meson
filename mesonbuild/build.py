@@ -145,7 +145,7 @@ if T.TYPE_CHECKING:
         build_subdir: T.Optional[str]
         c_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
         cpp_pch: T.Optional[T.Tuple[str, T.Optional[str]]]
-        cpp_modules: bool
+        cpp_modules: T.Optional[bool]
         cpp_header_units: T.List[str]
         cpp_module_interfaces: T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]
         cpp_internal_partitions: T.List[T.Union[str, File, CustomTarget, CustomTargetIndex, GeneratedList]]
@@ -1112,7 +1112,7 @@ class BuildTarget(Target, BuildTargetProto):
             self.suffix = name_suffix
             self.name_suffix_set = True
         self.implicit_include_directories = kwargs.get('implicit_include_directories', True)
-        self.cpp_modules = kwargs.get('cpp_modules', False)
+        self.cpp_modules = kwargs.get('cpp_modules', None)
         self.cpp_header_units = kwargs.get('cpp_header_units', [])
         self.cpp_module_interfaces = kwargs.get('cpp_module_interfaces', [])
         self.cpp_internal_partitions = kwargs.get('cpp_internal_partitions', [])
@@ -1942,14 +1942,19 @@ class BuildTarget(Target, BuildTargetProto):
     def provides_cpp_modules(self) -> bool:
         """Whether this target may export C++ modules of its own.
 
-        True when the target is explicitly module-enabled (``cpp_modules``) or
-        carries a module-interface source. Used to propagate module-enablement
-        to consumers that merely link this target.
+        ``cpp_modules`` is a tristate: an explicit value wins outright (``True``
+        forces the target a module provider, ``False`` opts it out so a
+        ``.cppm``/``.ixx`` compiles as ordinary C++), and only when it is unset
+        (``None``) is provider status inferred from a module-interface source.
+        Used to propagate module-enablement to consumers that merely link this
+        target.
 
         Memoized: it depends only on the target's own module flag and sources,
         which are fixed once the target is constructed.
         """
-        return 'cpp' in self.compilers and (self.cpp_modules or self._has_cpp_module_source())
+        if self.cpp_modules is not None:
+            return 'cpp' in self.compilers and self.cpp_modules
+        return 'cpp' in self.compilers and self._has_cpp_module_source()
 
     @lru_cache(maxsize=None)
     def all_cpp_modules_private(self) -> bool:

@@ -808,7 +808,7 @@ _BUILD_TARGET_KWS: T.List[KwargInfo] = [
     RUST_CRATE_TYPE_KW,
     _PCH_ARGS.evolve(name='c_pch'),
     _PCH_ARGS.evolve(name='cpp_pch'),
-    KwargInfo('cpp_modules', bool, default=False, since='1.12.0'),
+    KwargInfo('cpp_modules', (bool, NoneType), default=None, since='1.12.0'),
     KwargInfo('cpp_header_units', ContainerTypeInfo(list, str),
               default=[], listify=True, since='1.12.0'),
     KwargInfo('cpp_module_interfaces',

@@ -35,6 +35,12 @@ extension (an `export module` in a plain `.cpp`/`.cc`) is therefore not
 detected by itself — rename the interface to `.cppm`/`.ixx`, or set
 `cpp_modules: true` on the target that carries it.
 
+`cpp_modules` is a tristate. Left unset it infers classification as described
+above; `true` forces the target module-enabled; `false` opts it out entirely,
+so a `.cppm`/`.ixx` source is compiled as ordinary C++ with no module pipeline
+and no `cpp_std c++20` floor — the way such a suffix built before module
+support existed.
+
 `import std;` and `import std.compat;` are available through `dependency('std')`.
 Meson locates the standard library's module sources from the selected libstdc++
 (GCC >= 15, which ships `libstdc++.modules.json`) and builds them into the shared
