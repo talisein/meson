@@ -838,26 +838,94 @@ class CppModulesTestMixin:
             return False, None
         return (any(c.isspace() for c in resolved), resolved)
 
+    # The build-relative alias root Meson routes a spaced user header unit
+    # through ('meson-private/imap/' + a 12-hex digest). GCC compares a user
+    # header's absolute real path against the spelling it was reached by and
+    # keeps the shorter, so shorter-wins fires only where the real fixture root
+    # is shorter than this. Derived from the alias shape, not a magic number;
+    # the digest length matches _dir_alias_root's hexdigest()[:12].
+    _ALIAS_ROOT_SPELLING_LEN = len('meson-private/imap/') + 12
+    # The spaced leaf a shallow fixture is copied into (the header's real path
+    # tail is common to both sides of GCC's comparison and cancels, so only the
+    # root dir length -- base + this leaf -- decides the defeat).
+    _SHORT_SPACED_LEAF = 's p'
+
+    def _short_fixture_base(self) -> str:
+        """A base directory for a shallow spaced fixture, short enough that the
+        fixture root (base + the spaced leaf) is shorter than the imap alias --
+        the only way GCC's shorter-of-two canonicalization discards the alias
+        and shorter-wins fires. The ladder: the platform temp dir first (managed
+        mkdtemp space) when its layout is already short enough, else a
+        distinctively named base created near the filesystem root. Neither
+        working is a skip with the computed lengths, never a long-path fallback
+        (a long path cannot provoke the defeat). The chosen base registers its
+        own cleanup the moment it exists, so every exit path removes it, and the
+        near-root base is created (exist_ok=False), never adopted."""
+        from mesonbuild.mesonlib import windows_proof_rmtree
+        limit = self._ALIAS_ROOT_SPELLING_LEN
+        margin = 2
+
+        def root_len(base: str) -> int:
+            return len(os.path.abspath(os.path.join(base, self._SHORT_SPACED_LEAF)))
+
+        diags: T.List[str] = []
+        # Rung 1: the platform temp dir. Managed and collision-safe; used only
+        # when its layout already clears the limit (true on a short tmpdir like
+        # /tmp, not on Windows' deep AppData\Local\Temp).
+        tmp = tempfile.mkdtemp(prefix='m-meson-')
+        self.addCleanup(windows_proof_rmtree, tmp)
+        n = root_len(tmp)
+        diags.append(f'temp base {tmp!r}: fixture root len {n}')
+        if n + margin <= limit:
+            return tmp
+
+        # Rung 2: a distinctively named, collision-resistant base created near
+        # the filesystem root. Created, never adopted; cleanup registered the
+        # instant it exists; an unwritable root is a skip, not a force-remove.
+        marker = f'm-meson-{os.getpid()}-{os.urandom(2).hex()}'
+        if os.name == 'nt':
+            drive = os.path.splitdrive(tempfile.gettempdir())[0]
+            near = os.path.join(drive + os.sep, marker) if drive else None
+        else:
+            near = os.path.join(os.sep, marker)
+        if near is not None:
+            try:
+                os.makedirs(near, exist_ok=False)
+            except OSError as e:
+                diags.append(f'near-root {near!r} not creatable: {e}')
+            else:
+                self.addCleanup(windows_proof_rmtree, near)
+                n = root_len(near)
+                diags.append(f'near-root base {near!r}: fixture root len {n}')
+                if n + margin <= limit:
+                    return near
+        raise unittest.SkipTest(
+            f'cannot root a spaced fixture shorter than the {limit}-char imap '
+            'alias to provoke shorter-wins; ' + '; '.join(diags))
+
     def copy_fixture(self, name: str, *, spaced: bool, deep: bool = True) -> str:
         """A copy of unit fixture `name` under a tmp root whose path is
         deterministically spaced or space-free, independent of the checkout
         path. `deep` (spaced only) pads the root so it stays longer than the
-        ~38-char meson-private/imap alias, keeping the alias the shorter
-        spelling GCC prefers; a shallow spaced root is how shorter-wins is
-        provoked. The tree is removed on cleanup."""
+        meson-private/imap alias, keeping the alias the shorter spelling GCC
+        prefers; a shallow spaced root (deep=False) is rooted short enough that
+        GCC discards the alias, which is how shorter-wins is provoked. The tree
+        is removed on cleanup."""
         from mesonbuild.mesonlib import windows_proof_rmtree
-        base = tempfile.mkdtemp()
-        self.addCleanup(windows_proof_rmtree, base)
-        if spaced:
-            leaf = ('deep padded root ' * 2 + 'with space') if deep else 'sp ace'
+        if spaced and not deep:
+            # The short base registers its own cleanup (or skips). The space
+            # lives in the leaf copied straight into -- no extra component, so
+            # the root stays under the alias length computed above.
+            dest = os.path.join(self._short_fixture_base(), self._SHORT_SPACED_LEAF)
         else:
-            leaf = 'nospace'
-        root = os.path.join(base, leaf)
-        os.makedirs(root, exist_ok=True)
-        # A space-free destination leaf, so the only space in an unspaced copy
-        # is none at all -- the fixture's own directory name (e.g. '197 header
-        # unit forced include') holds spaces that would otherwise leak in.
-        dest = os.path.join(root, 'fixture')
+            base = tempfile.mkdtemp()
+            self.addCleanup(windows_proof_rmtree, base)
+            leaf = ('deep padded root ' * 2 + 'with space') if spaced else 'nospace'
+            # A space-free destination leaf, so the only space in an unspaced
+            # copy is none at all -- the fixture's own directory name (e.g. '197
+            # header unit forced include') holds spaces that would leak in.
+            dest = os.path.join(base, leaf, 'fixture')
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copytree(os.path.join(self.unit_test_dir, name), dest)
         assert (' ' in dest) == spaced, dest
         return dest
