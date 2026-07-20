@@ -53,6 +53,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -776,3 +777,210 @@ class CppModulesTestMixin:
                 mapper = os.path.join(self.builddir, out + '.mapper')
                 self.assertTrue(os.path.isfile(mapper), f'missing mapper file {mapper}')
         self.assertGreater(compile_edges, 0, 'no module compile edges found')
+
+    # --- Spaced-path header-unit test fabrication -------------------------
+    #
+    # "A header unit on a path with a space" is one feature contract, exercised
+    # across every module family and against both a spaced and an unspaced
+    # path, with each family asserting its own contracted outcome. The repo's
+    # own 'test cases' dir has a space, so the *unspaced* side never occurs
+    # naturally in CI and the *spaced-compiler-prefix* side occurs only where
+    # the toolchain happens to sit under one. These helpers establish the
+    # property a cell needs rather than assuming the checkout's layout: they
+    # probe for it, fabricate it when absent, and skip with the probe evidence
+    # only when fabrication is impossible.
+
+    @staticmethod
+    def _gcc_abs_exe(cpp: 'CPPCompiler') -> T.Optional[str]:
+        """The absolute path of the (GNU-driver) compiler binary, past any
+        ccache wrapper meson detected in front of it -- what the fabrication
+        rungs need to find the install root and write a native file."""
+        # get_exelist strips only the ccache wrapper; what remains is the
+        # driver followed by any baked-in arguments (CXX='ccache g++ -m32'
+        # leaves ['g++', '-m32']), so the driver is the first entry.
+        cmd = cpp.get_exelist(ccache=False)
+        exe = cmd[0] if cmd else None
+        if exe and os.path.isabs(exe) and os.path.isfile(exe):
+            return exe
+        return shutil.which(exe) if exe else None
+
+    def _probe_system_header(self, cpp: 'CPPCompiler', header: str) -> T.Optional[str]:
+        """The path the compiler resolves ``#include <header>`` to, read from
+        its own diagnostic output. None when the probe cannot resolve it."""
+        exe = cpp.get_exelist(ccache=False)
+        if cpp.get_id() in ('msvc', 'clang-cl'):
+            with tempfile.TemporaryDirectory() as d:
+                src = os.path.join(d, 'p.cpp')
+                with open(src, 'w', encoding='utf-8') as f:
+                    f.write(f'#include <{header}>\n')
+                p = subprocess.run(exe + ['/nologo', '/EP', '/showIncludes', '/TP', src],
+                                   capture_output=True, text=True)
+                for line in (p.stdout + p.stderr).splitlines():
+                    marker = line.partition('including file:')[2].strip()
+                    if marker and os.path.basename(marker) == header:
+                        return marker
+            return None
+        p = subprocess.run(exe + ['-E', '-H', '-x', 'c++', '-'],
+                           input=f'#include <{header}>\n', capture_output=True, text=True)
+        for line in p.stderr.splitlines():
+            if line.startswith('. '):
+                return line[2:].strip()
+        return None
+
+    def probe_compiler_owned_space(self, cpp: 'CPPCompiler',
+                                   header: str = 'vector') -> T.Tuple[bool, T.Optional[str]]:
+        """(whether a compiler-owned system header resolves to a spaced path,
+        that path). ``import <vector>;`` is named by the compiler's own search
+        path, so a spaced install prefix is what makes such a unit unmappable
+        on GCC -- and what the immune families must still handle."""
+        resolved = self._probe_system_header(cpp, header)
+        if resolved is None:
+            return False, None
+        return (any(c.isspace() for c in resolved), resolved)
+
+    def copy_fixture(self, name: str, *, spaced: bool, deep: bool = True) -> str:
+        """A copy of unit fixture `name` under a tmp root whose path is
+        deterministically spaced or space-free, independent of the checkout
+        path. `deep` (spaced only) pads the root so it stays longer than the
+        ~38-char meson-private/imap alias, keeping the alias the shorter
+        spelling GCC prefers; a shallow spaced root is how shorter-wins is
+        provoked. The tree is removed on cleanup."""
+        from mesonbuild.mesonlib import windows_proof_rmtree
+        base = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, base)
+        if spaced:
+            leaf = ('deep padded root ' * 2 + 'with space') if deep else 'sp ace'
+        else:
+            leaf = 'nospace'
+        root = os.path.join(base, leaf)
+        os.makedirs(root, exist_ok=True)
+        # A space-free destination leaf, so the only space in an unspaced copy
+        # is none at all -- the fixture's own directory name (e.g. '197 header
+        # unit forced include') holds spaces that would otherwise leak in.
+        dest = os.path.join(root, 'fixture')
+        shutil.copytree(os.path.join(self.unit_test_dir, name), dest)
+        assert (' ' in dest) == spaced, dest
+        return dest
+
+    def fabricate_spaced_gcc_prefix(self, cpp: 'CPPCompiler') -> str:
+        """A g++.exe whose install prefix contains a space, for the
+        compiler-owned-spaced cell. The ladder, cheapest first:
+
+          1. the host prefix is already spaced -> use it;
+          2. link the compiler root under a spaced path and RE-PROBE through
+             the link -- some platforms keep the link's spelling, others
+             canonicalize it back to the real prefix (GCC resolves the reparse
+             point); the probe decides, never an assumption;
+          3. the optional minimal-copy rung (unittests/spaced_toolchain_copy),
+             off by default -- without it the ladder ends at step 2;
+          4. SkipTest carrying the probe transcript.
+
+        Returns the g++.exe path, or raises SkipTest.
+        """
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        transcript: T.List[str] = []
+        spaced, resolved = self.probe_compiler_owned_space(cpp)
+        transcript.append(f'host <vector> resolves to {resolved!r} (spaced={spaced})')
+        gxx = self._gcc_abs_exe(cpp)
+        if gxx is None:
+            raise unittest.SkipTest('could not locate the host GCC binary')
+        if spaced:
+            return gxx
+        # Rung 2: link the compiler root under a spaced tmp path, re-probe.
+        from mesonbuild.mesonlib import windows_proof_rmtree
+        try:
+            from .spaced_toolchain_copy import minimal_gcc_copy, GATE_ENV, available
+        except ImportError:
+            # Rung 3 is severable: deleting unittests/spaced_toolchain_copy.py
+            # must leave the ladder ending at the link probe and the affected
+            # cells skipping, never failing on the import.
+            minimal_gcc_copy, GATE_ENV, available = None, None, lambda: False
+        root = os.path.dirname(os.path.dirname(os.path.realpath(gxx)))
+        base = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, base)
+        link_root = os.path.join(base, 'sp ace')
+        # Spell the driver under the link the way it is spelled under the real
+        # root -- the stem carries a triple/version on many installs
+        # (x86_64-w64-mingw32-g++, g++-13) and the layout need not be bin/.
+        linked_gxx = os.path.join(link_root, os.path.basename(root),
+                                  os.path.relpath(os.path.realpath(gxx), root))
+        os.makedirs(link_root, exist_ok=True)
+        made = NinjaBackend._make_dir_link(
+            root, os.path.join(link_root, os.path.basename(root)))
+        if made and os.path.isfile(linked_gxx):
+            # Re-probe by shelling out to the linked driver directly: whether
+            # GCC keeps the link's spaced spelling or canonicalizes it back to
+            # the real prefix is the runtime fact the decision rests on.
+            r2 = self._shell_probe_vector(linked_gxx)
+            sp2 = r2 is not None and any(c.isspace() for c in r2)
+            transcript.append(f'through link {linked_gxx!r}: <vector> -> {r2!r} (spaced={sp2})')
+            if sp2:
+                return linked_gxx
+        else:
+            transcript.append(f'compiler root not linkable under a spaced path (made={made})')
+        # Rung 3: the optional copy. Absent unless the runner opted in.
+        if available():
+            copy_root = os.path.join(base, 'sp ace copy', os.path.basename(root))
+            copied = minimal_gcc_copy(gxx, copy_root)
+            r3 = self._shell_probe_vector(copied) if copied else None
+            sp3 = r3 is not None and any(c.isspace() for c in r3)
+            transcript.append(f'minimal copy at {copied!r}: <vector> -> {r3!r} (spaced={sp3})')
+            if sp3:
+                return copied
+        else:
+            why = (f'set {GATE_ENV}=1 to enable' if GATE_ENV
+                   else 'unittests/spaced_toolchain_copy.py is absent')
+            transcript.append(f'copy rung disabled ({why})')
+        raise unittest.SkipTest(
+            'could not fabricate a spaced GCC prefix:\n  ' + '\n  '.join(transcript))
+
+    def _shell_probe_vector(self, gxx: T.Optional[str]) -> T.Optional[str]:
+        if not gxx or not os.path.isfile(gxx):
+            return None
+        p = subprocess.run([gxx, '-E', '-H', '-x', 'c++', '-'],
+                           input='#include <vector>\n', capture_output=True, text=True)
+        for line in p.stderr.splitlines():
+            if line.startswith('. '):
+                return line[2:].strip()
+        return None
+
+    def gcc_mapper_keys(self, builddir: T.Optional[str] = None) -> T.List[str]:
+        """Every key (first whitespace-delimited field) of every GCC mapper
+        file in the build tree."""
+        builddir = builddir or self.builddir
+        keys: T.List[str] = []
+        for dirpath, _dirs, files in os.walk(builddir):
+            for fn in files:
+                if not fn.endswith('.mapper'):
+                    continue
+                with open(os.path.join(dirpath, fn), encoding='utf-8') as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            keys.append(line)
+        return keys
+
+    def assert_no_spaced_mapper_key(self, spaced_marker: str,
+                                    builddir: T.Optional[str] = None) -> None:
+        """No GCC mapper carries a line naming a unit under `spaced_marker` (the
+        known spaced fragment of the source or compiler tree). A spaced key ends
+        at the first space, so GCC would bind the wrong name and leave the real
+        one a hard 'no such module' -- the degrade drops the line entirely, so
+        the marker must appear in no mapper at all."""
+        for line in self.gcc_mapper_keys(builddir):
+            self.assertNotIn(spaced_marker, line,
+                             f'a mapper carries a spaced-path unit line: {line!r}')
+
+    def assert_space_machinery_dormant(self, out: str,
+                                       builddir: T.Optional[str] = None) -> None:
+        """The negative contract: on an unspaced path the space machinery must
+        not stir. No alias roots, no whitespace/degrade warnings, and every GCC
+        mapper key an unaliased name."""
+        builddir = builddir or self.builddir
+        self.assertNotIn('cannot name a header unit', out)
+        self.assertNotIn('a path containing whitespace', out)
+        self.assertNotIn('divergent dialects', out)
+        self.assertFalse(os.path.isdir(os.path.join(builddir, 'meson-private', 'imap')),
+                         'an alias root was placed on an unspaced path')
+        with open(os.path.join(builddir, 'build.ninja'), encoding='utf-8') as f:
+            self.assertNotIn('meson-private/imap', f.read().replace('\\', '/'))
