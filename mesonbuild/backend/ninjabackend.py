@@ -5618,7 +5618,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # clang-scan-deps feature probe, which non-module clang
                     # projects should never pay for.
                     self.generate_cpp_module_scan_rule(compiler)
-                if langname == 'cpp' and compiler.cpp_module_family() in ('gcc', 'msvc'):
                     # Clang's header-unit rule is registered lazily with the
                     # first unit edge (provision_header_units) instead, so
                     # projects without header units don't grow an unused rule.
