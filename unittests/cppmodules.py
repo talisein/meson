@@ -306,6 +306,7 @@ class CppModulesTestMixin:
                             module_name.replace(':', '-') + cpp.get_module_bmi_suffix())
 
     def build_and_check_modules(self, testdir_name: str, *,
+                                srcdir: T.Optional[str] = None,
                                 extra_args: T.Sequence[str] = (),
                                 setup_contains: T.Sequence[str] = (),
                                 setup_not_contains: T.Sequence[str] = (),
@@ -320,6 +321,9 @@ class CppModulesTestMixin:
         """The common spine of a module test: configure, build, run the
         tests, then check the BMI cache and build.ninja.
 
+        srcdir: a pre-copied fixture path to configure from directly (e.g. a
+            deterministically spaced tmp copy); the name still labels messages.
+            When None the name resolves under the unit-test dir as usual.
         bmis: logical module names whose BMIs must exist in the shared cache.
         ninja_args_not_contains: needles no 'ARGS =' line may contain; None
             selects the compiler default (the BMI suffix and the flag that
@@ -332,7 +336,7 @@ class CppModulesTestMixin:
         Returns the build output.
         """
         cpp = self.host_cpp_compiler()
-        testdir = os.path.join(self.unit_test_dir, testdir_name)
+        testdir = srcdir if srcdir is not None else os.path.join(self.unit_test_dir, testdir_name)
         out = self.init(testdir, extra_args=list(extra_args))
         for needle in setup_contains:
             self.assertIn(needle, out)
@@ -365,15 +369,21 @@ class CppModulesTestMixin:
         return built
 
     def check_module_rebuild(self, testdir_name: str, *, edit_file: str,
+                             srcdir: T.Optional[str] = None,
                              expect_in_rebuild: T.Sequence[str] = ('Linking target prog',),
                              prog: str = 'prog') -> None:
         """Editing a module interface (or a header behind a header unit) must
         rebuild the BMI and recompile every importer, exactly as editing a
         normally #included header does -- otherwise consumers link against a
         stale BMI. The edit bumps the exported value, so a stale build makes
-        prog exit nonzero."""
-        testdir = os.path.join(self.unit_test_dir, testdir_name)
-        srcdir = self.copy_srcdir(testdir)
+        prog exit nonzero.
+
+        srcdir: a pre-copied, writable fixture path to edit and build in place
+            (a fresh copytree, so editing it never touches the original); the
+            name still labels messages. When None the name is resolved under the
+            unit-test dir and copied here as usual."""
+        if srcdir is None:
+            srcdir = self.copy_srcdir(os.path.join(self.unit_test_dir, testdir_name))
         self.init(srcdir)
         self.build(override_envvars=self.NO_CCACHE)
         self.run_tests()

@@ -1415,7 +1415,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # Reconfiguring back must reproduce exactly the original roots --
         # each is a pure function of its (dir, tag) pair -- so nothing is
         # rebuilt with a fresh, differently-named BMI it does not need.
-        testdir = os.path.join(self.unit_test_dir, '173 header unit aliasing')
+        testdir = self.copy_fixture('173 header unit aliasing', spaced=True, deep=True)
         alias_root = os.path.join(self.builddir, 'meson-private', 'i')
 
         self.init(testdir, extra_args=['-Dmode=classes'])
@@ -2383,6 +2383,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # links and runs. GCC maps units via the module mapper, so the default
         # check that no BMI path appears on a command line applies in full.
         self.build_and_check_modules('142 gcc header units',
+                                     srcdir=self.copy_fixture('142 gcc header units', spaced=True, deep=True),
                                      setup_not_contains=['divergent dialects',
                                                          'cannot name a header unit'])
         self.check_gcc_module_mappers()
@@ -2414,7 +2415,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         with open(os.path.join(self.builddir, 'meson-private', 'i'), 'w',
                   encoding='utf-8') as f:
             f.write('')
-        out = self.init(os.path.join(self.unit_test_dir, '142 gcc header units'))
+        out = self.init(self.copy_fixture('142 gcc header units', spaced=True, deep=True))
         self.assertIn('cannot name a header unit whose path contains a space', out)
         # All or nothing: with no alias, nothing is respelled -- a half-aliased
         # target would have the unit edge and its importers naming the unit
@@ -2430,12 +2431,14 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # dirty the unit and its importers -- ninja stats the alias, which
         # follows to the real file's mtime.
         self.check_module_rebuild('142 gcc header units', edit_file='util.h',
+                                  srcdir=self.copy_fixture('142 gcc header units', spaced=True, deep=True),
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_rebuild_on_system_header_change(self):
         self.check_module_rebuild('142 gcc header units', edit_file='angleutil.h',
+                                  srcdir=self.copy_fixture('142 gcc header units', spaced=True, deep=True),
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
@@ -2669,7 +2672,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # name and the one declared unit serves all of them: exactly one
         # unit edge.
         testdir = '173 header unit aliasing'
-        self.build_and_check_modules(testdir, ninja_args_not_contains=())
+        srcdir = self.copy_fixture(testdir, spaced=True, deep=True)
+        self.build_and_check_modules(testdir, srcdir=srcdir, ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
 
         # An importer-relative spelling ("../header.hpp") resolves to a logical
@@ -2677,7 +2681,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # plain spelling -- so it is an extra name for the one BMI, not a second
         # one. Exactly one unit compile edge, whichever spelling an importer used.
         self.new_builddir()
-        self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
+        self.build_and_check_modules(testdir, srcdir=srcdir, extra_args=['-Dmode=aliased'],
                                      ninja_args_not_contains=(),
                                      setup_not_contains=['cannot name a header unit'])
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
@@ -2706,7 +2710,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # Both programs constant-evaluate the unit's view of FOO, so a wrongly
         # shared BMI is a failing run.
         self.new_builddir()
-        self.build_and_check_modules(testdir, extra_args=['-Dmode=classes'],
+        self.build_and_check_modules(testdir, srcdir=srcdir, extra_args=['-Dmode=classes'],
                                      ninja_args_not_contains=(),
                                      setup_not_contains=['cannot name a header unit'])
         units = self.header_unit_bmis('header.hpp')
@@ -2733,14 +2737,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # message; Clang normalizes the resolved file and matches it.
         self.new_builddir()
         if self.host_cpp_compiler().cpp_module_family() == 'gcc':
-            self.init(os.path.join(self.unit_test_dir, testdir),
-                      extra_args=['-Dmode=undeclared'])
+            self.init(srcdir, extra_args=['-Dmode=undeclared'])
             with self.assertRaises(subprocess.CalledProcessError) as cm:
                 self.build()
             self.assertIn('imports must be built before being imported',
                           cm.exception.stdout)
         else:
-            self.build_and_check_modules(testdir, extra_args=['-Dmode=undeclared'],
+            self.build_and_check_modules(testdir, srcdir=srcdir, extra_args=['-Dmode=undeclared'],
                                          ninja_args_not_contains=())
             self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
 
