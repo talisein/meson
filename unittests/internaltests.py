@@ -1618,6 +1618,74 @@ Thread model: posix'''), '21.9.0')
         dep = call(interp, False)
         self.assertTrue(dep.found())
 
+    def test_dependency_fallbacks_external_candidate(self):
+        # The external_candidate seam: when set, a caller-supplied synthesis
+        # stands in for the per-name external lookup as the stage-3 candidate,
+        # and it must ladder exactly like a discovered external dependency --
+        # found() wins immediately, None keeps going to the declared fallback.
+        # This is how dependency('std') composes with the fallbacks machinery.
+        from mesonbuild.interpreter.dependencyfallbacks import DependencyFallbacksHolder
+        from mesonbuild.options import OptionKey
+
+        for_machine = MachineChoice.HOST
+
+        def make_holder(external_candidate):
+            # A bare MagicMock interpreter would auto-fabricate truthy
+            # attributes (found(), etc.), which the gen_lite mock note warns
+            # about; set every attribute this exercises explicitly.
+            interp = mock.MagicMock()
+            interp.subproject = ''
+            interp.environment = mock.MagicMock()
+            interp.coredata = mock.MagicMock()
+            interp.coredata.optstore.get_value_for.side_effect = \
+                lambda key: 'default' if key == OptionKey('wrap_mode') else []
+            interp.build = mock.MagicMock()
+            interp.build.dependency_overrides = {for_machine: {}}
+            df = DependencyFallbacksHolder(interp, ['std'], for_machine,
+                                           external_candidate=external_candidate)
+            # A declared fallback: stage 4 exists and is the required last
+            # candidate. Stages 1/2 are stubbed to "nothing cached / not yet
+            # configured" so the ladder actually reaches stage 3.
+            df.subproject_name = 'stdfallback'
+            df.subproject_varname = 'std_dep'
+            df._do_dependency_cache = mock.MagicMock(return_value=None)
+            df._do_existing_subproject = mock.MagicMock(return_value=None)
+            return df, interp
+
+        def synth_translate(synth_result):
+            # Models _std_external_candidate: synthesis returns a found dep,
+            # a not-found *object*, or (never here) None; the wrapper translates
+            # anything not found() to None so the fallback still gets its turn.
+            def cand(kwargs, name, func_kwargs):
+                return synth_result if synth_result.found() else None
+            return mock.MagicMock(side_effect=cand)
+
+        # (a) synthesis degrades to a not-found object -> translated to None ->
+        # the declared fallback configures and its dependency is returned.
+        not_found = mock.MagicMock()
+        not_found.found.return_value = False
+        external_a = synth_translate(not_found)
+        df, _ = make_holder(external_a)
+        fallback_dep = mock.MagicMock()
+        fallback_dep.found.return_value = True
+        df._do_subproject = mock.MagicMock(return_value=fallback_dep)
+        result = df.lookup({'native': for_machine, 'required': True})
+        self.assertIs(result, fallback_dep)
+        external_a.assert_called_once()
+        df._do_subproject.assert_called_once()
+
+        # (b) synthesis finds -> it wins at stage 3 and the fallback subproject
+        # is never configured.
+        found_dep = mock.MagicMock()
+        found_dep.found.return_value = True
+        external_b = synth_translate(found_dep)
+        df, _ = make_holder(external_b)
+        df._do_subproject = mock.MagicMock(return_value=mock.MagicMock())
+        result = df.lookup({'native': for_machine, 'required': True})
+        self.assertIs(result, found_dep)
+        external_b.assert_called_once()
+        df._do_subproject.assert_not_called()
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the

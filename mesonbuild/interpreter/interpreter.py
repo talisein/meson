@@ -1995,19 +1995,26 @@ class Interpreter(InterpreterBase, HoldableObject):
     def func_dependency(self, node: mparser.BaseNode, args: T.Tuple[T.List[str]], kwargs: kwtypes.FuncDependency) -> Dependency:
         # Replace '' by empty list of names
         names = [n for n in args[0] if n]
-        # The C++ standard library as importable modules (`import std;`) is not a
-        # discoverable external dependency: synthesize it from the compiler.
-        # 'std' is threaded by default; 'std-nothreads' opts out (one shared
-        # std module per machine, so the two cannot be mixed on one machine).
-        if names == ['std']:
-            return self._cpp_std_module_dependency(node, kwargs)
-        if names == ['std-nothreads']:
-            return self._cpp_std_module_dependency(node, kwargs, threads=False)
         if len(names) > 1:
             FeatureNew('dependency with more than one name', '0.60.0').use(self.subproject)
         default_options = kwargs.get('default_options')
         for_machine = kwargs['native']
-        df = DependencyFallbacksHolder(self, names, for_machine, kwargs['allow_fallback'], default_options)
+        # The C++ standard library as importable modules (`import std;`) is not a
+        # discoverable external dependency: synthesize it from the compiler and
+        # feed it to the fallbacks machinery as the external-lookup candidate, so
+        # a declared fallback / wrap [provide] / --force-fallback-for composes
+        # exactly as for any other reserved name. Only the exact single-name
+        # 'std' / 'std-nothreads' forms synthesize; in a multi-name call 'std' is
+        # an ordinary (never-found) external name. 'std' is threaded by default;
+        # 'std-nothreads' opts out (one shared std module per machine, so the two
+        # cannot be mixed on one machine).
+        external_candidate = None
+        if names == ['std']:
+            external_candidate = self._std_external_candidate(node, threads=True)
+        elif names == ['std-nothreads']:
+            external_candidate = self._std_external_candidate(node, threads=False)
+        df = DependencyFallbacksHolder(self, names, for_machine, kwargs['allow_fallback'], default_options,
+                                       external_candidate=external_candidate)
         df.set_fallback(kwargs['fallback'])
         not_found_message = kwargs['not_found_message']
 
@@ -2052,6 +2059,23 @@ class Interpreter(InterpreterBase, HoldableObject):
     def func_default(self, node: mparser.BaseNode, args: list[TYPE_var], kwargs: TYPE_kwargs) -> DefaultObject:
         return DefaultObject()
 
+    def _std_external_candidate(self, node: mparser.BaseNode, *, threads: bool
+                                ) -> T.Callable[['dependencies.base.DependencyObjectKWs', str, kwtypes.DoSubproject], T.Optional[Dependency]]:
+        """Wrap import-std synthesis as a dependency-fallbacks external candidate.
+
+        The fallbacks ladder expects found -> win, None -> keep going, a
+        not-found *object* -> stop. Synthesis returns a not-found object on its
+        degrade paths (so a required last candidate re-raises its rich text and
+        the memo records it); translate that to None here so a declared
+        fallback still gets its turn.
+        """
+        def std_candidate(kwargs: 'dependencies.base.DependencyObjectKWs',
+                          name: str, func_kwargs: kwtypes.DoSubproject) -> T.Optional[Dependency]:
+            dep = self._cpp_std_module_dependency(
+                node, T.cast('kwtypes.FuncDependency', kwargs), threads=threads)
+            return dep if dep.found() else None
+        return std_candidate
+
     def _cpp_std_module_dependency(self, node: mparser.BaseNode,
                                    kwargs: kwtypes.FuncDependency,
                                    threads: bool = True) -> Dependency:
@@ -2091,20 +2115,12 @@ class Interpreter(InterpreterBase, HoldableObject):
         meson.override_dependency('std', ...) takes precedence over synthesis.
         """
         name = 'std' if threads else 'std-nothreads'
-        disabled, required, feature = extract_required_kwarg(kwargs, self.subproject)
+        # By the time the dependency-fallbacks machinery invokes this synthesis
+        # (as the external-lookup candidate) 'required' is a per-candidate bool:
+        # true only when this is the last candidate, so the degrade paths raise
+        # only when no declared fallback can still configure.
+        required = kwargs.get('required', True)
         for_machine = kwargs['native']
-        if disabled:
-            mlog.log('Dependency', mlog.bold(name),
-                     'for', mlog.bold(for_machine.get_lower_case_name()), 'machine',
-                     'skipped: feature', mlog.bold(feature), 'disabled')
-            return dependencies.NotFoundDependency(name, self.environment)
-
-        # An explicit override wins over synthesis, as for any reserved name.
-        identifier = dependencies.get_dep_identifier(
-            name, T.cast('dependencies.base.DependencyObjectKWs', kwargs))
-        override = self.build.dependency_overrides[for_machine].get(identifier)
-        if override is not None:
-            return override.dep
 
         # The threads/nothreads spellings share one machine regardless of
         # stdlib: an entry of the other spelling under any stdlib identity
@@ -2242,7 +2258,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # interface units per source (Clang). Same channel as the user kwarg.
         std_lib.cpp_module_interfaces = list(srcs)
         dep = dependencies.InternalDependency(
-            self.project_version, libraries=[std_lib],
+            cpp.version if cpp is not None else self.project_version, libraries=[std_lib],
             ext_deps=[threads_dep] if threads_dep is not None else None,
             name=name)
         self.build.cpp_std_module_deps[for_machine][memo_key] = dep
