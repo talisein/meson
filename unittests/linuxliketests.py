@@ -2117,6 +2117,16 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if not libcxx_std or libcxx_std == default_std:
             raise SkipTest("libc++'s std module is unavailable or matches the "
                            'default standard library')
+        # A manifest can resolve yet name a source that was never shipped there
+        # (a mispackaged libc++, seen where a distro's libc++.modules.json points
+        # at a directory the .cppm files are not under). The build then fails at
+        # configure with the mispackaged-stdlib diagnostic, which is correct but
+        # not what these tests exercise -- there is no usable divergent libc++ to
+        # test with, so skip.
+        missing = sorted(p for p in libcxx_std.values() if not os.path.exists(p))
+        if missing:
+            raise SkipTest(f"libc++'s std module source {missing[0]!r} does not "
+                           'exist; the standard library is mispackaged')
         return cpp
 
     def test_clang_import_std_divergent_stdlib(self):
