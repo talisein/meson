@@ -208,6 +208,10 @@ def _check_module_cycle(rules: T.List[Rule]) -> None:
     edge goes from a provided module to each module (also provided here) that
     its translation unit requires. A back-edge in a DFS is a cycle; report it
     before ninja's own generic cycle detector would.
+
+    The DFS carries its own stack rather than recursing: one frame per link of
+    an import chain would hit Python's recursion limit on a deep but perfectly
+    acyclic chain, failing a build that has no cycle at all.
     """
     local_names = {prov['logical-name'] for rule in rules for prov in rule.get('provides', [])}
     deps: T.Dict[str, T.List[str]] = {}
@@ -221,22 +225,36 @@ def _check_module_cycle(rules: T.List[Rule]) -> None:
     color: T.Dict[str, int] = {n: WHITE for n in deps}
     path: T.List[str] = []
 
-    def visit(node: str) -> None:
-        color[node] = GRAY
-        path.append(node)
-        for nxt in deps.get(node, []):
+    for name in deps:
+        if color[name] != WHITE:
+            continue
+        color[name] = GRAY
+        path.append(name)
+        # Each entry is a node being visited plus how far through its edge list
+        # the walk has got, which is what a recursive call's resume point would
+        # otherwise be.
+        stack: T.List[T.Tuple[str, int]] = [(name, 0)]
+        while stack:
+            node, i = stack[-1]
+            edges = deps.get(node, [])
+            if i == len(edges):
+                stack.pop()
+                path.pop()
+                color[node] = BLACK
+                continue
+            stack[-1] = (node, i + 1)
+            nxt = edges[i]
+            # GRAY means nxt is on the current path -- a genuine back-edge --
+            # while BLACK is a node already fully walked, which is merely a
+            # second route to it and no cycle at all.
             if color.get(nxt, BLACK) == GRAY:
                 cycle = path[path.index(nxt):] + [nxt]
                 raise MesonException(
                     'C++ module dependency cycle: ' + ' -> '.join(cycle))
             if color.get(nxt, BLACK) == WHITE:
-                visit(nxt)
-        path.pop()
-        color[node] = BLACK
-
-    for name in deps:
-        if color[name] == WHITE:
-            visit(name)
+                color[nxt] = GRAY
+                path.append(nxt)
+                stack.append((nxt, 0))
 
 
 def _private_reach_warning(name: str, display: str, public: str,

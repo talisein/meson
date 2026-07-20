@@ -2100,6 +2100,64 @@ Thread model: posix'''), '21.9.0')
         for name in ('mod', 'mod:part', 'std', 'std.compat', 'my.module', 'pkg.sub:part'):
             self.assertFalse(_is_header_unit({'logical-name': name}), name)
 
+    def test_depaccumulate_module_cycle_deep_chain(self):
+        # A long *acyclic* import chain must not be mistaken for a failure: the
+        # walk is iterative, so chain depth costs no Python stack. The rules are
+        # built here rather than as fixture sources -- a thousand-file fixture
+        # would cost every test run a thousand compiles to prove a graph
+        # property.
+        from mesonbuild.scripts.depaccumulate import _check_module_cycle
+        depth = 5000
+        rules = [{'primary-output': f'm{i}.o',
+                  'provides': [{'logical-name': f'm{i}'}],
+                  'requires': [{'logical-name': f'm{i + 1}', 'lookup-method': 'by-name'}]}
+                 for i in range(depth)]
+        rules.append({'primary-output': f'm{depth}.o',
+                      'provides': [{'logical-name': f'm{depth}'}]})
+        _check_module_cycle(rules)
+
+        # A node reached twice by different routes is not a cycle either: a
+        # diamond completes, where collapsing the "on the current path" and
+        # "already finished" states would report one.
+        _check_module_cycle([
+            {'primary-output': 'top.o', 'provides': [{'logical-name': 'top'}],
+             'requires': [{'logical-name': 'left'}, {'logical-name': 'right'}]},
+            {'primary-output': 'left.o', 'provides': [{'logical-name': 'left'}],
+             'requires': [{'logical-name': 'bottom'}]},
+            {'primary-output': 'right.o', 'provides': [{'logical-name': 'right'}],
+             'requires': [{'logical-name': 'bottom'}]},
+            {'primary-output': 'bottom.o', 'provides': [{'logical-name': 'bottom'}]},
+        ])
+
+    def test_depaccumulate_module_cycle_detected(self):
+        # The diagnostic still fires, and still names the cycle it found.
+        from mesonbuild.scripts.depaccumulate import _check_module_cycle
+        with self.assertRaises(MesonException) as cm:
+            _check_module_cycle([
+                {'primary-output': 'a.o', 'provides': [{'logical-name': 'a'}],
+                 'requires': [{'logical-name': 'b'}]},
+                {'primary-output': 'b.o', 'provides': [{'logical-name': 'b'}],
+                 'requires': [{'logical-name': 'a'}]},
+            ])
+        self.assertEqual(str(cm.exception), 'C++ module dependency cycle: a -> b -> a')
+
+        # And a cycle sitting at the far end of a long chain is still reached
+        # and still named -- the iterative walk reports the cycle alone, not
+        # the chain that led to it.
+        depth = 2000
+        rules = [{'primary-output': f'm{i}.o',
+                  'provides': [{'logical-name': f'm{i}'}],
+                  'requires': [{'logical-name': f'm{i + 1}'}]}
+                 for i in range(depth)]
+        rules.append({'primary-output': f'm{depth}.o',
+                      'provides': [{'logical-name': f'm{depth}'}],
+                      'requires': [{'logical-name': f'm{depth - 1}'}]})
+        with self.assertRaises(MesonException) as cm:
+            _check_module_cycle(rules)
+        self.assertEqual(
+            str(cm.exception),
+            f'C++ module dependency cycle: m{depth - 1} -> m{depth} -> m{depth - 1}')
+
     def test_simple_abc(self):
         from abc import abstractmethod
 
