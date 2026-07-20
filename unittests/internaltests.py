@@ -1703,6 +1703,84 @@ Thread model: posix'''), '21.9.0')
         external_b.assert_called_once()
         df._do_subproject.assert_not_called()
 
+    def test_dependency_fallbacks_synthesized_std_self_caching(self):
+        # dependency('std') synthesis de-dups by its own probe result (the real
+        # standard-library identity), which the override identifier cannot see:
+        # get_dep_identifier keys only on the declared dependency() kwargs, so
+        # two dependency('std') calls under different standard libraries collapse
+        # onto one identifier. The synthesized-std candidate therefore opts out
+        # of the implicit dependency-override cache both ways -- it neither
+        # installs an implicit self-override on a win nor lets one short-circuit
+        # the ladder -- so every call re-enters synthesis and its probe-keyed
+        # memo de-dups. An explicit meson.override_dependency('std', ...) is
+        # unaffected and still wins at stage 1.
+        from mesonbuild.interpreter.dependencyfallbacks import DependencyFallbacksHolder
+        from mesonbuild.dependencies.detect import get_dep_identifier
+        from mesonbuild.options import OptionKey
+        from mesonbuild import build
+
+        for_machine = MachineChoice.HOST
+        kwargs = {'native': for_machine, 'required': True}
+        # get_dep_identifier ignores 'native'/'required', so both std calls key
+        # onto this one identifier regardless of the underlying stdlib.
+        identifier = get_dep_identifier('std', kwargs)
+
+        def make_holder():
+            interp = mock.MagicMock()
+            interp.subproject = ''
+            interp.environment = mock.MagicMock()
+            interp.coredata = mock.MagicMock()
+            interp.coredata.optstore.get_value_for.side_effect = \
+                lambda key: 'default' if key == OptionKey('wrap_mode') else []
+            interp.coredata.deps = {for_machine: {}}
+            interp.build = mock.MagicMock()
+            interp.build.dependency_overrides = {for_machine: {}}
+            found_dep = mock.MagicMock()
+            found_dep.found.return_value = True
+            found_dep.get_version.return_value = 'undefined'
+            cand = mock.MagicMock(side_effect=lambda k, n, fk: found_dep)
+            # allow_fallback=False keeps the ladder to just stage 1 (cache) and
+            # stage 3 (synthesis), with no subproject to configure.
+            df = DependencyFallbacksHolder(interp, ['std'], for_machine,
+                                           allow_fallback=False,
+                                           external_candidate=cand,
+                                           synthesized_std=True)
+            return df, interp, cand, found_dep
+
+        # (a) On a win, no implicit override is installed -- otherwise a later
+        # dependency('std') under a different stdlib would be handed this
+        # archive from the cache instead of re-probing.
+        df, interp, cand, found_dep = make_holder()
+        result = df.lookup(dict(kwargs))
+        self.assertIs(result, found_dep)
+        self.assertEqual(interp.build.dependency_overrides[for_machine], {},
+                         'synthesized std must not install an implicit override')
+
+        # (b) An implicit override already parked under the std identifier (a
+        # prior std call's stale self-override) must not short-circuit stage 1:
+        # synthesis re-enters and wins.
+        df, interp, cand, found_dep = make_holder()
+        stale = mock.MagicMock()
+        stale.found.return_value = True
+        interp.build.dependency_overrides[for_machine][identifier] = \
+            build.DependencyOverride(stale, mock.MagicMock(), explicit=False)
+        result = df.lookup(dict(kwargs))
+        self.assertIs(result, found_dep,
+                      'an implicit std override wrongly short-circuited synthesis')
+        cand.assert_called_once()
+
+        # (c) An *explicit* override still wins at stage 1 -- synthesis is not
+        # run, so meson.override_dependency('std', ...) keeps precedence.
+        df, interp, cand, found_dep = make_holder()
+        explicit = mock.MagicMock()
+        explicit.found.return_value = True
+        explicit.get_version.return_value = 'undefined'
+        interp.build.dependency_overrides[for_machine][identifier] = \
+            build.DependencyOverride(explicit, mock.MagicMock(), explicit=True)
+        result = df.lookup(dict(kwargs))
+        self.assertIs(result, explicit, 'explicit std override must win at stage 1')
+        cand.assert_not_called()
+
     def test_depaccumulate_p1689_missing_module_hint(self):
         # A module required by no provider in the build is a build-time error;
         # for a non-std module the message must point at how to declare the

@@ -33,7 +33,8 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
                  names: T.List[str], for_machine: MachineChoice,
                  allow_fallback: T.Optional[bool] = None,
                  default_options: T.Optional[T.Dict[OptionKey, ElementaryOptionValues]] = None,
-                 external_candidate: T.Optional[T.Callable[[DependencyObjectKWs, str, DoSubproject], T.Optional[Dependency]]] = None) -> None:
+                 external_candidate: T.Optional[T.Callable[[DependencyObjectKWs, str, DoSubproject], T.Optional[Dependency]]] = None,
+                 synthesized_std: bool = False) -> None:
         super().__init__(subproject=interpreter.subproject)
         self.interpreter = interpreter
         self.subproject = interpreter.subproject
@@ -44,6 +45,17 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         self.wrap_resolver = interpreter.environment.wrap_resolver
         self.allow_fallback = allow_fallback
         self.external_candidate = external_candidate
+        # dependency('std') synthesis de-dups by its own probe result (the real
+        # standard-library identity), which the override identifier cannot see:
+        # get_dep_identifier keys only on the declared dependency() kwargs, so
+        # two dependency('std') calls under different standard libraries collapse
+        # onto one identifier. When the external candidate is that synthesis, it
+        # must not participate in the implicit dependency-override cache -- it
+        # neither installs an implicit self-override nor lets one short-circuit
+        # the ladder -- so every call re-enters synthesis and its probe-keyed
+        # memo de-dups. An explicit meson.override_dependency('std', ...) is
+        # unaffected and still wins.
+        self.synthesized_std = synthesized_std
         self.subproject_name: T.Optional[str] = None
         self.subproject_varname: T.Optional[str] = None
         self.default_options = default_options or {}
@@ -224,6 +236,11 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
 
         info: mlog.TV_LoggableList = [mlog.blue('(cached)')]
         override = self.build.dependency_overrides[self.for_machine].get(identifier)
+        if override and self.synthesized_std and not override.explicit:
+            # Ignore synthesis's own implicit self-override: it cannot tell one
+            # standard library from another, so re-enter synthesis and let its
+            # probe-keyed memo de-dup. An explicit override still applies.
+            override = None
         if override:
             if override.explicit:
                 info = [mlog.blue('(overridden)')]
@@ -380,12 +397,15 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
             dep = func(kwargs, name, func_kwargs)
             if dep and dep.found():
                 # Override this dependency to have consistent results in subsequent
-                # dependency lookups.
-                for name in self.names:
-                    identifier = dependencies.get_dep_identifier(name, kwargs)
-                    if identifier not in self.build.dependency_overrides[self.for_machine]:
-                        self.build.dependency_overrides[self.for_machine][identifier] = \
-                            build.DependencyOverride(dep, self.interpreter.current_node, explicit=False)
+                # dependency lookups. Synthesized std is exempt: it keeps its own
+                # probe-keyed memo, and an implicit override here would collapse
+                # two divergent-stdlib dependency('std') calls onto one archive.
+                if not self.synthesized_std:
+                    for name in self.names:
+                        identifier = dependencies.get_dep_identifier(name, kwargs)
+                        if identifier not in self.build.dependency_overrides[self.for_machine]:
+                            self.build.dependency_overrides[self.for_machine][identifier] = \
+                                build.DependencyOverride(dep, self.interpreter.current_node, explicit=False)
                 return dep
             elif required and (dep or i == last):
                 # This was the last candidate or the dependency has been cached

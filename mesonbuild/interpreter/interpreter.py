@@ -2009,12 +2009,16 @@ class Interpreter(InterpreterBase, HoldableObject):
         # 'std-nothreads' opts out (one shared std module per machine, so the two
         # cannot be mixed on one machine).
         external_candidate = None
+        synthesized_std = False
         if names == ['std']:
             external_candidate = self._std_external_candidate(node, threads=True)
+            synthesized_std = True
         elif names == ['std-nothreads']:
             external_candidate = self._std_external_candidate(node, threads=False)
+            synthesized_std = True
         df = DependencyFallbacksHolder(self, names, for_machine, kwargs['allow_fallback'], default_options,
-                                       external_candidate=external_candidate)
+                                       external_candidate=external_candidate,
+                                       synthesized_std=synthesized_std)
         df.set_fallback(kwargs['fallback'])
         not_found_message = kwargs['not_found_message']
 
