@@ -2164,7 +2164,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # standard library (or a redirected toolchain) probes different sources
         # and support dirs, so it keys and synthesizes separately. The probe
         # itself is cached at the compiler level (Clang lru_cache per args, GCC
-        # lazy_property, MSVC one env read), so running it before this memo
+        # lru_cache per args, MSVC one env read), so running it before this memo
         # lookup on every call is cheap.
         stdlib_key = (tuple(sorted(sources.values())), tuple(std_extra_args))
         memo_key = (name, stdlib_key)

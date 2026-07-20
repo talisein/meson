@@ -37,7 +37,7 @@ from mesonbuild.compilers.compilers import CompileCheckMode, ManyInOneLinkerOpti
 from mesonbuild.compilers.cpp import ClangCPPCompiler, GnuCPPCompiler, VisualStudioCPPCompiler, QccCPPCompiler
 from mesonbuild.compilers.objcpp import ClangObjCPPCompiler, GnuObjCPPCompiler
 from mesonbuild.compilers.d import DmdDCompiler, LLVMDCompiler
-from mesonbuild.compilers.detect import detect_c_compiler
+from mesonbuild.compilers.detect import detect_c_compiler, detect_cpp_compiler
 from mesonbuild.compilers.mixins.visualstudio import MSVCCompiler, ClangClCompiler
 from mesonbuild.linkers import linkers
 from mesonbuild.interpreterbase import (
@@ -47,7 +47,7 @@ from mesonbuild.interpreterbase import (
 from mesonbuild.mesonlib import (
     FileMode, LibType, MachineChoice, PerMachine, SimpleABC, Version, is_windows, is_osx,
     is_cygwin, is_openbsd, search_version, MesonException, EnvironmentException, python_command,
-    version_check_to_range, windows_proof_rmtree,
+    version_check_to_range, version_compare, windows_proof_rmtree,
 )
 from mesonbuild.options import OptionKey, UserBooleanOption
 from mesonbuild.interpreter.type_checking import (
@@ -418,6 +418,56 @@ Thread model: posix'''), '21.9.0')
                 _BMI_MAP_FLAG[cpp.get_id()]
             self.assertEqual(_BMI_MAP_FLAG[cpp.cpp_module_family()], '-fmodule-file',
                              cls.__name__)
+
+    def test_gcc_std_module_probe_honors_extra_args(self):
+        # GnuCPPCompiler.get_std_module_sources must thread the interpreter's
+        # extra_args through the -print-file-name probe: a -B-redirected GCC
+        # has to read the redirected toolchain root's libstdc++ manifest, not
+        # the default one. Proven against real g++ with a fabricated -B prefix.
+        from mesonbuild.compilers.cpp import GnuCPPCompiler
+        env = get_fake_env()
+        cpp = detect_cpp_compiler(env, MachineChoice.HOST)
+        if not isinstance(cpp, GnuCPPCompiler) or version_compare(cpp.version, '<15'):
+            raise unittest.SkipTest('host C++ compiler is not GCC >= 15')
+        default = cpp.get_std_module_sources(())
+        if not default:
+            raise unittest.SkipTest('host libstdc++ ships no modules.json')
+
+        # Fabricate a redirected toolchain root: a -B prefix whose lib/ holds a
+        # valid manifest naming a std source that exists there. g++ resolves
+        # -print-file-name=libstdc++.modules.json against the -B prefix.
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, tmpdir)
+        libdir = os.path.join(tmpdir, 'lib')
+        os.mkdir(libdir)
+        manifest_path = os.path.join(libdir, 'libstdc++.modules.json')
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'revision': 1, 'modules': [
+                {'logical-name': 'std', 'source-path': 'std.cc',
+                 'is-std-library': True}]}, f)
+        with open(os.path.join(libdir, 'std.cc'), 'w', encoding='utf-8') as f:
+            f.write('')
+
+        redirect = (f'-B{libdir}/',)
+        redirected = cpp.get_std_module_sources(redirect)
+        self.assertTrue(redirected, 'redirected probe found no std sources')
+        self.assertNotEqual(redirected, default,
+                            'probe ignored -B: same result as the default')
+        for path in redirected.values():
+            self.assertTrue(
+                os.path.realpath(path).startswith(os.path.realpath(tmpdir)),
+                f'redirected source {path} is not under the -B prefix')
+
+        # The manifest accessor follows the same redirect; empty args stay default.
+        self.assertEqual(os.path.realpath(cpp.get_std_module_manifest(redirect)),
+                         os.path.realpath(manifest_path))
+        self.assertNotEqual(cpp.get_std_module_manifest(redirect),
+                            cpp.get_std_module_manifest(()))
+
+        # lru_cache: a second identical-args call is stable, and the empty-args
+        # common case is unchanged by the redirected probe.
+        self.assertEqual(cpp.get_std_module_sources(redirect), redirected)
+        self.assertEqual(cpp.get_std_module_sources(()), default)
 
     def test_collate_depargs_shared_assembly(self):
         # A target's own collate and a BMI-only variant's collate both build
