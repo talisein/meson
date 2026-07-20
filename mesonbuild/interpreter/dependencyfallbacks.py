@@ -32,7 +32,8 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
                  interpreter: 'Interpreter',
                  names: T.List[str], for_machine: MachineChoice,
                  allow_fallback: T.Optional[bool] = None,
-                 default_options: T.Optional[T.Dict[OptionKey, ElementaryOptionValues]] = None) -> None:
+                 default_options: T.Optional[T.Dict[OptionKey, ElementaryOptionValues]] = None,
+                 external_candidate: T.Optional[T.Callable[[DependencyObjectKWs, str, DoSubproject], T.Optional[Dependency]]] = None) -> None:
         super().__init__(subproject=interpreter.subproject)
         self.interpreter = interpreter
         self.subproject = interpreter.subproject
@@ -42,6 +43,7 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
         self.environment = interpreter.environment
         self.wrap_resolver = interpreter.environment.wrap_resolver
         self.allow_fallback = allow_fallback
+        self.external_candidate = external_candidate
         self.subproject_name: T.Optional[str] = None
         self.subproject_varname: T.Optional[str] = None
         self.default_options = default_options or {}
@@ -307,8 +309,15 @@ class DependencyFallbacksHolder(MesonInterpreterObject):
             candidates.append((self._do_existing_subproject, self.subproject_name))
         # 3. check external dependency if we are not forced to use subproject
         if not self.forcefallback or not self.subproject_name:
-            for name in self.names:
-                candidates.append((self._do_dependency, name))
+            if self.external_candidate is not None:
+                # A caller-supplied synthesis stands in for the external lookup
+                # (e.g. dependency('std'), which is not a discoverable external
+                # dependency). It is the sole stage-3 candidate: it ladders the
+                # same way as _do_dependency (found wins, None keeps going).
+                candidates.append((self.external_candidate, self._display_name))
+            else:
+                for name in self.names:
+                    candidates.append((self._do_dependency, name))
         # 4. configure the subproject
         if self.subproject_name:
             candidates.append((self._do_subproject, self.subproject_name))
