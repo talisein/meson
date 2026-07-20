@@ -22,6 +22,7 @@ from . import programs
 from .environment import MachineMap
 from .mesonlib import (
     as_posix, HoldableObject, SecondLevelHolder, SimpleABC, SubProject,
+    CPP_MODULE_INTERFACE_SUFFIXES,
     File, MesonException, MachineChoice, ThreeMachineChoice, PerMachine,
     OrderedSet, classify_unity_sources, ROOT_SUBPROJECT,
     get_filenames_templates_dict, substitute_values, has_path_sep,
@@ -1929,11 +1930,11 @@ class BuildTarget(Target, BuildTargetProto):
             return True
         for s in self.get_sources():
             suffix = s.suffix if isinstance(s, File) else os.path.splitext(s)[1][1:].lower()
-            if suffix in {'cppm', 'ixx'}:
+            if suffix in CPP_MODULE_INTERFACE_SUFFIXES:
                 return True
         for gen in self.get_generated_sources():
             for out in gen.get_outputs():
-                if out.rsplit('.', 1)[-1].lower() in {'cppm', 'ixx'}:
+                if out.rsplit('.', 1)[-1].lower() in CPP_MODULE_INTERFACE_SUFFIXES:
                     return True
         return False
 

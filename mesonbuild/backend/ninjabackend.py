@@ -36,7 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import as_posix, get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
-from ..utils.core import default_cmi_path
+from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, default_cmi_path
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 
@@ -6407,7 +6407,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         is_private_interface = is_module_edge \
             and self._is_declared_private_interface(target, src)
         is_module_interface = is_module_edge \
-            and (src_suffix in {'cppm', 'ixx'} or self._is_declared_module_interface(target, src)
+            and (src_suffix in CPP_MODULE_INTERFACE_SUFFIXES or self._is_declared_module_interface(target, src)
                  or is_internal_partition or is_private_interface)
 
         # Include PCH header as first thing as it must be the first one or it will be

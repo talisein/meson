@@ -175,6 +175,11 @@ class ExecutableSerialisation:
         self.dry_run = False
 
 
+# The suffixes that mark a source a C++ module interface by extension alone
+# (what a future suffix-inference removal would delete in one place).
+CPP_MODULE_INTERFACE_SUFFIXES = frozenset({'cppm', 'ixx'})
+
+
 def has_space(s: str) -> bool:
     """Whether a string holds any whitespace. A GCC module mapper key ends at
     the first space or tab with no quoting or escape form, so a header unit

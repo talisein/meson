@@ -16,7 +16,7 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import MesonException, default_cmi_path, has_space, module_to_filename
+from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, MesonException, default_cmi_path, has_space, module_to_filename
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -702,7 +702,7 @@ def run_p1689(argv: T.List[str]) -> int:
                 # backend unions them into --interface-source too), so no
                 # separate private check is needed here.
                 if src is not None \
-                        and os.path.splitext(src)[1][1:].lower() not in {'cppm', 'ixx'} \
+                        and os.path.splitext(src)[1][1:].lower() not in CPP_MODULE_INTERFACE_SUFFIXES \
                         and _source_key(src) not in interface_sources:
                     raise MesonException(
                         f'{src} provides the C++ module "{name}" but is not marked a '
