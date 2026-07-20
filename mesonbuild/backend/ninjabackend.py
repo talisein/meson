@@ -749,6 +749,11 @@ class NinjaBackend(backends.Backend):
         # class key); provider interface-unit sources are recorded during the
         # provider's own compile generation.
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
+        # Set by _compute_bmi_class_registry: true only when the frozen registry
+        # can respell some target's cached compile args (a spaced multi-class GCC
+        # header-unit target), which is the sole reason to drop the pre-freeze
+        # compile-arg caches.
+        self._post_freeze_respell_possible = False
         self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
         self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
         # Normalized declared-source paths per (target id, module kwarg). The
@@ -912,13 +917,17 @@ class NinjaBackend(backends.Backend):
             self._compute_bmi_class_registry()
             # Freezing the registry itself calls _generate_single_compile, which
             # caches each target's compile args -- but a spaced multi-class GCC
-            # target respells those through its BMI-class root, a class the
-            # registry only knows once frozen. Drop that pre-freeze cache so
-            # generation recomputes the args against the finished registry.
-            self._generate_single_compile_target_args.cache_clear()
-            # _bmi_class_key_of derives its answer from those same args, so any
-            # key memoized before the freeze is stale for the same reason.
-            self._bmi_class_key_of.cache_clear()
+            # header-unit target respells those through its BMI-class root, a
+            # class the registry only knows once frozen. Only then can a cached
+            # arg differ post-freeze, so drop the pre-freeze cache only in that
+            # case (_post_freeze_respell_possible); otherwise the args are
+            # unchanged and the recompute would be pure waste.
+            if self._post_freeze_respell_possible:
+                self._generate_single_compile_target_args.cache_clear()
+                # _bmi_class_key_of derives its answer from those same args, so
+                # any key memoized before the freeze is stale for the same
+                # reason -- gate it identically.
+                self._bmi_class_key_of.cache_clear()
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
@@ -3408,15 +3417,21 @@ class NinjaBackend(backends.Backend):
         chosen dir cannot feed back into the key.
         """
         per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
+        needs_respell = False
         for t in self.build.get_targets().values():
             if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
                 continue
             cpp = t.compilers['cpp']
             if not cpp.supports_bmi_classes():
                 continue
+            needs_respell = needs_respell or self._compile_needs_space_free_respell(t, cpp)
             relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
         multi = sum(len(classes) for classes in per_machine.values()) > 1
+        # A target's cached compile args only differ across the freeze when the
+        # class subdir goes from None to a digest (multi) and that target is one
+        # whose include path and sources are respelled through the class root.
+        self._post_freeze_respell_possible = multi and needs_respell
         for machine, classes in per_machine.items():
             for key, relevant in classes.items():
                 subdir = hashlib.sha256(
