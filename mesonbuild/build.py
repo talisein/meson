@@ -1876,34 +1876,47 @@ class BuildTarget(Target, BuildTargetProto):
     def uses_fortran(self) -> bool:
         return 'fortran' in self.compilers
 
-    def has_cpp_source(self) -> bool:
-        # Whether the target compiles a C++ source of its own. Not the same
-        # question as 'cpp' in self.compilers: process_compilers also adds a
-        # language a target merely *links* (to pick the linker), so a Fortran or
-        # C program linking a C++ library carries a cpp compiler and no C++ TU.
+    def _has_source_of(self, is_source: T.Callable[[T.Union[str, File]], bool]) -> bool:
+        # Whether the target compiles a source of its own that `is_source`
+        # accepts, counting static sources and generated outputs alike.
         for src in self.get_sources():
-            if is_cpp_source(src):
+            if is_source(src):
                 return True
         for gen in self.get_generated_sources():
             for out in gen.get_outputs():
-                if is_cpp_source(out):
+                if is_source(out):
                     return True
         return False
 
+    @lru_cache(maxsize=None)
+    def has_cpp_source(self) -> bool:
+        """Whether the target compiles a C++ source of its own.
+
+        Not the same question as 'cpp' in self.compilers: process_compilers
+        also adds a language a target merely *links* (to pick the linker), so a
+        Fortran or C program linking a C++ library carries a cpp compiler and
+        no C++ TU.
+
+        Memoized: it depends only on the target's own sources, which are fixed
+        by the time anything asks.
+        """
+        return self._has_source_of(is_cpp_source)
+
+    @lru_cache(maxsize=None)
     def has_fortran_source(self) -> bool:
-        # Whether the target compiles a Fortran source of its own. Not the same
-        # question as 'fortran' in self.compilers: process_compilers also adds a
-        # clink language a target merely *links* (fortran is one), so a C or C++
-        # program linking a Fortran library carries a fortran compiler and no
-        # Fortran TU.
-        for src in self.get_sources():
-            if is_fortran_source(src):
-                return True
-        for gen in self.get_generated_sources():
-            for out in gen.get_outputs():
-                if is_fortran_source(out):
-                    return True
-        return False
+        """Whether the target compiles a Fortran source of its own.
+
+        Not the same question as 'fortran' in self.compilers: process_compilers
+        also adds a clink language a target merely *links* (fortran is one), so
+        a C or C++ program linking a Fortran library carries a fortran compiler
+        and no Fortran TU.
+
+        Memoized for the same reason as has_cpp_source, and because the backend
+        asks it once per compile edge (should_use_dyndeps_for_target and
+        _target_needs_split_dyndep): without a memo that is a full walk of the
+        target's sources per source.
+        """
+        return self._has_source_of(is_fortran_source)
 
     def _has_cpp_module_source(self) -> bool:
         # Whether the target carries a module-interface source, marking it a
