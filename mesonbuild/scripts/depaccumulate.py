@@ -16,7 +16,7 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import MesonException, default_cmi_path
+from ..utils.core import MesonException, default_cmi_path, has_space
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -857,6 +857,15 @@ def run_p1689(argv: T.List[str]) -> int:
                         bmi = class_units.get(key) or default_cmi_path(
                             key, args.default_cmi_root, args.bmi_suffix)
                         for n in dict.fromkeys([name, *bmi_to_names.get(bmi, [])]):
+                            # A name holding whitespace cannot be a mapper key:
+                            # GCC reads the key only to the first space, so the
+                            # line would bind the wrong name and leave the real
+                            # one unresolved. Such a unit keeps GCC's default
+                            # naming and is reached at its default CMI path
+                            # instead, so the line is dropped rather than
+                            # written broken.
+                            if has_space(n):
+                                continue
                             maplines.append(f'{n} {bmi}')
                     continue
                 name = req['logical-name']

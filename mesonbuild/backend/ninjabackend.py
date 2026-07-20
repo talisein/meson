@@ -5431,7 +5431,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 alias = spelling != canon
                 sname = self._header_unit_gcc_name(compiler, args, mode, spelling) \
                     if alias else name
-                if sname is not None:
+                # A spaced name cannot be a mapper key, so it is never paired
+                # here: the unit took no mapper of its own (mappable is False
+                # above) and keeps GCC's default naming, which its importers
+                # reach without a pair. Pairing it would only feed a broken key
+                # into their mappers.
+                if sname is not None and not self._has_space(sname):
                     bmis.append((sname, output))
                 if alias and mappable and sname is not None and not self._has_space(sname):
                     link = self._alias_header_unit_link(sname, flat_output, cache_dir, suffix)

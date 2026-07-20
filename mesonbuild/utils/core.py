@@ -175,6 +175,15 @@ class ExecutableSerialisation:
         self.dry_run = False
 
 
+def has_space(s: str) -> bool:
+    """Whether a string holds any whitespace. A GCC module mapper key ends at
+    the first space or tab with no quoting or escape form, so a header unit
+    whose resolved path holds one cannot be named in a mapper: the backend and
+    the collator both refuse to write such a key, degrading the unit to GCC's
+    default (mapper-less) naming instead."""
+    return any(c.isspace() for c in s)
+
+
 def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 

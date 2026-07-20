@@ -311,6 +311,47 @@ Thread model: posix'''), '21.9.0')
         recon = default_cmi_path('./c/util.h', 'gcm.cache', '.gcm')
         self.assertEqual(mapper_lines('./c/util.h', []), [f'./c/util.h {recon}'])
 
+    def test_depaccumulate_header_unit_spaced_key_dropped(self):
+        # A mapper key ends at the first space with no escape form, so a header
+        # unit whose resolved path holds whitespace (a spaced source tree, or a
+        # compiler-owned header under a spaced install prefix) cannot be named
+        # in a mapper. The collate must drop such a line rather than write a
+        # key GCC would mis-split into a wrong name and a hard "no such module":
+        # the unit keeps GCC's default naming and is reached at its default path.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import default_cmi_path
+
+        def mapper_lines(reported, pairs):
+            with tempfile.TemporaryDirectory() as d:
+                obj = os.path.join(d, 'a.o')
+                ddi = obj + '.ddi'
+                with open(ddi, 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': obj, 'provides': [],
+                                          'requires': [{'logical-name': reported}]}]}, f)
+                argv = ['--dyndep', os.path.join(d, 'out.dd'),
+                        '--provmap', os.path.join(d, 'pm.json'),
+                        '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
+                        '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache']
+                for name, bmi in pairs:
+                    argv += ['--header-unit-bmi', name, bmi]
+                argv.append(ddi)
+                self.assertEqual(run_p1689(argv), 0)
+                with open(obj + '.mapper', encoding='utf-8') as f:
+                    return f.read().splitlines()
+
+        spaced = 'C:/spaced prefix/mingw64/include/c++/16/vector'
+        # A require reporting the spaced name reconstructs to no mapline at all.
+        self.assertEqual(mapper_lines(spaced, []), [])
+        # A spaced name joined in through the reverse bmi -> [names] map (a
+        # --header-unit-bmi pair) is dropped too, while the space-free name
+        # bound to the same BMI still resolves.
+        free = './a/util.h'
+        bmi = default_cmi_path(free, 'gcm.cache', '.gcm')
+        lines = mapper_lines(free, [(free, bmi), (spaced, bmi)])
+        self.assertEqual(lines, [f'{free} {bmi}'])
+        for line in lines:
+            self.assertNotIn('spaced prefix', line)
+
     def test_supports_cpp_modules_p1689(self):
         # The P1689 pipeline (P1689 scan/collate, header units) needs
         # GCC >= 14 or MSVC >= 19.32; an older but modules-capable compiler
