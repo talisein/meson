@@ -58,6 +58,15 @@ executable('prog', 'main.cpp', dependencies: std,
            override_options: ['cpp_std=c++23'])
 ```
 
+As on GCC, `dependency('std')` composes with the dependency-fallbacks
+machinery like any other reserved name: a declared `fallback:` subproject or a
+wrap `[provide] std` supplies the modules when the compiler ships none,
+`--force-fallback-for=std` (or `--wrap-mode=forcefallback`) forces the
+fallback, and an explicit `meson.override_dependency('std', ...)` still wins. A
+`version:` constraint is informational (the reported compiler version, not a
+synthesis constraint). Only the exact `dependency('std')` /
+`dependency('std-nothreads')` single-name forms synthesize.
+
 Diagnostics (a module required by no target, a duplicate module name reaching
 one link, and module dependency cycles) are reported at build time exactly as
 for GCC and MSVC. A BMI bakes in the flags of its own compile, and Clang

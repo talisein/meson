@@ -186,6 +186,14 @@ As `import std` is a major new feature in compilers, expect to
 encounter toolchain issues when using it. For an example [see
 here](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=122614).
 
+`import std` is also available as `dependency('std')`
+(`dependency('std-nothreads')` to opt out of thread flags), which composes
+with the ordinary dependency-fallbacks machinery like any other reserved
+name: a declared `fallback:` subproject or a wrap `[provide] std` supplies the
+standard-library modules when the compiler ships none, `--force-fallback-for=std`
+(or `--wrap-mode=forcefallback`) forces that fallback, and an explicit
+`meson.override_dependency('std', ...)` still wins over both.
+
 ## Common `Cargo.lock` for all Cargo subprojects
 
 Whenever Meson finds a `Cargo.lock` file in the toplevel directory

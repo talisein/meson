@@ -43,6 +43,15 @@ cannot be mixed on one machine. Meson synthesizes one std library per standard
 library the build selects, each under its own target name, and a single link
 cannot mix standard libraries.
 
+As on GCC and Clang, `dependency('std')` composes with the dependency-fallbacks
+machinery like any other reserved name: a declared `fallback:` subproject or a
+wrap `[provide] std` supplies the modules when the compiler ships none,
+`--force-fallback-for=std` (or `--wrap-mode=forcefallback`) forces the
+fallback, and an explicit `meson.override_dependency('std', ...)` still wins. A
+`version:` constraint is informational (the reported compiler version, not a
+synthesis constraint). Only the exact `dependency('std')` /
+`dependency('std-nothreads')` single-name forms synthesize.
+
 Older but modules-capable MSVC (VS 2019 16.8 up to VS 2022 17.1) falls back to
 the previous regex-based scanner, which handles only flat named modules --
 module partitions and `import std;` need the P1689 scan and therefore VS 2022

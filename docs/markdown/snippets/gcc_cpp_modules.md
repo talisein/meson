@@ -46,6 +46,17 @@ of its own. Like other reserved dependency names, an explicit
 `meson.override_dependency('std', ...)` takes precedence over this synthesis if a
 project needs to supply the standard-library modules itself.
 
+`dependency('std')` composes with the dependency-fallbacks machinery like any
+other reserved name. A declared `fallback:` subproject or a wrap `[provide] std`
+supplies the standard-library modules when the compiler ships none;
+`--force-fallback-for=std` or `--wrap-mode=forcefallback` forces that fallback
+even where synthesis would find them; an explicit
+`meson.override_dependency('std', ...)` still wins over both. A `version:`
+constraint is informational — it reports the compiler version and does not
+constrain synthesis. Only the exact `dependency('std')` / `dependency('std-nothreads')`
+single-name forms synthesize; naming `std` alongside other names in one call
+leaves it an ordinary (never found) external name.
+
 `dependency('std')` is threaded by default: the std module is built with the
 threads dependency's flags and every consumer inherits them, so the
 POSIX-thread setting compiled into the module matches all of its importers
