@@ -22,6 +22,7 @@ from ..mesonlib import (
 )
 from ..options import OptionKey
 from ..arglist import CompilerArgs
+from ..utils.core import module_to_filename
 
 if T.TYPE_CHECKING:
     from typing_extensions import Literal, TypeAlias
@@ -1703,11 +1704,13 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         raise EnvironmentException(f'{self.id} does not implement get_module_bmi_suffix')
 
     def module_name_to_filename(self, module_name: str, class_subdir: T.Optional[str] = None) -> str:
-        # A module logical-name maps to the BMI path the compiler reads/writes:
-        # <cache-dir>/<name><suffix>, with a partition 'pkg:part' spelled
-        # 'pkg-part'. The collator (scripts/depaccumulate.py) mirrors this to
-        # name BMIs from logical-names without scanning compiler output.
-        return f'{self.get_module_cache_dir(class_subdir)}/{module_name.replace(":", "-")}{self.get_module_bmi_suffix()}'
+        # The mapping itself lives in utils.core, shared with the collator
+        # (scripts/depaccumulate.py), which names BMIs from logical-names
+        # without scanning compiler output. The collator has no Compiler to
+        # call this on -- it takes the cache dir and BMI suffix as command-line
+        # arguments -- so the shared definition cannot live here.
+        return module_to_filename(module_name, self.get_module_cache_dir(class_subdir),
+                                  self.get_module_bmi_suffix())
 
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,

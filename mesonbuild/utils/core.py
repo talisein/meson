@@ -184,6 +184,25 @@ def has_space(s: str) -> bool:
     return any(c.isspace() for c in s)
 
 
+def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
+    """The BMI path a compiler names a C++ module's interface at.
+
+    The mapping is <bmidir>/<name><suffix> with a partition separator ':'
+    becoming '-' (gcm.cache/pkg-part.gcm for GCC, ifc.cache/pkg-part.ifc for
+    MSVC). Two sides need it and must never disagree: the compiler layer
+    (Compiler.module_name_to_filename, which supplies the dir and suffix from
+    the compiler itself) and the collator (scripts/depaccumulate.py), which
+    names BMIs from logical-names alone because the P1689 output carries no
+    compiled-module-path. It lives here rather than on the compiler side
+    because the collator has no Compiler instance to ask: it receives the
+    cache dir and BMI suffix as command-line arguments, so a method deriving
+    them from ``self`` is not one it could ever call. That it is also a
+    build-time subprocess run once per edge, where import weight is worth
+    something, is a lesser reason pointing the same way.
+    """
+    return f'{bmidir}/{name.replace(":", "-")}{suffix}'
+
+
 def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 

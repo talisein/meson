@@ -16,7 +16,7 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import MesonException, default_cmi_path, has_space
+from ..utils.core import MesonException, default_cmi_path, has_space, module_to_filename
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -117,20 +117,6 @@ def gen(outfile: str, desc: Description, extra_rules: T.List[Rule]) -> int:
             f.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
 
     return 0
-
-
-def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
-    """Map a C++ module logical-name to its BMI path.
-
-    The compiler names a module's BMI <bmidir>/<name><suffix> with a partition
-    separator ':' becoming '-' (gcm.cache/pkg-part.gcm for GCC,
-    ifc.cache/pkg-part.ifc for MSVC). Mirrors the compiler's
-    module_name_to_filename; kept here so the collator names BMIs from
-    logical-names alone -- the P1689 output does not carry a
-    compiled-module-path. bmidir/suffix are passed by the backend from the
-    compiler so the two stay in lockstep.
-    """
-    return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
 def _source_key(path: str) -> str:
