@@ -4511,10 +4511,16 @@ class Interpreter(InterpreterBase, HoldableObject):
         #   cpp_internal_partitions x cpp_private_module_interfaces: allowed --
         #     that is how a partition is itself marked private, since privacy is
         #     not inherited from the primary module.
+        # cpp_module_interfaces is resolved once here and handed to both
+        # cross-checks: each entry is validated exactly one time, and the two
+        # comparisons below are guaranteed to be looking at the same key map.
+        # Resolving it first also fixes which entry's error surfaces first --
+        # an invalid interface entry outranks an invalid partition or private
+        # one, as when each check resolved it for itself.
         self._check_cpp_header_units_supported(name, target)
-        self._check_cpp_module_interfaces(name, target)
-        self._check_cpp_internal_partitions(name, target)
-        self._check_cpp_private_module_interfaces(name, target)
+        public_interfaces = self._check_cpp_module_interfaces(name, target)
+        self._check_cpp_internal_partitions(name, target, public_interfaces)
+        self._check_cpp_private_module_interfaces(name, target, public_interfaces)
 
         self.add_target(name, target)
         self.project_args_frozen = True
@@ -4571,7 +4577,8 @@ class Interpreter(InterpreterBase, HoldableObject):
         return False
 
     def _resolve_cpp_module_entry(self, name: str, target: build.BuildTarget, kwarg: str,
-                                  entry: T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]) -> T.List[T.Tuple[object, str]]:
+                                  entry: T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList],
+                                  static_sources: T.Set[mesonlib.File]) -> T.List[T.Tuple[object, str]]:
         # Map one module-kwarg entry to canonical (key, display) pairs, one per
         # module output it declares, so validation and the cross-kwarg checks
         # can compare mixed entry forms uniformly. A static source keys on its
@@ -4605,7 +4612,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # target's static sources (File equality resolves a string the same way
         # a source string does -- File(is_built=False, subdir, fname)).
         if isinstance(entry, mesonlib.File):
-            if entry not in set(target.sources):
+            if entry not in static_sources:
                 raise InvalidArguments(
                     f'Target {name!r} lists {entry!s} in {kwarg}, but '
                     "it is not one of the target's sources or generated outputs.")
@@ -4623,7 +4630,7 @@ class Interpreter(InterpreterBase, HoldableObject):
         # ambiguity the user resolves by passing the files() object or the
         # custom_target itself.
         static = mesonlib.File(False, target.subdir, entry)
-        static_match = static in set(target.sources)
+        static_match = static in static_sources
         generated_matches = [g for g in target.get_generated_sources() if entry in g.get_outputs()]
         if not static_match and not generated_matches:
             raise InvalidArguments(
@@ -4654,22 +4661,27 @@ class Interpreter(InterpreterBase, HoldableObject):
                                entries: T.Sequence[T.Union[str, mesonlib.File, build.CustomTarget, build.CustomTargetIndex, build.GeneratedList]]) -> T.Dict[object, str]:
         # The canonical key -> display map for one module kwarg, validating each
         # entry as it goes. Cross-kwarg checks intersect these key maps.
+        # The static-source set is built once for the whole kwarg rather than
+        # per entry: it is the same set for every one of them.
+        static_sources = set(target.sources)
         keys: T.Dict[object, str] = {}
         for entry in entries:
-            for key, display in self._resolve_cpp_module_entry(name, target, kwarg, entry):
+            for key, display in self._resolve_cpp_module_entry(name, target, kwarg, entry,
+                                                               static_sources):
                 keys[key] = display
         return keys
 
-    def _check_cpp_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
+    def _check_cpp_module_interfaces(self, name: str, target: build.BuildTarget) -> T.Dict[object, str]:
         # Every cpp_module_interfaces entry must resolve to one of the target's
         # own sources -- static or generated -- otherwise the declaration
-        # silently does nothing (the worst outcome for a typo).
-        if not target.cpp_module_interfaces:
-            return
-        self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
-                                    target.cpp_module_interfaces)
+        # silently does nothing (the worst outcome for a typo). The resulting
+        # key map is returned for the cross-kwarg checks to intersect, so the
+        # entries are resolved once for all three uses.
+        return self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
+                                           target.cpp_module_interfaces)
 
-    def _check_cpp_internal_partitions(self, name: str, target: build.BuildTarget) -> None:
+    def _check_cpp_internal_partitions(self, name: str, target: build.BuildTarget,
+                                       public_interfaces: T.Dict[object, str]) -> None:
         # An internal (implementation) partition entry must resolve to one of the
         # target's own sources, like cpp_module_interfaces. A source may not be
         # listed in both: a C++ source is one or the other, an interface unit or
@@ -4690,15 +4702,14 @@ class Interpreter(InterpreterBase, HoldableObject):
             return
         partitions = self._cpp_module_kwarg_keys(name, target, 'cpp_internal_partitions',
                                                  target.cpp_internal_partitions)
-        public_interfaces = self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
-                                                        target.cpp_module_interfaces)
         for key in partitions.keys() & public_interfaces.keys():
             raise InvalidArguments(
                 f'Target {name!r} lists {partitions[key]!s} in both cpp_module_interfaces and '
                 'cpp_internal_partitions; a C++ source is one or the other (an '
                 'interface unit or an internal partition), so list it in exactly one.')
 
-    def _check_cpp_private_module_interfaces(self, name: str, target: build.BuildTarget) -> None:
+    def _check_cpp_private_module_interfaces(self, name: str, target: build.BuildTarget,
+                                             public_interfaces: T.Dict[object, str]) -> None:
         # Every cpp_private_module_interfaces entry must resolve to one of the
         # target's own sources, like cpp_module_interfaces. A source may not
         # be listed in both: being private already implies being an
@@ -4712,8 +4723,6 @@ class Interpreter(InterpreterBase, HoldableObject):
             return
         private = self._cpp_module_kwarg_keys(name, target, 'cpp_private_module_interfaces',
                                               target.cpp_private_module_interfaces)
-        public_interfaces = self._cpp_module_kwarg_keys(name, target, 'cpp_module_interfaces',
-                                                        target.cpp_module_interfaces)
         for key in private.keys() & public_interfaces.keys():
             raise InvalidArguments(
                 f'Target {name!r} lists {private[key]!s} in both cpp_module_interfaces and '
