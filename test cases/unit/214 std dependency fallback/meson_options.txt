@@ -1,0 +1,3 @@
+option('spelling', type: 'combo',
+  choices: ['std', 'std-nothreads'],
+  value: 'std')

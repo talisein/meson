@@ -51,7 +51,7 @@ from run_tests import (
 )
 
 from .baseplatformtests import BasePlatformTests
-from .cppmodules import (CppModulesTestMixin, regex_scanner_flag,
+from .cppmodules import (CppModulesTestMixin, cpp_module_caps, regex_scanner_flag,
                          require_cpp_module_caps, requires_cpp_module_caps)
 from .helpers import (
     skip_if_not_language, skip_if_not_base_option, get_rpath,
@@ -2748,6 +2748,120 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The meson.build asserts std.version() == the override's version; without
         # the fix dependency('std') bypasses the override and this init() fails.
         self.init(testdir)
+
+    def _configured_subprojects(self):
+        return {s['name'] for s in self.introspect('--projectinfo')['subprojects']}
+
+    def _std_static_targets(self):
+        return [t['name'] for t in self.introspect('--targets')
+                if t['type'] == 'static library' and t['name'].startswith('__meson_cxx_std')]
+
+    @requires_cpp_module_caps('modules', 'import_std', compiler=('gcc', 'clang'))
+    def test_std_dependency_fallback_synthesis_wins(self):
+        # dependency('std', fallback: [...]) composes with the fallbacks
+        # machinery: where the compiler synthesizes the std module library,
+        # synthesis is the external-lookup candidate and wins -- the declared
+        # fallback subproject is never configured.
+        testdir = os.path.join(self.unit_test_dir, '214 std dependency fallback')
+        self.init(testdir)
+        self.assertNotIn('stdfallback', self._configured_subprojects(),
+                         'fallback subproject was configured though synthesis found std')
+        self.assertIn('__meson_cxx_std', self._std_static_targets(),
+                      'synthesized std library target missing')
+        self.build()
+
+    def test_std_dependency_fallback_configures_when_unavailable(self):
+        # The other side: on a compiler without import-std modules, synthesis
+        # returns not-found, so the declared fallback subproject configures and
+        # supplies the dependency. Skipped where import std *is* available (that
+        # side is exercised by test_std_dependency_fallback_synthesis_wins).
+        cpp = require_cpp_module_caps(self)
+        if 'import_std' in cpp_module_caps(cpp):
+            raise SkipTest('import std is available; the fallback-degrade side '
+                           'needs a compiler without std modules')
+        testdir = os.path.join(self.unit_test_dir, '214 std dependency fallback')
+        self.init(testdir)
+        self.assertIn('stdfallback', self._configured_subprojects(),
+                      'fallback subproject not configured though synthesis is unavailable')
+        self.assertEqual(self._std_static_targets(), [],
+                         'a std library was synthesized on a compiler without std modules')
+        self.build()
+
+    def test_std_dependency_force_fallback(self):
+        # --force-fallback-for=std skips synthesis (the universal lane: it needs
+        # only a C++ compiler, not std modules) and the declared fallback wins
+        # even where synthesis would have found std.
+        require_cpp_module_caps(self)
+        testdir = os.path.join(self.unit_test_dir, '214 std dependency fallback')
+        self.init(testdir, extra_args=['--force-fallback-for=std'])
+        self.assertIn('stdfallback', self._configured_subprojects(),
+                      'forced fallback did not configure the fallback subproject')
+        self.assertEqual(self._std_static_targets(), [],
+                         'synthesis ran despite --force-fallback-for=std')
+        self.build()
+
+    def test_std_nothreads_force_fallback(self):
+        # std-nothreads parity for the forced lane: the opt-out spelling routes
+        # through the same machinery and its forced fallback configures too.
+        require_cpp_module_caps(self)
+        testdir = os.path.join(self.unit_test_dir, '214 std dependency fallback')
+        self.init(testdir, extra_args=['-Dspelling=std-nothreads',
+                                       '--force-fallback-for=std-nothreads'])
+        self.assertIn('stdfallback', self._configured_subprojects(),
+                      'forced fallback did not configure the fallback subproject')
+        self.assertEqual(self._std_static_targets(), [])
+        self.build()
+
+    @requires_cpp_module_caps('modules', 'import_std', compiler=('gcc', 'clang'))
+    def test_std_dependency_wrap_provide_synthesis_wins(self):
+        # A wrap [provide] std = <var> supplies the implicit fallback for a plain
+        # dependency('std'); where synthesis finds std it still wins and the wrap
+        # subproject is never configured.
+        testdir = os.path.join(self.unit_test_dir, '215 std dependency wrap provide')
+        self.init(testdir)
+        self.assertNotIn('stdprov', self._configured_subprojects(),
+                         'wrap subproject configured though synthesis found std')
+        self.assertIn('__meson_cxx_std', self._std_static_targets())
+        self.build()
+
+    def test_std_dependency_wrap_provide_configures_when_unavailable(self):
+        # The other side of the wrap [provide]: without std modules the wrap
+        # subproject configures and provides the dependency. Skipped where
+        # import std is available.
+        cpp = require_cpp_module_caps(self)
+        if 'import_std' in cpp_module_caps(cpp):
+            raise SkipTest('import std is available; the wrap-degrade side needs '
+                           'a compiler without std modules')
+        testdir = os.path.join(self.unit_test_dir, '215 std dependency wrap provide')
+        self.init(testdir)
+        self.assertIn('stdprov', self._configured_subprojects(),
+                      'wrap subproject not configured though synthesis is unavailable')
+        self.assertEqual(self._std_static_targets(), [])
+        self.build()
+
+    def test_std_dependency_fallback_not_found_message(self):
+        # not_found_message fires on the degraded path: --force-fallback-for=std
+        # skips synthesis and the declared fallback cannot supply the dependency,
+        # so an optional dependency('std') returns not-found and its message is
+        # printed. Universal lane (no std modules needed).
+        require_cpp_module_caps(self)
+        testdir = os.path.join(self.unit_test_dir,
+                               '216 std dependency fallback not found message')
+        out = self.init(testdir, extra_args=['--force-fallback-for=std'])
+        self.assertIn('STD MODULES UNAVAILABLE on the degraded path', out)
+
+    def test_std_dependency_override_version_mismatch(self):
+        # Pin the stage-1 explicit-override + version: interaction. An explicit
+        # override is consulted at stage 1 under the same identifier; a version:
+        # constraint it cannot satisfy makes stage 1 return not-found and stops
+        # the ladder before synthesis, so a required dependency hard-fails rather
+        # than falling through to the compiler.
+        require_cpp_module_caps(self)
+        testdir = os.path.join(self.unit_test_dir,
+                               '217 std dependency override version mismatch')
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.init(testdir)
+        self.assertIn("Dependency 'std' is required but not found", cm.exception.output)
 
     def test_run_installed(self):
         if is_cygwin() or is_osx():
