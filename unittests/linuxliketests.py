@@ -2504,6 +2504,15 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # Runs identically on Windows (WindowsTests.test_gcc_header_unit_unspaced_no_probes).
         self.check_gcc_user_header_unit_unspaced()
 
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_compiler_owned_space_degrades(self):
+        # (compiler-owned spaced install prefix) degrade. Runs identically on
+        # Windows (WindowsTests.test_gcc_compiler_owned_space_degrades). On a
+        # distro GCC baked to an unspaced prefix this skips at fabrication --
+        # a symlinked spaced prefix canonicalizes back, so there is no spaced
+        # compiler to test with; it runs where the prefix is relocatable.
+        self.check_gcc_compiler_owned_space_degrades()
+
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_gcc_system_header_unit_unspaced(self):
         # (system header unit) x (unspaced path). The spaced cell is
