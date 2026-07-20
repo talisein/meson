@@ -519,7 +519,8 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         return args
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
-        # After xmake's speculative Clang strip list. Defines are deliberately
+        # A speculative list of Clang flags a BMI does not depend on, erring
+        # towards leaving a flag relevant. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable). A user-passed -fmodules is intentionally NOT stripped:
@@ -901,7 +902,8 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         return False
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
-        # After xmake's speculative GCC strip list. Defines are deliberately
+        # A speculative list of GCC flags a BMI does not depend on, erring
+        # towards leaving a flag relevant. Defines are deliberately
         # absent: a -D difference must split the BMI class. fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable); -Mno-modules shapes only the depfile, never the BMI. The
@@ -1405,7 +1407,8 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         return args
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
-        # After xmake's speculative MSVC strip list. Defines are deliberately
+        # A speculative list of MSVC flags a BMI does not depend on, erring
+        # towards leaving a flag relevant. Defines are deliberately
         # absent (a -D difference must split the BMI class) and so is /O
         # (conservative: optimization divergence splits here). The include-dir
         # flags are not hand-listed: they are derived from get_include_dir_flags

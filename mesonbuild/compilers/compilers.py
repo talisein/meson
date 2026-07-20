@@ -1775,8 +1775,8 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         different exception-handling models). A consuming flag takes an
         argument: it drops the following token when the flag matches exactly,
         and -- for its attached-argument spelling (e.g. /Fooutput.obj) -- also
-        participates in prefix matching. This is a best-effort list (after
-        xmake's strip lists): a missing entry only splits a BMI equivalence
+        participates in prefix matching. This is a best-effort list, and
+        deliberately so: a missing entry only splits a BMI equivalence
         class too eagerly, so the cost of getting it wrong that way is a
         redundant BMI, never a shared incompatible one -- an entry that is too
         broad (prefix where it should be exact) is the unsafe direction, since
