@@ -2111,6 +2111,14 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
+        if family == 'gcc':
+            # GCC names a header unit from the -I spelling it is reached through,
+            # so the variant and the target's own path must feed it the same
+            # spelling to compute one key and emit one edge. The provider's
+            # include dirs arrive here un-rewritten (a fresh _generate_single_compile);
+            # forward-slash them to match the target's (a no-op off Windows).
+            # Include dirs are BMI-irrelevant, so the class key is unchanged.
+            args = self._gcc_module_forward_slash_includes(cpp, args)
         # The include path keeps the provider's spellings: a variant compile,
         # like any compile, never sees a class alias, so the CMIs it writes
         # record the provider's paths. Only the variant's scan is re-aliased
@@ -5245,8 +5253,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         for provider, units in self._imported_header_units(target, compiler):
             _, irrelevant = compiler.split_bmi_args(
                 self._generate_single_compile(provider, compiler))
+            composed = irrelevant + relevant
+            if compiler.cpp_module_family() == 'gcc':
+                # The inherited unit computes one key with the provider's own
+                # variant, so both must feed GCC the same -I spelling. The
+                # provider's include dirs arrive un-rewritten (a fresh
+                # _generate_single_compile), and `relevant` carries none (they
+                # are BMI-irrelevant); forward-slash the composition to match
+                # (a no-op off Windows). Include dirs being BMI-irrelevant, the
+                # class key is unchanged.
+                composed = self._gcc_module_forward_slash_includes(compiler, composed)
             prov_outputs, prov_args, _ = self._provision_header_unit_edges(
-                compiler, units, irrelevant + relevant, class_key, class_subdir,
+                compiler, units, composed, class_key, class_subdir,
                 provider.name, None, provider, seen)
             outputs += [o for o in prov_outputs if o not in outputs]
             consumer_args += prov_args
