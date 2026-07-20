@@ -1780,24 +1780,17 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_unspaced_no_probes(self):
-        # An unspaced source needs no alias and no probe: the space machinery
-        # stays dormant and _run_header_probe is never called (the shorter-wins
-        # detector only probes an aliased name). Pins zero cost off the spaced
-        # path.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        src = self.copy_fixture('173 header unit aliasing', spaced=False)
-        orig = NinjaBackend._run_header_probe
-        calls: list = []
+        # (user header unit) x (unspaced path) on Windows -- the same cell that
+        # runs on Linux (LinuxlikeTests.test_gcc_header_unit_unspaced). The
+        # whitespace limit the alias routes around is platform-independent, so
+        # an unspaced tree leaves the machinery dormant on both.
+        self.check_gcc_user_header_unit_unspaced()
 
-        def counting(be, compiler, arglist, mode, spelling):
-            calls.append((mode, spelling))
-            return orig(be, compiler, arglist, mode, spelling)
-        with mock.patch.object(NinjaBackend, '_run_header_probe', counting):
-            out = self.init(src, extra_args=['-Dmode=plain'], inprocess=True)
-        self.assert_space_machinery_dormant(out)
-        self.assertEqual(calls, [], f'an unspaced header-unit build probed the compiler: {calls}')
-        self.build()
-        self.run_tests()
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_system_header_unit_unspaced(self):
+        # (system header unit) x (unspaced path) on Windows -- the same cell
+        # that runs on Linux (LinuxlikeTests.test_gcc_system_header_unit_unspaced).
+        self.check_gcc_system_header_unit_unspaced()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_header_unit_alias_root_pruning(self):

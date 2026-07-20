@@ -2451,6 +2451,56 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                         f'no real-name mapping onto a class-aliased unit BMI in {mapper}')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_unspaced(self):
+        # (user header unit) x (unspaced path). The spaced cell is
+        # test_gcc_header_units above (the repo's own path is spaced); this is
+        # its unspaced twin, filling the other half of the user row on Linux.
+        # Runs identically on Windows (WindowsTests.test_gcc_header_unit_unspaced_no_probes).
+        self.check_gcc_user_header_unit_unspaced()
+
+    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    def test_gcc_system_header_unit_unspaced(self):
+        # (system header unit) x (unspaced path). The spaced cell is
+        # test_gcc_stl_header_units above; this is its unspaced twin, filling
+        # the other half of the system row on Linux. Runs identically on
+        # Windows (WindowsTests.test_gcc_system_header_unit_unspaced).
+        self.check_gcc_system_header_unit_unspaced()
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
+    def test_gcc_header_unit_shorter_wins_degrade_injected(self):
+        # The alias-LENGTH quibble -- GCC discarding a longer alias for a
+        # shorter real path (shorter-wins) -- is genuinely Windows-only: a user
+        # header is shortened only under HAVE_DOS_BASED_FILE_SYSTEM, so the real
+        # defeat has its live cell in WindowsTests.test_gcc_header_unit_shorter_wins_degrades
+        # and cannot be provoked with a real compiler here. But Meson's OWN
+        # response to a discard -- detect it by probe, degrade the unit, warn --
+        # is platform-independent, and it must keep working. Exercise that path
+        # off Windows by injecting the probe result the detector reacts to: a
+        # deep spaced tree (where a real GCC would keep the alias) plus a probe
+        # that reports the spaced real path, standing in for the discard. The
+        # configure-time warning is the observable; the GCC race itself is not
+        # claimed to occur.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        src = self.copy_fixture('173 header unit aliasing', spaced=True, deep=True)
+        real_header = os.path.join(src, 'header.hpp')
+        self.assertIn(' ', real_header)
+        orig = NinjaBackend._run_header_probe
+
+        def discarding(be, compiler, arglist, mode, spelling):
+            # Stand in for GCC keeping the shorter, spaced real path over the
+            # alias: report the header's real (spaced, in-project) path for the
+            # aliased unit, real answers for anything else.
+            if os.path.basename(spelling) == 'header.hpp':
+                return real_header, True
+            return orig(be, compiler, arglist, mode, spelling)
+        with mock.patch.object(NinjaBackend, '_run_header_probe', discarding):
+            out = self.init(src, extra_args=['-Dmode=plain'], inprocess=True)
+        # The detector adopted the spaced probed name and emitted the
+        # alias-discarded degrade warning -- Meson's own path, not GCC's race.
+        self.assertIn('a path containing whitespace', out)
+        self.assertIn('real path is shorter', out)
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_forced_include(self):
         # A target that forces an include (-include prelude.h) and declares a
         # system header unit. The unit's name comes from a -H probe of the
