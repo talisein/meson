@@ -881,6 +881,9 @@ class NinjaBackend(backends.Backend):
             # registry only knows once frozen. Drop that pre-freeze cache so
             # generation recomputes the args against the finished registry.
             self._generate_single_compile_target_args.cache_clear()
+            # _bmi_class_key_of derives its answer from those same args, so any
+            # key memoized before the freeze is stale for the same reason.
+            self._bmi_class_key_of.cache_clear()
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
@@ -3183,7 +3186,18 @@ class NinjaBackend(backends.Backend):
                 'its declarations. Drop the forced include, or stop declaring the '
                 'header as a unit.', fatal=False)
 
+    @lru_cache(maxsize=None)
     def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
+        """The BMI equivalence class `target` compiles into.
+
+        Memoized: re-asked once per source on the ninja-gen hot path, and each
+        answer rebuilds the target's whole compile-arg list to split and sort
+        it. The key is frozen per target at generation time.
+
+        The memo is dropped alongside the compile-arg cache once
+        _compute_bmi_class_registry has run: this reads those args, so it
+        inherits the same staleness hazard they have across the freeze.
+        """
         cpp = target.compilers['cpp']
         return cpp.get_bmi_class_key(self._generate_single_compile(target, cpp))
 
