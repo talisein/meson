@@ -609,6 +609,16 @@ class BmiVariant:
     provmap: str
     dyndep: str
 
+# The build-relative parent directory of every header-unit alias root. GCC
+# names a header unit by the text of the path it resolved through and does not
+# resolve a link in that text, so a link placed under here renames a unit
+# without moving its header (see NinjaBackend._dir_alias_root). Every alias
+# spelling is a child of this directory. Named once, so the path constructors
+# and the recognition checks that must agree on the spelling cannot drift apart
+# -- a single edit here re-spells the whole scheme.
+HEADER_UNIT_ALIAS_ROOT = 'meson-private/imap'
+
+
 class NinjaBackend(backends.Backend):
 
     def __init__(self, build: T.Optional[build.Build]):
@@ -2396,6 +2406,22 @@ class NinjaBackend(backends.Backend):
         except OSError:
             return False
 
+    @staticmethod
+    def _alias_root_prefix() -> str:
+        """The alias-root directory with its trailing separator: the prefix
+        every alias spelling begins with, and the string a recognizer slices
+        off to recover the tail an aliased directory preserves."""
+        return HEADER_UNIT_ALIAS_ROOT + '/'
+
+    @staticmethod
+    def _is_alias_spelling(s: str) -> bool:
+        """Whether `s` names, or descends from, a header-unit alias root --
+        separator-insensitively, so a backslashed Windows spelling matches too.
+        A mapper key carries the alias root partway through its text (after a
+        './' or an include-flag prefix), so this is a substring test, not an
+        anchored one."""
+        return NinjaBackend._alias_root_prefix() in s.replace('\\', '/')
+
     def _dir_alias_root(self, real_dir: str,
                         class_tag: T.Optional[str] = None) -> T.Optional[str]:
         """A build-relative alias root for a directory, reached through a link
@@ -2433,7 +2459,7 @@ class NinjaBackend(backends.Backend):
             digest = hashlib.sha256(
                 (class_tag + '\0' + real_dir).encode()).hexdigest()[:12]
         return self._place_dir_alias(real_dir, class_tag,
-                                     f'meson-private/imap/{digest}')
+                                     f'{self._alias_root_prefix()}{digest}')
 
     def _place_dir_alias(self, real_dir: str, class_tag: T.Optional[str],
                          rel: str) -> T.Optional[str]:
@@ -2487,7 +2513,7 @@ class NinjaBackend(backends.Backend):
         """
         build_dir = self.environment.get_build_dir()
         live = set(self._alias_root_real.keys())
-        root = 'meson-private/imap'
+        root = HEADER_UNIT_ALIAS_ROOT
         abs_root = os.path.join(build_dir, root)
         try:
             names = os.listdir(abs_root)
@@ -2529,7 +2555,7 @@ class NinjaBackend(backends.Backend):
         # (outside the source tree) collapse the tail. The first pass is
         # authoritative, so a compile respelled through the class root and its
         # scan respelled again land on one spelling.
-        if d.replace('\\', '/').startswith('meson-private/imap/'):
+        if d.replace('\\', '/').startswith(self._alias_root_prefix()):
             return d
         if not force_all and not self._has_space(d):
             return d
@@ -2653,10 +2679,10 @@ class NinjaBackend(backends.Backend):
         than the provider's.
         """
         norm = d.replace('\\', '/')
-        prefix = 'meson-private/imap/'
+        prefix = self._alias_root_prefix()
         if norm.startswith(prefix):
-            # The alias root is the single component after imap/; the rest is
-            # the tail a source-tree alias preserves. Recover the real
+            # The alias root is the single component after the prefix; the rest
+            # is the tail a source-tree alias preserves. Recover the real
             # directory the root stands for and re-alias it through new_tag.
             first = norm[len(prefix):].split('/', 1)[0]
             rel = prefix + first
@@ -2691,7 +2717,7 @@ class NinjaBackend(backends.Backend):
         naming plus the divergence warning.
         """
         if self._aliasing_available is None:
-            rel = 'meson-private/imap/.canary'
+            rel = f'{self._alias_root_prefix()}.canary'
             abs_canary = os.path.join(self.environment.get_build_dir(), rel)
             try:
                 os.makedirs(os.path.dirname(abs_canary), exist_ok=True)
@@ -2830,7 +2856,7 @@ class NinjaBackend(backends.Backend):
             # Off the -I path: a system header, or a quote-form spelling falling
             # through to the compiler's own search path.
             key = self._probe_header_unit_path(compiler, args, mode, spelling)
-        elif 'meson-private/imap/' in key.replace('\\', '/'):
+        elif self._is_alias_spelling(key):
             probed = self._probe_header_unit_path(compiler, args, mode, spelling)
             if probed is not None and self._has_space(probed):
                 key = probed
@@ -3007,7 +3033,7 @@ class NinjaBackend(backends.Backend):
         for rd in real_dirs:
             alias = self._dir_alias_root(rd, class_tag)
             if alias is None:
-                # A root under our own meson-private/imap/ that could not be
+                # A root under our own alias-root directory that could not be
                 # placed (a stray entry occupying its digest path) degrades
                 # system-unit naming to the shared flat path -- never a partial,
                 # reordered chain. The result is deterministic per directory, so
@@ -3134,8 +3160,8 @@ class NinjaBackend(backends.Backend):
                     'which Meson cannot rename. Install the C++ compiler at a path '
                     'without spaces, or stop declaring compiler-owned headers as '
                     'header units and #include this one instead.', fatal=False)
-            elif (self._header_unit_mapper_key(compiler, args, spelling) or '') \
-                    .replace('\\', '/').find('meson-private/imap/') != -1:
+            elif self._is_alias_spelling(
+                    self._header_unit_mapper_key(compiler, args, spelling) or ''):
                 # An alias was placed but GCC discarded it: it keeps the shorter
                 # of the alias spelling and the header's real path, and here the
                 # real path is the shorter, so the unit is named by that spaced
