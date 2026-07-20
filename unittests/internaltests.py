@@ -981,7 +981,7 @@ Thread model: posix'''), '21.9.0')
             placed = []
             def fake_alias(rd, tag):
                 placed.append(rd)
-                return f'meson-private/imap/deadbeef{len(placed)}'
+                return f'meson-private/i/deadbeef{len(placed)}'
             with mock.patch.object(NinjaBackend, '_gcc_include_chain', return_value=free), \
                     mock.patch.object(NinjaBackend, '_dir_alias_root', side_effect=fake_alias):
                 out = be._gcc_system_chain_isystem_args(cpp, [], 'tag')
@@ -990,7 +990,7 @@ Thread model: posix'''), '21.9.0')
             self.assertEqual(len(placed), len(free))
 
     def test_header_unit_gcc_name_adopts_defeated_alias(self):
-        # A user header unit reached through a space-free imap alias is textual
+        # A user header unit reached through a space-free alias root is textual
         # by default, but GCC's shorter-of-two canonicalization can discard the
         # alias for the header's shorter real path. _header_unit_gcc_name probes
         # the real name and adopts it only when it proves GCC named the unit by
@@ -999,7 +999,7 @@ Thread model: posix'''), '21.9.0')
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         cpp = mock.MagicMock()
-        aliased = 'meson-private/imap/abc123def456/hdr.h'
+        aliased = 'meson-private/i/abc123def456/hdr.h'
 
         # (i) aliased name, probe reports a spaced real path -> adopt it.
         with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
@@ -1115,8 +1115,8 @@ Thread model: posix'''), '21.9.0')
                     be.check_header_unit_names(target, [])
                 return warn.call_args[0][0]
 
-            # An alias was placed (imap in the textual name) but defeated.
-            defeated = run('meson-private/imap/abc123def456/hdr.h')
+            # An alias was placed (the alias root in the textual name) but defeated.
+            defeated = run('meson-private/i/abc123def456/hdr.h')
             self.assertIn('discarded it', defeated)
             self.assertIn('real path is shorter', defeated)
             # No alias in the textual name: the platform could not place one.
@@ -1130,10 +1130,12 @@ Thread model: posix'''), '21.9.0')
         # regeneration), two tags over one directory must get two roots (that
         # is what gives two BMI classes two unit names), and a None tag must
         # produce exactly the legacy space-free path -- same digest input,
-        # same imap/<12hex> shape -- so existing spaced-path builds regenerate
+        # same alias-root shape -- so a re-run over one directory regenerates
         # byte-identically.
         import hashlib
-        from mesonbuild.backend.ninjabackend import NinjaBackend
+        import re
+        from mesonbuild.backend.ninjabackend import (
+            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
         with tempfile.TemporaryDirectory() as d:
             build = os.path.join(d, 'build')
             real = os.path.join(d, 'src dir')
@@ -1148,18 +1150,23 @@ Thread model: posix'''), '21.9.0')
             legacy = be._dir_alias_root(real)
             if legacy is None:
                 raise unittest.SkipTest('platform cannot make a directory link here')
-            # The None keying is pinned to the digest of the directory alone.
-            digest = hashlib.sha256(real.encode()).hexdigest()[:12]
-            self.assertEqual(legacy, f'meson-private/imap/{digest}')
+            # The None keying is pinned to the base36 digest of the directory
+            # alone, at the base length.
+            digest = NinjaBackend._base36(
+                int(hashlib.sha256(real.encode()).hexdigest(), 16)
+            ).rjust(HEADER_UNIT_ALIAS_DIGEST_LEN, '0')[:HEADER_UNIT_ALIAS_DIGEST_LEN]
+            self.assertEqual(legacy, f'{HEADER_UNIT_ALIAS_ROOT}/{digest}')
 
             tagged = be._dir_alias_root(real, 'aaaabbbbcccc')
             other = be._dir_alias_root(real, 'ddddeeeeffff')
             self.assertIsNotNone(tagged)
             self.assertIsNotNone(other)
-            # Distinct roots per keying, all in the same imap namespace.
+            # Distinct roots per keying, all in the same alias-root namespace.
             self.assertEqual(len({legacy, tagged, other}), 3)
             for rel in (tagged, other):
-                self.assertRegex(rel, r'^meson-private/imap/[0-9a-f]{12}$')
+                self.assertRegex(
+                    rel,
+                    rf'^{re.escape(HEADER_UNIT_ALIAS_ROOT)}/[0-9a-z]{{{HEADER_UNIT_ALIAS_DIGEST_LEN}}}$')
                 # Each root reaches the same real directory.
                 self.assertTrue(os.path.samefile(os.path.join(build, rel), real))
             # Same dir + same tag -> the same root, including across a fresh
@@ -1169,12 +1176,13 @@ Thread model: posix'''), '21.9.0')
             self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
 
     def test_prune_stale_dir_aliases(self):
-        # At the end of generation, a directory link under meson-private/imap/
+        # At the end of generation, a directory link under the alias root
         # that this run did not (re)place must go -- a class rename or a
         # dropped divergence orphans the old digest's root -- but a plain
         # directory or file there, and the transient canary, must survive
         # untouched.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
+        root_parts = HEADER_UNIT_ALIAS_ROOT.split('/')
         with tempfile.TemporaryDirectory() as d:
             build = os.path.join(d, 'build')
             real_a = os.path.join(d, 'a')
@@ -1202,31 +1210,33 @@ Thread model: posix'''), '21.9.0')
             self.assertIsNotNone(live_user)
             self.assertNotEqual(live_user, stale_user)
 
-            # A non-link entry under meson-private/imap/ (not an alias root)
+            # A non-link entry under the alias root (not an alias root itself)
             # must survive, and so must a canary somehow left on disk (the
             # real code always removes it itself; pruning must not reap it by
             # the ordinary stale-link rule).
-            os.makedirs(os.path.join(build, 'meson-private', 'imap', 'not_a_link_dir'))
-            canary = os.path.join(build, 'meson-private', 'imap', '.canary')
+            os.makedirs(os.path.join(build, *root_parts, 'not_a_link_dir'))
+            canary = os.path.join(build, *root_parts, '.canary')
             os.symlink(build, canary)
 
             be._prune_stale_dir_aliases()
 
-            priv_entries = os.listdir(os.path.join(build, 'meson-private', 'imap'))
+            priv_entries = os.listdir(os.path.join(build, *root_parts))
             self.assertIn(os.path.basename(live_user), priv_entries)
             self.assertNotIn(os.path.basename(stale_user), priv_entries)
             self.assertIn('not_a_link_dir', priv_entries)
             self.assertIn('.canary', priv_entries)
 
     def test_dir_alias_root_collision_lengthens_newcomer(self):
-        # Two distinct real directories whose 12-hex alias-root digests collide
-        # must not end up two names for one link. Allocation is first-come-wins:
-        # the directory allocated first keeps the 12-digit spelling, and the
-        # newcomer lengthens its own digest by one digit until it separates,
-        # never disturbing the incumbent's already-placed link. A real 12-hex
-        # collision is astronomically unlikely, so force one by patching the
+        # Two distinct real directories whose base-length alias-root digests
+        # collide must not end up two names for one link. Allocation is
+        # first-come-wins: the directory allocated first keeps the base-length
+        # spelling, and the newcomer lengthens its own digest by one digit until
+        # it separates, never disturbing the incumbent's already-placed link. A
+        # real collision is astronomically unlikely, so force one by patching the
         # digest helper to hand both directories the same full hash.
-        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
+        from mesonbuild.backend.ninjabackend import (
+            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
+        base_len = HEADER_UNIT_ALIAS_DIGEST_LEN
         with tempfile.TemporaryDirectory() as d:
             build = os.path.join(d, 'build')
             real_a = os.path.join(d, 'a')
@@ -1251,10 +1261,10 @@ Thread model: posix'''), '21.9.0')
                 second = be._dir_alias_root(real_b)
                 self.assertIsNotNone(second)
 
-                # First-come keeps the 12-digit spelling; the newcomer is one
+                # First-come keeps the base-length spelling; the newcomer is one
                 # digit longer, and the two are distinct.
-                self.assertEqual(first, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 12}')
-                self.assertEqual(second, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 13}')
+                self.assertEqual(first, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * base_len}')
+                self.assertEqual(second, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * (base_len + 1)}')
                 self.assertEqual(len(os.path.basename(second)),
                                  len(os.path.basename(first)) + 1)
 
@@ -1280,7 +1290,8 @@ Thread model: posix'''), '21.9.0')
         # not in this run's registry, is stale -- it must be remove-and-replaced
         # at the same spelling (no lengthening), the way a moved source dir has
         # always been reclaimed.
-        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
+        from mesonbuild.backend.ninjabackend import (
+            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
         with tempfile.TemporaryDirectory() as d:
             build = os.path.join(d, 'build')
             real_a = os.path.join(d, 'a')
@@ -1302,12 +1313,12 @@ Thread model: posix'''), '21.9.0')
                 stale = be._dir_alias_root(real_a)
                 if stale is None:
                     raise unittest.SkipTest('platform cannot make a directory link here')
-                self.assertEqual(stale, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * 12}')
+                self.assertEqual(stale, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * HEADER_UNIT_ALIAS_DIGEST_LEN}')
 
                 # The directory the stale link points at is gone; a fresh run
                 # (empty registry) reaches for the same spelling for a different
                 # directory. With the incumbent absent from the in-run registry,
-                # this is the stale-link case: reclaim the 12-digit spelling.
+                # this is the stale-link case: reclaim the base-length spelling.
                 import shutil
                 shutil.rmtree(real_a)
                 be2 = make_backend()

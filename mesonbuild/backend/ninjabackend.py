@@ -616,7 +616,19 @@ class BmiVariant:
 # spelling is a child of this directory. Named once, so the path constructors
 # and the recognition checks that must agree on the spelling cannot drift apart
 # -- a single edit here re-spells the whole scheme.
-HEADER_UNIT_ALIAS_ROOT = 'meson-private/imap'
+#
+# Kept deliberately short. GCC otherwise keeps the shorter of an include
+# spelling and a header's realpath (dropping the longer alias and the per-unit
+# name it carries); the fewer characters this root and its digest spend, the
+# more often the alias stays the shorter of the two and survives that
+# canonicalization -- so the parent is a single letter and the digest is a
+# compact base36.
+HEADER_UNIT_ALIAS_ROOT = 'meson-private/i'
+# The base length of an alias-root digest, in base36 (0-9a-z) characters. A
+# collision lengthens one directory's digest past this (see _dir_alias_root),
+# but on real inputs nothing collides and this is the whole length. Named so
+# the tests derive the alias-root spelling length rather than hardcode it.
+HEADER_UNIT_ALIAS_DIGEST_LEN = 5
 
 
 class _AliasRootCollision(Exception):
@@ -2431,17 +2443,43 @@ class NinjaBackend(backends.Backend):
         return NinjaBackend._alias_root_prefix() in s.replace('\\', '/')
 
     @staticmethod
+    def _base36(n: int) -> str:
+        """`n` (>= 0) rendered in lowercase base36 (0-9a-z), with no leading
+        zeros beyond a bare '0'. Lowercase is mandatory: a case-insensitive
+        filesystem (Windows, the default macOS one) folds two mixed-case
+        spellings together, so an uppercase digit would let two distinct digests
+        collapse onto one link and silently misname every unit under one of
+        them."""
+        if n == 0:
+            return '0'
+        digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+        out: T.List[str] = []
+        while n:
+            n, r = divmod(n, 36)
+            out.append(digits[r])
+        return ''.join(reversed(out))
+
+    @staticmethod
     def _alias_root_digest(real_dir: str, class_tag: T.Optional[str]) -> str:
-        """The full sha256 hex an alias-root spelling truncates.
+        """The full base36 digest an alias-root spelling truncates.
 
         The None keying hashes the directory alone -- its path is the whole
         identity. A class tag folds in so one directory yields a distinct root
         per class; the NUL separator keeps two (tag, dir) splits from colliding
         on their concatenation.
+
+        The sha256 is re-based from hex into base36 so the spelling spends fewer
+        characters per bit of digest -- a shorter alias survives GCC's
+        shorter-of-two canonicalization more often (see HEADER_UNIT_ALIAS_ROOT).
+        Left-zero-padded so the full string is always at least as long as the
+        base length a truncation slices, keeping the base-length prefix
+        well defined for any input; a 256-bit hash is at most 50 base36 digits.
         """
         if class_tag is None:
-            return hashlib.sha256(real_dir.encode()).hexdigest()
-        return hashlib.sha256((class_tag + '\0' + real_dir).encode()).hexdigest()
+            h = hashlib.sha256(real_dir.encode()).hexdigest()
+        else:
+            h = hashlib.sha256((class_tag + '\0' + real_dir).encode()).hexdigest()
+        return NinjaBackend._base36(int(h, 16)).rjust(HEADER_UNIT_ALIAS_DIGEST_LEN, '0')
 
     def _dir_alias_root(self, real_dir: str,
                         class_tag: T.Optional[str] = None) -> T.Optional[str]:
@@ -2468,30 +2506,30 @@ class NinjaBackend(backends.Backend):
         where the build has the privilege for it, else an NTFS junction (see
         _make_dir_link).
 
-        The spelling truncates a sha256 to 12 hex digits, so two distinct
-        (dir, tag) inputs colliding there is astronomically unlikely -- but not
-        impossible, and two roots sharing a spelling would be two names for one
-        link, silently misnaming every unit under one of them. Guard it:
-        allocation is first-come-wins, so on a collision with a root this run
-        already placed for a *different* real directory, the newcomer lengthens
-        its own digest one hex digit at a time until it separates while the
-        incumbent's link stands. That makes a collided root's length depend on
-        which directory this generation happened to allocate first -- it is
-        order-dependent by construction, not order-independent. On real inputs
-        nothing collides at 12 digits, so the loop runs once and the spelling is
-        exactly the 12-hex root.
+        The spelling truncates a base36 sha256 to HEADER_UNIT_ALIAS_DIGEST_LEN
+        digits, so two distinct (dir, tag) inputs colliding there is
+        astronomically unlikely -- but not impossible, and two roots sharing a
+        spelling would be two names for one link, silently misnaming every unit
+        under one of them. Guard it: allocation is first-come-wins, so on a
+        collision with a root this run already placed for a *different* real
+        directory, the newcomer lengthens its own digest one base36 digit at a
+        time until it separates while the incumbent's link stands. That makes a
+        collided root's length depend on which directory this generation
+        happened to allocate first -- it is order-dependent by construction, not
+        order-independent. On real inputs nothing collides at the base length,
+        so the loop runs once and the spelling is exactly the base-length root.
         """
         try:
             return self._dir_aliases[(real_dir, class_tag)]
         except KeyError:
             pass
         full = self._alias_root_digest(real_dir, class_tag)
-        # Start at 12 digits (the historical spelling) and lengthen only on a
-        # genuine in-run collision. The cap is the full digest: reaching it
-        # would mean two directories share an entire sha256, which does not
-        # happen, so the fall-through past the loop is unreachable in practice
-        # and degrades to no alias rather than misnaming.
-        for length in range(12, len(full) + 1):
+        # Start at the base length and lengthen only on a genuine in-run
+        # collision. The cap is the full digest: reaching it would mean two
+        # directories share an entire sha256, which does not happen, so the
+        # fall-through past the loop is unreachable in practice and degrades to
+        # no alias rather than misnaming.
+        for length in range(HEADER_UNIT_ALIAS_DIGEST_LEN, len(full) + 1):
             try:
                 return self._place_dir_alias(
                     real_dir, class_tag,
@@ -3101,11 +3139,16 @@ class NinjaBackend(backends.Backend):
                        tuple(compiler.get_exelist()))
                 if key not in self._warned_system_chain_alias:
                     self._warned_system_chain_alias.add(key)
-                    digest = hashlib.sha256(
-                        (class_tag + '\0' + rd).encode()).hexdigest()[:12]
+                    # The base-length spelling _dir_alias_root first tried for
+                    # this (rd, class_tag): built from the same digest and prefix
+                    # helpers so the named path is the one the code actually
+                    # attempts, and cannot drift from the scheme.
+                    digest = self._alias_root_digest(
+                        rd, class_tag)[:HEADER_UNIT_ALIAS_DIGEST_LEN]
+                    rel = f'{self._alias_root_prefix()}{digest}'
                     mlog.warning(
                         f'Cannot create the directory link '
-                        f'{os.path.join(build_dir, "meson-private", "imap", digest)!r} '
+                        f'{os.path.join(build_dir, rel)!r} '
                         'that per-class naming of C++ system header units routes '
                         'through: the path is occupied, or its parent is not a '
                         'directory. System header units on this machine degrade '

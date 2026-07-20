@@ -1428,7 +1428,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             rel = be._dir_alias_root(real)
             if rel is None:
                 raise SkipTest('platform can make neither a symlink nor a junction here')
-            self.assertRegex(rel, r'^meson-private/imap/[0-9a-f]+$')
+            self.assertRegex(rel, r'^meson-private/i/[0-9a-z]+$')
             abs_alias = os.path.join(build, rel)
             # Traversable: the aliased path reaches the real file.
             with open(os.path.join(abs_alias, 'hdr.h'), encoding='utf-8') as f:
@@ -1466,7 +1466,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                                          'cannot name a header unit'])
         self.check_gcc_module_mappers()
         # This fixture's own path is spaced, so the units are named through the
-        # imap alias -- unless a short checkout defeats it (shorter-wins).
+        # alias root -- unless a short checkout defeats it (shorter-wins).
         self.assert_alias_carried('util.h')
         import glob
         mappers = glob.glob(os.path.join(self.builddir, '*', 'main.cpp.*.mapper'))
@@ -1474,7 +1474,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         with open(mappers[0], encoding='utf-8') as f:
             mapper = f.read().splitlines()
         for unit in ('util.h', 'angleutil.h'):
-            pat = rf'\./meson-private/imap/[0-9a-f]+/{re.escape(unit)} \S+\.gcm'
+            pat = rf'\./meson-private/i/[0-9a-z]+/{re.escape(unit)} \S+\.gcm'
             line = next((l for l in mapper if re.fullmatch(pat, l)), None)
             self.assertIsNotNone(line, f'no aliased mapping for {unit} in {mapper}')
             bmi = line.split(' ', 1)[1]
@@ -1489,7 +1489,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # rather than emitting a mapper that fails at compile. Block the alias
         # directory with a regular file to force that platform's behavior.
         os.makedirs(os.path.join(self.builddir, 'meson-private'), exist_ok=True)
-        with open(os.path.join(self.builddir, 'meson-private', 'imap'), 'w',
+        with open(os.path.join(self.builddir, 'meson-private', 'i'), 'w',
                   encoding='utf-8') as f:
             f.write('')
         out = self.init(os.path.join(self.unit_test_dir, '142 gcc header units'))
@@ -1498,7 +1498,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # target would name the unit one way on its edge and another on its
         # importers, worse than the diagnosed failure.
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('meson-private/imap/', f.read())
+            self.assertNotIn('meson-private/i/', f.read())
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_aliasing(self):
@@ -1582,7 +1582,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$',
                                  'the compile still names the real drive-letter path')
                 bmi_norm = bmi.replace('\\', '/')
-                self.assertRegex(bmi_norm, r'^gcm\.cache/,/meson-private/imap/[0-9a-f]+/vector\.gcm$',
+                self.assertRegex(bmi_norm, r'^gcm\.cache/,/meson-private/i/[0-9a-z]+/vector\.gcm$',
                                  'the class-aliased BMI path must carry no drive letter')
                 break
         else:
@@ -1676,7 +1676,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertNotIn('divergent dialects', out)
         self.assertNotIn('cannot name a header unit', out)
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('imap', f.read())
+            self.assertNotIn('meson-private/i/', f.read())
         self.build()
         self.run_tests()
 
@@ -1799,29 +1799,29 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # platform, so a reconfigure that collapses the class split must
         # prune the same way here.
         testdir = os.path.join(self.unit_test_dir, '173 header unit aliasing')
-        imap = os.path.join(self.builddir, 'meson-private', 'imap')
+        alias_root = os.path.join(self.builddir, 'meson-private', 'i')
 
         self.init(testdir, extra_args=['-Dmode=classes'])
         self.build()
-        classes_roots = set(os.listdir(imap))
+        classes_roots = set(os.listdir(alias_root))
         self.assertGreater(len(classes_roots), 1,
                            f'expected more than one alias root, got {classes_roots}')
 
         self.init(testdir, extra_args=['--reconfigure', '-Dmode=plain'])
         self.build()
-        plain_roots = set(os.listdir(imap))
+        plain_roots = set(os.listdir(alias_root))
         self.assertTrue(plain_roots < classes_roots,
                         f'plain-mode roots {plain_roots} should be a subset of '
                         f'the classes-mode roots {classes_roots} it reuses')
         gone = classes_roots - plain_roots
         self.assertTrue(gone, 'plain mode should have orphaned some per-class roots')
         for name in gone:
-            self.assertFalse(os.path.exists(os.path.join(imap, name)),
+            self.assertFalse(os.path.exists(os.path.join(alias_root, name)),
                              f'stale alias root {name} was not pruned')
 
         self.init(testdir, extra_args=['--reconfigure', '-Dmode=classes'])
         self.build()
-        reclassed_roots = set(os.listdir(imap))
+        reclassed_roots = set(os.listdir(alias_root))
         self.assertEqual(reclassed_roots, classes_roots,
                          'the same class keys must reproduce the same alias roots')
 

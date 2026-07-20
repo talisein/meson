@@ -60,7 +60,7 @@ import textwrap
 import typing as T
 import unittest
 
-from mesonbuild.backend.ninjabackend import HEADER_UNIT_ALIAS_ROOT
+from mesonbuild.backend.ninjabackend import HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN
 from mesonbuild.compilers import detect_cpp_compiler
 from mesonbuild.mesonlib import MachineChoice, is_windows, version_compare, EnvironmentException
 from run_tests import get_fake_env, Backend
@@ -597,8 +597,8 @@ class CppModulesTestMixin:
         self.assertEqual(len(matches), 1,
                          f'{" or ".join(patterns)}: expected one mapper, got {matches}')
         path = matches[0]
-        keyre = re.compile(r'^\./meson-private/imap/[0-9a-f]+/foo/\.\./header\.hpp$'
-                           if alias else r'^\./meson-private/imap/[0-9a-f]+/header\.hpp$')
+        keyre = re.compile(r'^\./meson-private/i/[0-9a-z]+/foo/\.\./header\.hpp$'
+                           if alias else r'^\./meson-private/i/[0-9a-z]+/header\.hpp$')
         with open(path, encoding='utf-8') as f:
             lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
         keyed = [ln for ln in lines if keyre.match(ln.partition(' ')[0])]
@@ -877,13 +877,13 @@ class CppModulesTestMixin:
         return (any(c.isspace() for c in resolved), resolved)
 
     # The build-relative alias root Meson routes a spaced user header unit
-    # through (HEADER_UNIT_ALIAS_ROOT + '/' + a 12-hex digest). GCC compares a
+    # through (HEADER_UNIT_ALIAS_ROOT + '/' + a base36 digest). GCC compares a
     # user header's absolute real path against the spelling it was reached by
     # and keeps the shorter, so shorter-wins fires only where the real fixture
     # root is shorter than this. Derived from the backend's own alias-root
     # spelling, not a magic number, so it tracks a re-spelling of the scheme;
-    # the digest length matches _dir_alias_root's hexdigest()[:12].
-    _ALIAS_ROOT_SPELLING_LEN = len(HEADER_UNIT_ALIAS_ROOT + '/') + 12
+    # the digest length matches _dir_alias_root's base length.
+    _ALIAS_ROOT_SPELLING_LEN = len(HEADER_UNIT_ALIAS_ROOT + '/') + HEADER_UNIT_ALIAS_DIGEST_LEN
     # The spaced leaf a shallow fixture is copied into (the header's real path
     # tail is common to both sides of GCC's comparison and cancels, so only the
     # root dir length -- base + this leaf -- decides the defeat).
@@ -891,7 +891,7 @@ class CppModulesTestMixin:
 
     def _short_fixture_base(self) -> str:
         """A base directory for a shallow spaced fixture, short enough that the
-        fixture root (base + the spaced leaf) is shorter than the imap alias --
+        fixture root (base + the spaced leaf) is shorter than the alias root --
         the only way GCC's shorter-of-two canonicalization discards the alias
         and shorter-wins fires. The ladder: the platform temp dir first (managed
         mkdtemp space) when its layout is already short enough, else a
@@ -953,14 +953,14 @@ class CppModulesTestMixin:
                 if n + margin <= limit:
                     return near
         raise unittest.SkipTest(
-            f'cannot root a spaced fixture shorter than the {limit}-char imap '
-            'alias to provoke shorter-wins; ' + '; '.join(diags))
+            f'cannot root a spaced fixture shorter than the {limit}-char alias '
+            'root to provoke shorter-wins; ' + '; '.join(diags))
 
     def copy_fixture(self, name: str, *, spaced: bool, deep: bool = True) -> str:
         """A copy of unit fixture `name` under a tmp root whose path is
         deterministically spaced or space-free, independent of the checkout
         path. `deep` (spaced only) pads the root so it stays longer than the
-        meson-private/imap alias, keeping the alias the shorter spelling GCC
+        meson-private/i alias root, keeping the alias the shorter spelling GCC
         prefers; a shallow spaced root (deep=False) is rooted short enough that
         GCC discards the alias, which is how shorter-wins is provoked. The tree
         is removed on cleanup."""
@@ -1115,7 +1115,7 @@ class CppModulesTestMixin:
 
     def assert_alias_carried(self, basename: str) -> None:
         """GCC actually resolves the spaced user header unit `basename` through
-        its space-free imap alias, not the header's real path. GCC keeps the
+        its space-free alias root, not the header's real path. GCC keeps the
         shorter of the two, so a deep checkout keeps the alias but a short one
         discards it for the shorter real path (shorter-wins) -- which the
         mapper-keyed build cannot survive. Probing under the unit's own build
@@ -1123,7 +1123,7 @@ class CppModulesTestMixin:
         here with a pointed message rather than a mysterious downstream error.
         A no-op where no alias is in play (an unspaced checkout)."""
         args, spelling = self._header_unit_edge_args(basename)
-        if not any('meson-private/imap/' in a.replace('\\', '/') for a in args):
+        if not any('meson-private/i/' in a.replace('\\', '/') for a in args):
             return
         cpp = self.host_cpp_compiler()
         cmd = cpp.get_exelist(ccache=False) + args + ['-E', '-H', '-x', 'c++', '-']
@@ -1137,9 +1137,9 @@ class CppModulesTestMixin:
             f'shorter real path at this checkout depth (GCC resolved it to '
             f'{resolved!r}) -- see the shorter-wins degrade. Move the checkout to a '
             'deeper path, or one without spaces.')
-        self.assertIn('meson-private/imap/', resolved.replace('\\', '/'),
-                      f'header unit {basename!r} is not resolved through its imap '
-                      f'alias (got {resolved!r})')
+        self.assertIn('meson-private/i/', resolved.replace('\\', '/'),
+                      f'header unit {basename!r} is not resolved through its '
+                      f'alias root (got {resolved!r})')
 
     def assert_space_machinery_dormant(self, out: str,
                                        builddir: T.Optional[str] = None) -> None:
@@ -1150,10 +1150,10 @@ class CppModulesTestMixin:
         self.assertNotIn('cannot name a header unit', out)
         self.assertNotIn('a path containing whitespace', out)
         self.assertNotIn('divergent dialects', out)
-        self.assertFalse(os.path.isdir(os.path.join(builddir, 'meson-private', 'imap')),
+        self.assertFalse(os.path.isdir(os.path.join(builddir, 'meson-private', 'i')),
                          'an alias root was placed on an unspaced path')
         with open(os.path.join(builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('meson-private/imap', f.read().replace('\\', '/'))
+            self.assertNotIn('meson-private/i/', f.read().replace('\\', '/'))
 
     # --- The (user|system) x (spaced|unspaced) feature matrix -------------
     #
@@ -1213,7 +1213,7 @@ class CppModulesTestMixin:
                 if fn.endswith('.mapper'):
                     with open(os.path.join(dirpath, fn), encoding='utf-8') as f:
                         lines += f.read().splitlines()
-        pat = re.compile(r'\S+/vector gcm\.cache/,/meson-private/imap/[0-9a-f]+/vector\.gcm$')
+        pat = re.compile(r'\S+/vector gcm\.cache/,/meson-private/i/[0-9a-z]+/vector\.gcm$')
         self.assertTrue(any(pat.search(line) for line in lines),
                         'no real-name mapping onto a class-aliased <vector> BMI '
                         f'in an unspaced tree: {lines}')
