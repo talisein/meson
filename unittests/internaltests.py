@@ -938,6 +938,40 @@ Thread model: posix'''), '21.9.0')
         self.assertIn('$HUMAPPER', command_str)
         self.assertIn('-fmodule-only', command_str)
 
+    def test_gcc_system_chain_alias_disabled_for_spaced_prefix(self):
+        # The compile keeps the real built-in chain, so a system header unit
+        # under a spaced compiler prefix is named by that spaced path however
+        # the scan is aliased -- and a spaced name is no mapper key. Aliasing
+        # the chain would only respell the scan while leaving the compile
+        # unnameable, so it is not placed: the whole chain degrades to no
+        # aliases (an empty result), and every system unit resolves the real
+        # spaced chain, meeting its BMI at the one default-named path. A
+        # space-free chain is unaffected -- its roots are placed as before.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        with tempfile.TemporaryDirectory() as build:
+            be = NinjaBackend.__new__(NinjaBackend)
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = build
+            cpp = mock.MagicMock()
+
+            spaced = ['C:/spaced prefix/mingw64/include/c++/16',
+                      'C:/spaced prefix/mingw64/include']
+            with mock.patch.object(NinjaBackend, '_gcc_include_chain', return_value=spaced):
+                self.assertEqual(
+                    be._gcc_system_chain_isystem_args(cpp, [], 'tag'), [])
+
+            free = ['C:/mingw64/include/c++/16', 'C:/mingw64/include']
+            placed = []
+            def fake_alias(rd, tag):
+                placed.append(rd)
+                return f'meson-private/imap/deadbeef{len(placed)}'
+            with mock.patch.object(NinjaBackend, '_gcc_include_chain', return_value=free), \
+                    mock.patch.object(NinjaBackend, '_dir_alias_root', side_effect=fake_alias):
+                out = be._gcc_system_chain_isystem_args(cpp, [], 'tag')
+            self.assertEqual(out[0], '-fno-canonical-system-headers')
+            self.assertEqual(out.count('-isystem'), len(free))
+            self.assertEqual(len(placed), len(free))
+
     def test_dir_alias_root_keying(self):
         # An alias root is a pure function of (real_dir, class_tag): the same
         # keying must land on the same root across calls (idempotent

@@ -2962,6 +2962,16 @@ class NinjaBackend(backends.Backend):
             return []
         build_dir = self.environment.get_build_dir()
         real_dirs = [os.path.normpath(os.path.join(build_dir, d)) for d in chain]
+        if any(self._has_space(rd) for rd in real_dirs):
+            # The compile keeps the real chain, so a system unit under a spaced
+            # compiler prefix is named by that spaced path no matter how the
+            # scan is aliased -- and a spaced name cannot be a mapper key. The
+            # alias would only respell the scan while leaving the compile
+            # unnameable, so it is not placed: scan and compile both resolve the
+            # real spaced chain and meet at the one default-named (mapper-less)
+            # path, the same shared-flat degrade an unplaceable root yields.
+            # check_header_unit_names reports the unit as unmappable.
+            return []
         out: T.List[str] = ['-fno-canonical-system-headers']
         for rd in real_dirs:
             alias = self._dir_alias_root(rd, class_tag)
@@ -5354,7 +5364,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
                 compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
                 if scan_name is not None and compile_name is not None \
-                        and scan_name != compile_name:
+                        and scan_name != compile_name \
+                        and not self._has_space(compile_name):
                     key = f'{base}:{class_subdir}'
                     output = self._get_or_create_header_unit_edge(
                         key, default_cmi_path(scan_name, cache_dir, suffix),
@@ -5367,6 +5378,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # a compile asking the real one both resolve.
                     bmis.append((compile_name, output))
                     continue
+                # A spaced compile name (a system unit resolving into a spaced
+                # -isystem of the target's own, past a space-free built-in
+                # chain) is unnameable in a mapper, so it also falls through to
+                # the shared flat naming, mapper-less at its default path.
                 # Identical names mean the alias did not enter resolution at all
                 # (the scan reported the real name for this unit): the flagged
                 # chain args defeat the compiler's shorter-of-two canonicalization,
