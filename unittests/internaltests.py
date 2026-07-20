@@ -1226,6 +1226,64 @@ Thread model: posix'''), '21.9.0')
             self.assertIn('not_a_link_dir', priv_entries)
             self.assertIn('.canary', priv_entries)
 
+    def test_prune_reclaims_legacy_alias_root(self):
+        # The alias root was once meson-private/imap; a reconfigure of a build
+        # first laid out by an older Meson leaves that directory and its links
+        # orphaned. The prune pass reclaims it with the same conservatism it
+        # applies to the current root: a directory link under the legacy root
+        # goes, but a plain directory (or file) there keeps the directory, so
+        # the legacy root is removed only once nothing but links remained.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        with tempfile.TemporaryDirectory() as d:
+            build = os.path.join(d, 'build')
+            real = os.path.join(d, 'real')
+            os.makedirs(build)
+            os.makedirs(real)
+
+            be = NinjaBackend.__new__(NinjaBackend)
+            be._alias_root_real = {}
+            be.environment = mock.MagicMock()
+            be.environment.get_build_dir.return_value = build
+
+            # A legacy tree: one directory link (a stale alias root) and one
+            # plain directory (not a link) side by side under meson-private/imap.
+            legacy = os.path.join(build, 'meson-private', 'imap')
+            os.makedirs(legacy)
+            link = os.path.join(legacy, 'deadbeefcafe')
+            try:
+                os.symlink(real, link)
+            except OSError:
+                raise unittest.SkipTest('platform cannot make a directory link here')
+            plain = os.path.join(legacy, 'not_a_link_dir')
+            os.makedirs(plain)
+
+            be._prune_stale_dir_aliases()
+
+            # The link is reclaimed; the plain directory and the legacy parent
+            # (kept non-empty by it) survive untouched.
+            self.assertFalse(os.path.lexists(link),
+                             'the legacy alias-root link was not reclaimed')
+            self.assertTrue(os.path.isdir(plain),
+                            'a plain directory under the legacy root must survive')
+            self.assertTrue(os.path.isdir(legacy),
+                            'a non-empty legacy root must not be removed')
+
+            # With the plain directory gone too, a second pass removes the now
+            # empty legacy root entirely.
+            os.rmdir(plain)
+            be._prune_stale_dir_aliases()
+            self.assertFalse(os.path.exists(legacy),
+                             'an emptied legacy root must be removed')
+
+            # The new-scheme root is untouched by the legacy reclaim.
+            os.makedirs(os.path.join(build, 'meson-private', 'i'), exist_ok=True)
+            new_link = os.path.join(build, 'meson-private', 'i', 'ldued')
+            os.symlink(real, new_link)
+            be._alias_root_real = {'meson-private/i/ldued': real}
+            be._prune_stale_dir_aliases()
+            self.assertTrue(os.path.lexists(new_link),
+                            'the legacy reclaim must not disturb the new alias root')
+
     def test_dir_alias_root_collision_lengthens_newcomer(self):
         # Two distinct real directories whose base-length alias-root digests
         # collide must not end up two names for one link. Allocation is

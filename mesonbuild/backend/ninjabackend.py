@@ -2613,7 +2613,10 @@ class NinjaBackend(backends.Backend):
         try:
             names = os.listdir(abs_root)
         except OSError:
-            return
+            # No current root to scan (a build that placed none, or one first
+            # laid out before the root existed): nothing to prune here, but a
+            # legacy root from an older spelling may still need reclaiming.
+            names = []
         for name in names:
             if name == '.canary':
                 # Only ever a transient probe of _header_unit_aliasing_available,
@@ -2626,6 +2629,40 @@ class NinjaBackend(backends.Backend):
             if self._read_dir_link(abs_entry) is None:
                 continue
             self._remove_dir_link(abs_entry)
+        self._reclaim_legacy_alias_root()
+
+    def _reclaim_legacy_alias_root(self) -> None:
+        """One-time migration off the previous alias-root spelling.
+
+        The root was once meson-private/imap, before HEADER_UNIT_ALIAS_ROOT was
+        shortened. A reconfigure of a build first laid out by an older Meson
+        leaves that directory and the links under it orphaned: nothing this run
+        places names them, so the prune above -- which only ever scans the
+        current root -- never reaches them. Reclaim them here with the same
+        conservatism as that prune: remove only the directory links under the
+        legacy root (a symlink or junction, never a plain file or a real
+        directory), then the legacy directory itself once emptying the links
+        leaves it empty. A surviving non-link entry keeps the directory, and is
+        never touched.
+        """
+        legacy = 'meson-private/imap'
+        abs_legacy = os.path.join(self.environment.get_build_dir(), legacy)
+        try:
+            names = os.listdir(abs_legacy)
+        except OSError:
+            return
+        for name in names:
+            abs_entry = os.path.join(abs_legacy, name)
+            if self._read_dir_link(abs_entry) is None:
+                continue
+            self._remove_dir_link(abs_entry)
+        # Only if removing the links emptied it: a plain file or directory left
+        # under the legacy root (or a leftover canary) keeps it, and rmdir on a
+        # non-empty directory raises, which is exactly the conservative outcome.
+        try:
+            os.rmdir(abs_legacy)
+        except OSError:
+            pass
 
     def _respell_dir(self, d: str, class_tag: T.Optional[str] = None,
                      force_all: bool = False) -> T.Optional[str]:
