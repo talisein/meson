@@ -1423,11 +1423,11 @@ class NinjaBackend(backends.Backend):
         - a target that compiles no C++ source of its own: process_compilers
           adds a language a target merely *links* (to pick the linker), so a
           pure-C consumer of a module-providing C++ library carries a cpp
-          compiler and answers uses_cpp_modules() through the link walk, yet has
-          no compile edge to scan and no BMI to consume. Every stage below --
-          scanner selection, dyndeps, the collate, the BMI-class registry and
-          its variants, and header-unit provisioning -- would name outputs
-          nothing produces.
+          compiler and answers target_uses_cpp_modules() through the link
+          walk, yet has no compile edge to scan and no BMI to consume. Every
+          stage below -- scanner selection, dyndeps, the collate, the
+          BMI-class registry and its variants, and header-unit provisioning --
+          would name outputs nothing produces.
 
         A target with Fortran sources is not excluded: its C++ TUs get the
         module pipeline while its Fortran sources are scanned separately, the
@@ -1466,7 +1466,7 @@ class NinjaBackend(backends.Backend):
 
         A target opts in by declaration (a module-interface source, the
         cpp_modules/cpp_header_units kwargs, or linking a module provider --
-        uses_cpp_modules()); source contents are never read. cl before build
+        target_uses_cpp_modules()); source contents are never read. cl before build
         19.28.28617 (VS 16.8/16.9) has broken modules, and
         current_vs_supports_modules() rejects a too-old developer prompt.
 
@@ -1478,7 +1478,7 @@ class NinjaBackend(backends.Backend):
             return 'none'
         assert isinstance(target, build.BuildTarget)
         cpp = target.compilers['cpp']
-        if target.uses_cpp_modules():
+        if self.target_uses_cpp_modules(target):
             family = cpp.cpp_module_family()
             if family == 'gcc':
                 return 'p1689' if cpp.supports_cpp_modules_p1689() else 'regex'
@@ -1582,11 +1582,11 @@ class NinjaBackend(backends.Backend):
     def check_cpp_modules_std(self, target: build.BuildTarget) -> None:
         # C++ modules need C++20 or later; with an older cpp_std the compiler
         # rejects `export module` / `import` at build time, so fail during setup
-        # with a clear message instead. uses_cpp_modules() walks the link graph,
-        # so this must run at generation time (not target creation) when it is
-        # frozen -- calling it earlier poisons its memoized result. A
-        # preprocess-only target is exempt: -E never parses `export module` or
-        # `import`, so an older cpp_std preprocesses a module interface fine.
+        # with a clear message instead. target_uses_cpp_modules() walks the
+        # link graph and object sources, so this runs at generation time, when
+        # both are frozen. A preprocess-only target is exempt: -E never parses
+        # `export module` or `import`, so an older cpp_std preprocesses a
+        # module interface fine.
         #
         # Not keyed on cpp_module_pipeline_applies: this is a property of the
         # source language, not of the pipeline. A module source needs c++20 to
@@ -1595,17 +1595,18 @@ class NinjaBackend(backends.Backend):
         # where the source is never compiled as C++ at all.
         if isinstance(target, build.CompileTarget):
             return
-        if 'cpp' not in target.compilers or not target.uses_cpp_modules():
-            return
         # A target that compiles no C++ source of its own has no TU that could
         # parse `export module` / `import`, so its cpp_std is irrelevant: 'cpp'
         # in compilers only means it links a C++ library (process_compilers adds
         # the language to pick the linker). A pure-C program linking a
-        # module-providing C++ library reaches here and must not be blamed. This
-        # guard cannot fold into cpp_module_pipeline_applies the way the scanner
-        # check's did: this check runs even when the pipeline does not apply (a
-        # ninja too old for dyndep), so the gate does not screen the case here.
+        # module-providing C++ library must not be blamed. This guard cannot
+        # fold into cpp_module_pipeline_applies the way the scanner check's
+        # did: this check runs even when the pipeline does not apply (a ninja
+        # too old for dyndep), so the gate does not screen the case here. Asked
+        # before the module test, so such a target skips the link walk.
         if not target.has_cpp_source():
+            return
+        if 'cpp' not in target.compilers or not self.target_uses_cpp_modules(target):
             return
         from ..compilers.cpp import cpp_std_supports_modules
         std = str(self.get_target_option(target, OptionKey(
@@ -1633,7 +1634,7 @@ class NinjaBackend(backends.Backend):
         if not self.cpp_module_pipeline_applies(target):
             return
         cpp = target.compilers['cpp']
-        if not target.uses_cpp_modules() \
+        if not self.target_uses_cpp_modules(target) \
                 or self.cpp_module_scanner_for_target(target) != 'none':
             return
         family = cpp.cpp_module_family()

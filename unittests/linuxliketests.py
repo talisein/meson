@@ -1201,9 +1201,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_c_links_cpp_module(self):
         # A pure-C executable that links a C++ module-providing library carries a
         # cpp compiler only to pick the linker (process_compilers) and answers
-        # uses_cpp_modules(), yet compiles no C++ TU of its own. It must not be
-        # blamed for cpp_std<c++20 (the C exe keeps cpp_std=none) nor, on Clang
-        # without clang-scan-deps, for a missing scanner. The C main calls into
+        # target_uses_cpp_modules(), yet compiles no C++ TU of its own. It must
+        # not be blamed for cpp_std<c++20 (the C exe keeps cpp_std=none) nor, on
+        # Clang without clang-scan-deps, for a missing scanner. The C main calls into
         # the modules-using library, so a green run also proves interop.
         #
         # The module pipeline must also produce nothing for prog: it emits no

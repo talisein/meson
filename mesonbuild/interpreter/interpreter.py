@@ -4480,18 +4480,21 @@ class Interpreter(InterpreterBase, HoldableObject):
             FeatureNew.single_use('objects in Rust targets', '1.8.0', self.subproject)
 
         # C++ modules rely on Ninja dyndep; error clearly on other backends
-        # rather than silently misbuilding. This covers module consumers and
-        # header-unit users too (uses_cpp_modules), not just providers -- they
-        # all need the scan/collate pipeline that only the Ninja backend has.
-        # Gated on has_cpp_source() so the error names a target that compiles a
-        # C++ module TU: a pure-C consumer that merely links a provider has no
-        # such TU (uses_cpp_modules() is true only through the link walk), and
-        # the provider it links trips this same check on its own.
+        # rather than silently misbuilding. This covers header-unit users too,
+        # not just providers -- they all need the scan/collate pipeline that
+        # only the Ninja backend has. Only the target's own declarations are
+        # asked, never the link walk (the backend's target_uses_cpp_modules):
+        # a consumer can only name providers that already exist, and each of
+        # those was refused here on its own, so a module consumer never gets
+        # this far; the vs branch below keys on this target's own kwargs
+        # anyway. Gated on has_cpp_source() so the error names a target that
+        # compiles a C++ module TU.
         #
         # A genvslite (gen_lite) vs backend compiles through per-buildtype Ninja
         # build dirs, so it has the pipeline and is treated as Ninja here.
         backend_has_pipeline = self.backend.name == 'ninja' or getattr(self.backend, 'gen_lite', False)
-        if not backend_has_pipeline and target.uses_cpp_modules() and target.has_cpp_source():
+        if not backend_has_pipeline and target.has_cpp_source() \
+                and (target.provides_cpp_modules() or bool(target.cpp_header_units)):
             # The module kwargs drive scan/collate machinery no backend but
             # Ninja has, so on any other backend they would be silently dropped.
             module_kwargs_set = [

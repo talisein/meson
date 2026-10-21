@@ -525,6 +525,32 @@ class Backend:
             yield t
         assert target not in seen, 'should not have self'
 
+    @lru_cache(maxsize=None)
+    def target_uses_cpp_modules(self, target: build.BuildTarget) -> bool:
+        """Whether Meson must run the C++ module scan/collate machinery here.
+
+        A target is module-enabled when it declares header units, provides
+        modules itself, or links (transitively) a target that does -- so a bare
+        consumer such as a ``main.cpp`` that does ``import foo;`` gets scanned
+        and ordered without any annotation, mirroring how linking a library is
+        sufficient. "Links" is get_all_linked_targets: link edges plus targets
+        whose objects are borrowed, the same walk the collate uses to find
+        provided-module maps.
+
+        Asked only at generation time, when the link graph and objects are
+        frozen. Memoized: several generation-time checks re-ask it per target.
+        """
+        if 'cpp' not in target.compilers:
+            return False
+        # Declaring header units opts the target in too: its sources import them
+        # and so must be scanned/compiled with the module machinery.
+        if target.cpp_header_units:
+            return True
+        if target.provides_cpp_modules():
+            return True
+        return any(isinstance(t, build.BuildTarget) and t.provides_cpp_modules()
+                   for t in self.get_all_linked_targets(target))
+
     def flatten_object_list(self, target: build.BuildTargetProto, proj_dir_to_build_root: str = ''
                             ) -> T.Tuple[T.List[str], T.Iterable[build.BuildTarget]]:
         obj_list, deps = self._flatten_object_list(target.get_objects(), proj_dir_to_build_root)

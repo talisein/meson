@@ -1980,49 +1980,6 @@ class BuildTarget(Target, BuildTargetProto):
         """
         return bool(self.cpp_private_module_interfaces) or self.all_cpp_modules_private()
 
-    @lru_cache(maxsize=None)
-    def uses_cpp_modules(self) -> bool:
-        """Whether Meson must run the C++ module scan/collate machinery here.
-
-        A target is module-enabled when it provides modules itself, or when it
-        links (transitively) a target that does -- so a bare consumer such as a
-        ``main.cpp`` that does ``import foo;`` gets scanned and ordered without
-        any annotation, mirroring how linking a library is sufficient.
-
-        Memoized (like get_all_linked_targets): the module flags and the link
-        graph it walks are frozen by the time the backend queries this, and it
-        is re-asked once per source, so caching avoids an O(sources^2) rescan.
-        """
-        if 'cpp' not in self.compilers:
-            return False
-        # Declaring header units opts the target in too: its sources import them
-        # and so must be scanned/compiled with the module machinery.
-        if self.cpp_header_units:
-            return True
-        if self.provides_cpp_modules():
-            return True
-        return any(t.provides_cpp_modules() for t in self._linked_build_targets())
-
-    def _linked_build_targets(self) -> T.Iterator[BuildTarget]:
-        """Every BuildTarget linked (transitively, link_whole included) into this one.
-
-        A link-graph-only walk usable at interpreter time; the backend's
-        get_all_linked_targets also follows object sources, which Build does
-        not know about.
-        """
-        seen: T.Set[BuildTarget] = set()
-        stack: T.Deque[BuildTargetProto] = deque()
-        stack.extendleft(self.link_targets)
-        stack.extendleft(self.link_whole_targets)
-        while stack:
-            t = stack.pop()
-            if t in seen or not isinstance(t, BuildTarget):
-                continue
-            seen.add(t)
-            stack.extendleft(t.link_targets)
-            stack.extendleft(t.link_whole_targets)
-            yield t
-
     def uses_cython(self) -> bool:
         return 'cython' in self.compilers
 

@@ -557,7 +557,7 @@ Thread model: posix'''), '21.9.0')
         target = mock.MagicMock(spec=build.BuildTarget)
         target.name = 't'
         target.compilers = {'cpp': cpp}
-        target.uses_cpp_modules.return_value = uses_modules
+        be.target_uses_cpp_modules = mock.MagicMock(return_value=uses_modules)
         target.uses_fortran.return_value = False
         target.extra_args = {'cpp': extra_args or []}
         # These mocks stand for real module targets: they compile a C++ source
@@ -621,9 +621,10 @@ Thread model: posix'''), '21.9.0')
     def test_scanner_pure_c_consumer_not_blamed(self):
         # A pure-C target that merely links a C++ module provider carries a cpp
         # compiler (process_compilers adds it to pick the linker) and answers
-        # uses_cpp_modules(), but it compiles no C++ source of its own. Even
-        # where the family resolves to no scanner (Clang without clang-scan-deps
-        # here), it must not be blamed for a missing tool it never needed.
+        # target_uses_cpp_modules(), but it compiles no C++ source of its own.
+        # Even where the family resolves to no scanner (Clang without
+        # clang-scan-deps here), it must not be blamed for a missing tool it
+        # never needed.
         be, target = self._module_scanner_mock('clang', p1689=False)
         target.has_cpp_source.return_value = False
         self.assertEqual(be.cpp_module_scanner_for_target(target), 'none')
@@ -884,8 +885,8 @@ Thread model: posix'''), '21.9.0')
     def test_cpp_modules_require_cpp20(self):
         # A module-using target with cpp_std < c++20 must error during setup
         # rather than failing at build time in the compiler. The check runs in
-        # the backend (generation time) because uses_cpp_modules() walks the
-        # link graph and must not be queried before it is frozen.
+        # the backend (generation time) because target_uses_cpp_modules() walks
+        # the link graph and object sources, which are frozen only by then.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         from mesonbuild.mesonlib import MesonException
         be = NinjaBackend.__new__(NinjaBackend)
@@ -895,7 +896,7 @@ Thread model: posix'''), '21.9.0')
             target = mock.MagicMock()
             target.for_machine = MachineChoice.HOST
             target.subproject = ''
-            target.uses_cpp_modules.return_value = uses_modules
+            be.target_uses_cpp_modules = mock.MagicMock(return_value=uses_modules)
             target.has_cpp_source.return_value = has_cpp_source
             target.compilers = {'cpp': mock.MagicMock()} if has_cpp else {}
             be.check_cpp_modules_std(target)
@@ -925,7 +926,7 @@ Thread model: posix'''), '21.9.0')
         cpp.supports_cpp_modules_p1689.return_value = True
         target = mock.MagicMock(spec=build.BuildTarget)
         target.compilers = {'cpp': cpp}
-        target.uses_cpp_modules.return_value = True
+        be.target_uses_cpp_modules = mock.MagicMock(return_value=True)
         # A Fortran target uses Fortran's scanner, not this pipeline; say so,
         # or the mock answers every unstubbed predicate with a truthy mock.
         target.uses_fortran.return_value = False
@@ -939,6 +940,32 @@ Thread model: posix'''), '21.9.0')
         self.assertEqual(r1, r2)
         # Second call is served from the cache: the version gate ran only once.
         self.assertEqual(cpp.supports_cpp_modules_p1689.call_count, 1)
+
+    def test_backend_target_uses_cpp_modules_follows_linked_targets(self):
+        # A consumer that neither provides modules nor declares header units is
+        # module-enabled exactly when get_all_linked_targets (link edges plus
+        # borrowed objects) reaches a module provider, and the answer is
+        # memoized per target so the walk runs once.
+        from mesonbuild.backend.ninjabackend import NinjaBackend
+        from mesonbuild import build
+
+        def mktarget(provides):
+            t = mock.MagicMock(spec=build.BuildTarget)
+            t.compilers = {'cpp': mock.MagicMock()}
+            t.cpp_header_units = []
+            t.provides_cpp_modules.return_value = provides
+            return t
+
+        provider, plain = mktarget(True), mktarget(False)
+        uses, does_not = mktarget(False), mktarget(False)
+        reaches = {uses: [provider], does_not: [plain]}
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.get_all_linked_targets = mock.MagicMock(side_effect=lambda t: iter(reaches[t]))
+
+        self.assertTrue(be.target_uses_cpp_modules(uses))
+        self.assertTrue(be.target_uses_cpp_modules(uses))
+        self.assertFalse(be.target_uses_cpp_modules(does_not))
+        self.assertEqual(be.get_all_linked_targets.call_count, 2)
 
     def test_should_use_dyndeps_msvc_version_floor(self):
         # VS 16.8/16.9 ship cl 19.28.x *below* build 28617 with broken modules,
@@ -957,7 +984,7 @@ Thread model: posix'''), '21.9.0')
             cpp.get_cpp_modules_args.return_value = []
             target = mock.MagicMock(spec=build.BuildTarget)
             target.compilers = {'cpp': cpp}
-            target.uses_cpp_modules.return_value = True
+            be.target_uses_cpp_modules = mock.MagicMock(return_value=True)
             target.uses_fortran.return_value = False
             target.has_fortran_source.return_value = False
             target.has_cpp_source.return_value = True
