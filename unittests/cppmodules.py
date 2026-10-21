@@ -45,6 +45,13 @@ Token vocabulary (the API for the C++ module test series):
     of shared module providers (``Compiler.supports_bmi_classes()``, plus
     the ``bmionly`` probe). Clang, MSVC from cl 19.32, and GCC (from 14,
     the P1689 floor; the class cache rides the per-TU module mapper there).
+``ixx_as_cpp``
+    The driver compiles a ``.ixx`` source as C++ from its extension alone, with
+    no language flag -- what a target that opts a ``.ixx`` out of module
+    treatment (``cpp_modules: false``) relies on, since Meson then passes no
+    ``-x``. Not a module capability but a driver one, so it is probed
+    independently of ``modules``: GCC >= 15 and cl qualify; GCC <= 14 and
+    Clang treat the file as linker input.
 """
 
 from __future__ import annotations
@@ -76,12 +83,13 @@ if T.TYPE_CHECKING:
 
 CPP_MODULE_CAPS = frozenset({
     'modules', 'partitions', 'header_units', 'module_interfaces',
-    'import_std', 'regex_scanner', 'bmionly', 'bmi_classes',
+    'import_std', 'regex_scanner', 'bmionly', 'bmi_classes', 'ixx_as_cpp',
 })
 
 _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
 _regex_flag_cache: T.Dict[T.Tuple[str, str], T.Optional[str]] = {}
 _bmionly_cache: T.Dict[T.Tuple[str, str], bool] = {}
+_ixx_as_cpp_cache: T.Dict[T.Tuple[str, str], bool] = {}
 
 
 # Binaries that wear a compiler driver's name while being a caching front end
@@ -201,10 +209,44 @@ def bmionly_works(cpp: CPPCompiler) -> bool:
     return result
 
 
+def _ixx_as_cpp_probe_builds(cpp: CPPCompiler) -> bool:
+    """Compile a trivial non-module .ixx with no language flag and check an
+    object appears. The rc alone is not enough: a driver that does not know
+    the extension takes the file as linker input, warns, and exits 0 under -c
+    without writing anything."""
+    if cpp.get_argument_syntax() == 'msvc':
+        args = ['/nologo', '/c', 'probe.ixx']
+    else:
+        args = ['-c', 'probe.ixx', '-o', 'probe.o']
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, 'probe.ixx'), 'w', encoding='utf-8') as f:
+            f.write('int probefunc() { return 42; }\n')
+        try:
+            p = subprocess.run(cpp.get_exelist(ccache=False) + args, cwd=tmpdir,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return p.returncode == 0 and any(
+            name.endswith(('.o', '.obj')) for name in os.listdir(tmpdir))
+
+
+def ixx_as_cpp_works(cpp: CPPCompiler) -> bool:
+    """Whether this compiler's driver compiles a .ixx as C++ by extension."""
+    key = (cpp.get_id(), cpp.version)
+    try:
+        return _ixx_as_cpp_cache[key]
+    except KeyError:
+        pass
+    result = _ixx_as_cpp_probe_builds(cpp)
+    _ixx_as_cpp_cache[key] = result
+    return result
+
+
 def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
     """The capability tokens of the given compiler; see the module docstring
-    for the vocabulary. Memoized per (id, version); import_std, regex_scanner
-    and bmionly probe by invoking the compiler."""
+    for the vocabulary. Memoized per (id, version); import_std, regex_scanner,
+    bmionly and ixx_as_cpp probe by invoking the compiler."""
     key = (cpp.get_id(), cpp.version)
     try:
         return _caps_cache[key]
@@ -227,6 +269,8 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
         caps.add('bmionly')
         if cpp.supports_bmi_classes():
             caps.add('bmi_classes')
+    if ixx_as_cpp_works(cpp):
+        caps.add('ixx_as_cpp')
     result = frozenset(caps)
     _caps_cache[key] = result
     return result

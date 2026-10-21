@@ -870,7 +870,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # three states are told apart by whether the c++20 module floor fires at
         # setup. Pure Meson classification, so the configure matrix is
         # compiler-independent; the opted-out build (a .ixx compiled as ordinary
-        # C++) is checked on GCC, which accepts the extension without -x c++.
+        # C++, so Meson passes no -x) is checked where the driver accepts the
+        # extension on its own (the ixx_as_cpp token).
         testdir = os.path.join(self.unit_test_dir, '218 cpp modules opt out')
         floor_msg = 'require cpp_std c++20 or later'
         # Opt-out: cpp_modules: false lifts the floor, so a .ixx configures at
@@ -889,9 +890,11 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         with self.assertRaises(subprocess.CalledProcessError) as cm:
             self.init(testdir, extra_args=['-Dmode=forced'])
         self.assertIn(floor_msg, cm.exception.stdout)
-        # On GCC the opted-out .ixx also builds and runs as ordinary C++.
+        # Where the driver compiles .ixx by extension, the opted-out .ixx also
+        # builds and runs as ordinary C++. Checked, not required: a missing
+        # token drops only this step, the configure matrix above still counts.
         env = get_fake_env(testdir, self.builddir, self.prefix)
-        if detect_cpp_compiler(env, MachineChoice.HOST).get_id() == 'gcc':
+        if 'ixx_as_cpp' in cpp_module_caps(detect_cpp_compiler(env, MachineChoice.HOST)):
             self.new_builddir()
             self.init(testdir, extra_args=['-Dmode=optout'])
             self.build()
