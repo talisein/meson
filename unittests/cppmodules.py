@@ -890,6 +890,14 @@ class CppModulesTestMixin:
         # escape so its own words read plainly.
         return text.replace('$ ', ' ')
 
+    @staticmethod
+    def _program_mapper_word(text: str, option: str) -> T.Optional[str]:
+        """The value of `option` (--units, --table) in a mapper flag, with the
+        backslash escapes GCC's command-line splitter removes undone: a
+        Windows path arrives with every backslash doubled."""
+        m = re.search(re.escape(option) + r' ((?:\\.|[^\s\\?])+)', text)
+        return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
+
     def gcc_program_tables(self) -> T.Dict[str, str]:
         """Compile output -> the mapper program table it answers from, as the
         compile edges in build.ninja name them."""
@@ -902,9 +910,9 @@ class CppModulesTestMixin:
                     out = head[len('build '):].split(' ')[0]
                     rule = tail.split(' ')[0]
                 elif rule.startswith('cpp_COMPILER') and line.strip().startswith('ARGS ='):
-                    m = re.search(r'--table (\S+?)\?', self._program_mapper_flag(line))
-                    if m:
-                        tables[out] = m.group(1)
+                    table = self._program_mapper_word(self._program_mapper_flag(line), '--table')
+                    if table is not None:
+                        tables[out] = table
         return tables
 
     def _check_gcc_program_mappers(self, lines: T.List[str]) -> None:
@@ -918,10 +926,10 @@ class CppModulesTestMixin:
         def program_args(text: str, kind: str) -> str:
             text = self._program_mapper_flag(text)
             self.assertIn('-fmodule-mapper=|', text, f'{kind} edge for {out} must ask the mapper program')
-            units = re.search(r'--units (\S+?)(?:\?| --table)', text)
+            units = self._program_mapper_word(text, '--units')
             self.assertIsNotNone(units, f'{kind} edge for {out} names no units manifest')
-            self.assertTrue(os.path.isfile(os.path.join(self.builddir, units.group(1))),
-                            f'missing units manifest {units.group(1)}')
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, units)),
+                            f'missing units manifest {units}')
             return text
 
         for line in lines:
@@ -942,13 +950,13 @@ class CppModulesTestMixin:
                 counts['compile'] += 1
                 # The table sits next to the object, or at a space-free digest
                 # of its path where GCC cannot quote the mapper command line.
-                table = re.search(r'--table (\S+?)\?', program_args(s, 'compile'))
+                table = self._program_mapper_word(program_args(s, 'compile'), '--table')
                 self.assertIsNotNone(table, f'compile edge for {out} must answer from its own table')
                 if self.host_cpp_compiler().program_mapper_quotes():
-                    self.assertEqual(table.group(1).replace('\\', '/'),
+                    self.assertEqual(table.replace('\\', '/'),
                                      f'{out}.mapper.json'.replace('\\', '/'))
-                self.assertTrue(os.path.isfile(os.path.join(self.builddir, table.group(1))),
-                                f'missing table {table.group(1)} for {out}')
+                self.assertTrue(os.path.isfile(os.path.join(self.builddir, table)),
+                                f'missing table {table} for {out}')
         self.assertGreater(counts['compile'], 0, 'no module compile edges found')
 
     # --- Spaced-path header-unit test fabrication -------------------------
