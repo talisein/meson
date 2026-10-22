@@ -495,6 +495,11 @@ def run_p1689(argv: T.List[str]) -> int:
     reads them from the direct imports' CMIs), so the file is linear in the
     TU's imports. Written copy-if-different: an unconditional rewrite would
     recompile the whole target whenever any module in it changed.
+
+    With --mapper-format json the per-TU file is instead the lookup table a
+    GCC mapper program answers the compile from: {"modules": name -> BMI,
+    "header_units": real path -> BMI}, header units resolved by real path
+    through --header-unit-manifest.
     """
     parser = argparse.ArgumentParser(prog='depaccumulate --p1689')
     parser.add_argument('--dyndep', required=True, help='Output Ninja dyndep file.')
@@ -574,6 +579,12 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='Also write a GCC module mapper per TU at '
                              '<primary-output> + this suffix, mapping its provides '
                              'and direct imports to their BMI paths.')
+    parser.add_argument('--mapper-format', choices=['file', 'json'], default='file',
+                        help='file: a GCC module mapper file; json: a mapper program\'s '
+                             'per-TU lookup table.')
+    parser.add_argument('--header-unit-manifest', default=None,
+                        help='With --mapper-format json, the (target, BMI class) manifest '
+                             'of declared header units by real path.')
     parser.add_argument('--default-cmi-root', default=None,
                         help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
                              'imports resolve in; mappers reproduce the compiler\'s '
@@ -609,6 +620,13 @@ def run_p1689(argv: T.List[str]) -> int:
     bmi_to_names: T.Dict[str, T.List[str]] = {}
     for name, bmi in args.header_unit_bmis:
         bmi_to_names.setdefault(bmi, []).append(name)
+    # Real path -> BMI of every header unit declared for this BMI class, for a
+    # mapper program's tables. A scan reports a unit by whatever name it
+    # reached it through; its real path is what identifies it.
+    manifest_units: T.Dict[str, str] = {}
+    if args.header_unit_manifest is not None:
+        with open(args.header_unit_manifest, encoding='utf-8') as f:
+            manifest_units = json.load(f).get('header_units', {})
 
     # name -> the target privately providing it, for every private module of a
     # linked dependency: the "provided but private" diagnostic below. Two
@@ -818,6 +836,9 @@ def run_p1689(argv: T.List[str]) -> int:
                              if p.get('source-path')), None)
             display = rule_src if rule_src is not None else obj
             maplines: T.List[str] = []
+            # The same lookups as a mapper program's table.
+            table_modules: T.Dict[str, str] = {}
+            table_units: T.Dict[str, str] = {}
             outs: T.List[str] = []
             for prov in rule.get('provides', []):
                 name = prov['logical-name']
@@ -828,6 +849,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     # only compiler taking both flags) sends the export to
                     # that declared output, the rule's primary-output.
                     maplines.append(f'{name} {obj}')
+                    table_modules[name] = obj
                 else:
                     # Same private/shared choice as the provides loop above,
                     # by name rather than re-deriving from source-path: this
@@ -837,6 +859,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     bmi = module_to_filename(name, bmidir, args.bmi_suffix)
                     outs.append(bmi)
                     maplines.append(f'{name} {bmi}')
+                    table_modules[name] = bmi
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
                 if _is_header_unit(req):
@@ -852,7 +875,18 @@ def run_p1689(argv: T.List[str]) -> int:
                                 f'{obj} imports header unit "{req["logical-name"]}", '
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
-                    if args.default_cmi_root is not None:
+                    if args.mapper_format == 'json':
+                        # Relative to the build directory, the collate's own
+                        # working directory, like every name GCC reports.
+                        name = req['logical-name']
+                        real = os.path.realpath(name)
+                        bmi = manifest_units.get(real)
+                        if bmi is None:
+                            raise MesonException(
+                                f'{obj} imports header unit "{name}", which is not '
+                                "declared in this target's cpp_header_units.")
+                        table_units[real] = bmi
+                    elif args.default_cmi_root is not None:
                         # A unit named outright for this TU's class is looked up;
                         # one left at the default-named path is reconstructed
                         # (the reconstruction branch is load-bearing: the scan's
@@ -929,11 +963,16 @@ def run_p1689(argv: T.List[str]) -> int:
                 # public modules through.
                 req_dir = args.private_bmi_dir if name in private_names else args.bmi_dir
                 maplines.append(f'{name} {module_to_filename(name, req_dir, args.bmi_suffix)}')
+                table_modules[name] = module_to_filename(name, req_dir, args.bmi_suffix)
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
             dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
-            if args.mapper_suffix is not None:
+            if args.mapper_suffix is not None and args.mapper_format == 'json':
+                _write_if_different(obj + args.mapper_suffix, json.dumps(
+                    {'modules': table_modules, 'header_units': table_units},
+                    indent=1, sort_keys=True) + '\n')
+            elif args.mapper_suffix is not None:
                 _write_if_different(obj + args.mapper_suffix,
                                     ''.join(line + '\n' for line in maplines))
 

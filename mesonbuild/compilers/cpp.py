@@ -6,6 +6,7 @@ from __future__ import annotations
 import functools
 import json
 import os.path
+import re
 import shutil
 import tempfile
 import typing as T
@@ -888,6 +889,42 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # written by the collate; only this static path is on the command
         # line.
         return [f'-fmodule-mapper={mapper_path}']
+
+    # What GCC 16's mapper-command splitter (libiberty's buildargv) treats as
+    # special, the same set the backend escapes in GCC response files.
+    _MAPPER_UNSAFE = re.compile(r'[^\w@%+=:,./-]', re.ASCII)
+
+    def program_mapper_unquotable(self, words: T.List[str]) -> T.List[str]:
+        # GCC before 16 splits a '|program' mapper's command line at every
+        # space and has no quoting or escape form at all, so a word holding a
+        # space (or a quote, which would arrive literally) cannot be passed.
+        # A '?' can be: GCC cuts the option at its *last* '?', and the command
+        # line always ends in one.
+        if version_compare(self.version, '>=16'):
+            return []
+        return [w for w in words if not w or any(c in w for c in ' \t\n\'"\\')]
+
+    def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
+                                       units: str, table: T.Optional[str] = None) -> T.List[str]:
+        # GCC spawns '|<command line>' as its module mapper and asks it for
+        # every BMI over stdin/stdout. The text after the option's last '?' is
+        # an identifier GCC passes on in its handshake; ending on an empty one
+        # keeps any '?' inside the command line intact.
+        words = [*command, '--bmi-class', bmi_class, '--units', units]
+        if table is not None:
+            words += ['--table', table]
+        bad = self.program_mapper_unquotable(words)
+        if bad:
+            raise MesonException(
+                f'GCC {self.version} cannot pass {bad[0]!r} to its module mapper '
+                'program: before GCC 16 the mapper command line is split at every '
+                'space, with no quoting. Unset MESON_GCC_MAPPER to use mapper files.')
+        if version_compare(self.version, '>=16'):
+            line = ' '.join(self._MAPPER_UNSAFE.sub(lambda m: '\\' + m.group(), w) if w else "''"
+                            for w in words)
+        else:
+            line = ' '.join(words)
+        return [f'-fmodule-mapper=|{line}?']
 
     def supports_bmi_classes(self) -> bool:
         # Divergent classes work through the per-TU module mapper. Only

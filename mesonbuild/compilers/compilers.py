@@ -1695,6 +1695,21 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
+                                       units: str, table: T.Optional[str] = None) -> T.List[str]:
+        """Flags making an edge resolve C++ modules through a mapper *program*
+        the compiler spawns itself (`command`, answering from the `units`
+        manifest and, on a compile edge, the per-TU `table`). [] for
+        compilers that cannot spawn one.
+        """
+        return []
+
+    def program_mapper_unquotable(self, words: T.List[str]) -> T.List[str]:
+        """The words of a mapper-program command line this compiler could not
+        pass through intact: it splits the command line itself, and not every
+        compiler can quote."""
+        return []
+
     def get_module_scanner_exelist(self) -> T.List[str]:
         # Only for compilers whose P1689 scanner is a separate tool (Clang's
         # clang-scan-deps); GCC and MSVC scan with the compiler binary itself.

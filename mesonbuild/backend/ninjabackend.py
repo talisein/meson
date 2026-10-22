@@ -699,6 +699,13 @@ class NinjaBackend(backends.Backend):
         # (a canary link) so every target agrees: two same-class targets that
         # disagreed would compute two names for one BMI. None until probed.
         self._aliasing_available: T.Optional[bool] = None
+        # How GCC resolves BMIs in this build directory: 'file' (per-TU mapper
+        # files) or 'program' (a mapper server GCC spawns), fixed when the
+        # directory is first configured. None until read.
+        self._gcc_mapper_mode: T.Optional[str] = None
+        # Compilers already found unable to pass the mapper server's command
+        # line (and warned about), which fall back to mapper files.
+        self._gcc_program_mapper_refused: T.Set[T.Tuple[T.Any, ...]] = set()
         # Where the compiler resolves a header unit to, memoised: the probe
         # spawns the compiler, and a unit is declared by many targets. The
         # value is (resolved path or None, whether the compiler exited clean).
@@ -1745,7 +1752,22 @@ class NinjaBackend(backends.Backend):
             # the clang-scan-deps feature probe, which projects without module
             # targets must not pay for.
             self.generate_cpp_module_scan_rule(compiler)
-        if family == 'gcc' and target.cpp_header_units:
+        scan_units: T.Optional[str] = None
+        if self._gcc_program_mapper(compiler):
+            # The scan asks the mapper server too, before the collate has run:
+            # it asks only for named modules' names, never their BMIs, and
+            # reads header units by real path from the (target, BMI class)
+            # manifest -- the variant's class for a BMI-only variant scan. So
+            # it needs no respelling, and the manifest is an input: a unit
+            # declared or moved changes which #includes the scan translates.
+            if header_unit_override is None:
+                self.provision_header_units(target, compiler)
+                tag = self._gcc_target_bmi_class_tag(target, compiler)
+            else:
+                tag = self._gcc_bmi_class_tag(class_tag)
+            scan_units = self._gcc_units_manifest(target, tag)
+            commands = list(commands) + self._gcc_program_mapper_args(compiler, tag, scan_units)
+        elif family == 'gcc' and target.cpp_header_units:
             # A GCC scan carries no mapper, so it reaches a header unit only at
             # its default-named path -- the one its own include spelling
             # mangles to. Respell the scan's include path and source through the
@@ -1776,6 +1798,8 @@ class NinjaBackend(backends.Backend):
         depfile = ddi + '.d'
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
         elem = NinjaBuildElement(self.all_outputs, ddi, rulename, rel_src)
+        if scan_units is not None:
+            elem.add_dep(scan_units)
         if header_unit_override is not None:
             # A BMI-only variant scan: depend on the variant class's unit
             # BMIs, whose consumer flags already ride `commands` -- the
@@ -1931,8 +1955,9 @@ class NinjaBackend(backends.Backend):
             # each scan (get_ddi_file_for appends '.ddi'). They are written
             # copy-if-different, so restat keeps an unchanged mapper from
             # recompiling its TU when a sibling module changes.
+            suffix = '.mapper.json' if self._gcc_program_mapper(cpp) else '.mapper'
             elem.implicit_outfilenames.extend(
-                d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
+                d[:-len('.ddi')] + suffix for d in sorted(ddis))
             elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
@@ -2026,14 +2051,18 @@ class NinjaBackend(backends.Backend):
         return self._collate_depargs(
             cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
             harvests=harvests, interface_sources=interface_sources,
-            header_unit_bmis=header_unit_bmis, header_units=target.cpp_header_units)
+            header_unit_bmis=header_unit_bmis, header_units=target.cpp_header_units,
+            units_manifest=self._gcc_units_manifest(
+                target, self._gcc_target_bmi_class_tag(target, cpp))
+            if self._gcc_program_mapper(cpp) else None)
 
     def _collate_depargs(self, cpp: Compiler, head: T.List[str], *,
                          dep_provmaps: T.List[str],
                          dep_private_maps: T.List[T.Tuple[str, str, str]],
                          harvests: bool, interface_sources: T.List[str],
                          header_unit_bmis: T.List[T.Tuple[str, str]],
-                         header_units: T.List[str]) -> T.List[str]:
+                         header_units: T.List[str],
+                         units_manifest: T.Optional[str] = None) -> T.List[str]:
         """Assemble the collator flags shared by a target's own collate and a
         BMI-only variant's. Only the `head` genuinely differs between the two
         (--private-map plus a target's private-provide flags, vs a variant's
@@ -2050,7 +2079,16 @@ class NinjaBackend(backends.Backend):
         if harvests:
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
         family = cpp.cpp_module_family()
-        if family == 'gcc':
+        if self._gcc_program_mapper(cpp):
+            # A collate for GCC asking a mapper server writes each TU's lookup
+            # table instead (in lockstep with the compile edges' --table
+            # paths): the same names and BMIs a mapper file would hold, as JSON
+            # and with header units by real path, found in the (target, BMI
+            # class) manifest the server reads for scans.
+            assert units_manifest is not None
+            depargs += ['--mapper-suffix', '.mapper.json', '--mapper-format', 'json',
+                        '--header-unit-manifest', units_manifest]
+        elif family == 'gcc':
             # A GCC collate writes the per-TU module mappers (--mapper-suffix,
             # in lockstep with the compile edges' get_module_mapper_args paths)
             # its BMI lookups go through. A mapper disables GCC's default
@@ -2175,6 +2213,11 @@ class NinjaBackend(backends.Backend):
             cpp, provider, args.copy(), class_key,
             self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
             vid, None)
+        program_mapper = self._gcc_program_mapper(cpp)
+        variant_tag = self._gcc_bmi_class_tag(info.subdir)
+        variant_units = self._gcc_units_manifest(provider, variant_tag)
+        if program_mapper:
+            self._write_gcc_units_manifest(variant_units, variant_tag, provider, hu_bmis)
         # The variant rule names its own explicit-file BMI output, so it asks
         # the compiler for module args without the directory-addressed output
         # pair (emit_output=False); the class cache stays searchable for the
@@ -2217,7 +2260,13 @@ class NinjaBackend(backends.Backend):
             elem.add_item('ARGS', args + compile_iface)
             if family in {'clang', 'gcc'}:
                 elem.add_item('DEPFILE', vpcm + '.d')
-            if family == 'gcc':
+            if program_mapper:
+                # The variant's collate writes this table; the server sends
+                # the export to $out and the imports to the class cache.
+                elem.add_item('MAPPERFLAG', self._gcc_program_mapper_args(
+                    cpp, variant_tag, variant_units, vpcm + '.mapper.json'))
+                elem.add_dep(vpcm + '.mapper.json')
+            elif family == 'gcc':
                 # The variant's collate writes this mapper; it sends the
                 # export to $out and the imports to the class cache.
                 elem.add_item('MAPPER', vpcm + '.mapper')
@@ -2264,7 +2313,8 @@ class NinjaBackend(backends.Backend):
             cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
             harvests=True,
             interface_sources=[os.path.normpath(rec.rel_src) for rec in recs],
-            header_unit_bmis=hu_bmis, header_units=provider.cpp_header_units)
+            header_unit_bmis=hu_bmis, header_units=provider.cpp_header_units,
+            units_manifest=variant_units)
         self._add_module_collate_edge(
             cpp, [variant.dyndep, variant.provmap], ddis,
             variant.dyndep, variant.provmap, cpp.get_module_cache_dir(info.subdir),
@@ -2849,6 +2899,95 @@ class NinjaBackend(backends.Backend):
             compiler.get_include_dir_flags(), args,
             lambda d: self._reclass_dir(d, new_tag))
 
+    def _gcc_program_mapper_requested(self) -> bool:
+        """Whether this build directory resolves GCC modules through a mapper
+        program rather than per-TU mapper files.
+
+        Chosen by MESON_GCC_MAPPER=program when the directory is first
+        configured, then kept in the private dir, so a regeneration run from an
+        environment without the variable does not switch modes under a built
+        tree. A wipe re-reads it.
+        """
+        if self._gcc_mapper_mode is None:
+            path = os.path.join(self.environment.get_scratch_dir(), 'gcc-module-mapper')
+            try:
+                with open(path, encoding='utf-8') as f:
+                    mode = f.read().strip()
+            except FileNotFoundError:
+                mode = 'program' if os.environ.get('MESON_GCC_MAPPER') == 'program' else 'file'
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(mode + '\n')
+            self._gcc_mapper_mode = mode
+        return self._gcc_mapper_mode == 'program'
+
+    def _gcc_mapper_command(self) -> T.List[str]:
+        return self.environment.get_build_command() + ['--internal', 'gccmapper']
+
+    def _gcc_program_mapper(self, compiler: Compiler) -> bool:
+        """Whether `compiler`'s module edges spawn the mapper server.
+
+        A GCC that cannot quote its mapper command line, run by a Meson whose
+        own command holds a space, falls back to mapper files, said once.
+        """
+        if compiler.cpp_module_family() != 'gcc' or not self._gcc_program_mapper_requested():
+            return False
+        key = (compiler.for_machine, compiler.get_id(), tuple(compiler.get_exelist()))
+        if key in self._gcc_program_mapper_refused:
+            return False
+        bad = compiler.program_mapper_unquotable(self._gcc_mapper_command())
+        if bad:
+            self._gcc_program_mapper_refused.add(key)
+            mlog.warning(
+                f'MESON_GCC_MAPPER=program is ignored for GCC {compiler.version}: it '
+                f'cannot pass {bad[0]!r} to a module mapper program (before GCC 16 '
+                'the command line is split at every space, with no quoting). Using '
+                'module mapper files instead.', fatal=False)
+            return False
+        return True
+
+    @staticmethod
+    def _gcc_bmi_class_tag(class_subdir: T.Optional[str]) -> str:
+        # The BMI class a mapper server answers for, as the class subdir; a
+        # single-class build has none and gets a stable name of its own.
+        return class_subdir or 'default'
+
+    def _gcc_target_bmi_class_tag(self, target: build.BuildTarget, compiler: Compiler) -> str:
+        return self._gcc_bmi_class_tag(self._header_unit_class_subdir_for(
+            target.for_machine, compiler, self._bmi_class_key_of(target)))
+
+    @staticmethod
+    def _gcc_units_manifest(owner: build.BuildTarget, bmi_class_tag: str) -> str:
+        # One manifest per (target, BMI class): a target's own class, or a
+        # BMI-only variant's.
+        return f'meson-private/gcc-header-units/{owner.get_id()}@{bmi_class_tag}.json'
+
+    def _gcc_program_mapper_args(self, compiler: Compiler, bmi_class_tag: str,
+                                 units: str, table: T.Optional[str] = None) -> T.List[str]:
+        return compiler.get_module_program_mapper_args(
+            self._gcc_mapper_command(), bmi_class_tag, units, table)
+
+    def _write_gcc_units_manifest(self, path: str, bmi_class_tag: str, owner: build.BuildTarget,
+                                  bmis: T.List[T.Tuple[str, str]]) -> None:
+        """The mapper server's view of one (target, BMI class): each declared
+        header unit's real path -> its BMI. Written at setup and
+        copy-if-different, as an input of the target's scans: an unchanged
+        manifest must not rescan them.
+        """
+        content = json.dumps({'bmi_class': bmi_class_tag,
+                              'target': self.private_map_display_for(owner),
+                              'header_units': dict(sorted(bmis))},
+                             indent=1, sort_keys=True) + '\n'
+        full = os.path.join(self.environment.get_build_dir(), path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        try:
+            with open(full, encoding='utf-8') as f:
+                if f.read() == content:
+                    return
+        except OSError:
+            pass
+        with open(full, 'w', encoding='utf-8') as f:
+            f.write(content)
+
     def _header_unit_aliasing_available(self) -> bool:
         """Whether this build tree can make the directory links a per-class GCC
         header unit is named through, decided once for the whole build.
@@ -2885,7 +3024,8 @@ class NinjaBackend(backends.Backend):
         or they name two different units.
         """
         mode, spelling = self._parse_header_unit(hu)
-        if compiler.cpp_module_family() == 'gcc' and (force_all or self._has_space(spelling)):
+        if compiler.cpp_module_family() == 'gcc' and (force_all or self._has_space(spelling)) \
+                and not self._gcc_program_mapper(compiler):
             spelling = self._respell_path(spelling, class_tag, force_all) or spelling
         return mode, spelling
 
@@ -2899,11 +3039,13 @@ class NinjaBackend(backends.Backend):
         so a target with no spaced path is respelled to itself and keeps the
         real spelling on its compile. The per-class scan respell is separate
         (generate_cpp_module_scan): a non-spaced unit's class rides its scan
-        name, never its compile, so no alias reaches the CMI.
+        name, never its compile, so no alias reaches the CMI. A GCC asking a
+        mapper program needs none of it: the protocol quotes whitespace.
         """
         return (compiler.get_language() == 'cpp' and compiler.cpp_module_family() == 'gcc'
                 and bool(target.cpp_header_units)
-                and self.target_uses_p1689_cpp_modules(target))
+                and self.target_uses_p1689_cpp_modules(target)
+                and not self._gcc_program_mapper(compiler))
 
     def _include_dirs_of(self, compiler: Compiler,
                          args: T.Iterable[str]) -> T.List[str]:
@@ -3264,10 +3406,13 @@ class NinjaBackend(backends.Backend):
         Reported once per unit: every target importing it fails the same way.
         """
         compiler = target.compilers['cpp']
+        # A mapper program is asked over a protocol that quotes whitespace, so
+        # only a header resolving nowhere is a problem there.
+        quotes = self._gcc_program_mapper(compiler)
         for hu in target.cpp_header_units:
             mode, spelling = self._header_unit_spelling(hu, compiler)
             key = self._header_unit_gcc_name(compiler, args, mode, spelling)
-            if key is not None and not self._has_space(key):
+            if key is not None and (quotes or not self._has_space(key)):
                 continue
             if key is None and mode == 'user':
                 raise MesonException(
@@ -5160,8 +5305,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # language spelled out for module extensions, as on compile
             # edges.
             lang = ['-x', 'c++'] if mesonlib.version_compare(compiler.version, '<15') else []
-            args = ['$ARGS'] + depargs + NinjaCommandArg.list(
-                ['-fmodule-mapper=$MAPPER', '-fmodule-only'] + lang + ['-c', '$in'], Quoting.none)
+            if self._gcc_program_mapper(compiler):
+                # A mapper program's whole flag rides the edge, quoted there.
+                args = ['$ARGS'] + depargs + ['$MAPPERFLAG'] + NinjaCommandArg.list(
+                    ['-fmodule-only'] + lang + ['-c', '$in'], Quoting.none)
+            else:
+                args = ['$ARGS'] + depargs + NinjaCommandArg.list(
+                    ['-fmodule-mapper=$MAPPER', '-fmodule-only'] + lang + ['-c', '$in'], Quoting.none)
         else:
             args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
         self.add_rule(NinjaRule(rulename, command, args,
@@ -5415,6 +5565,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         self._target_header_unit_bmis[tid] = bmis
+        if self._gcc_program_mapper(compiler):
+            # Every module edge of the target asks the mapper server, which
+            # reads this whether or not the target declares any units.
+            tag = self._gcc_target_bmi_class_tag(target, compiler)
+            self._write_gcc_units_manifest(self._gcc_units_manifest(target, tag), tag, target, bmis)
         return outputs
 
     def _provision_class_header_units(self, compiler: Compiler, target: build.BuildTarget,
@@ -5569,6 +5724,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # projects declaring header units grow the rule.
             self.generate_cpp_header_unit_rule(compiler)
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
+        if self._gcc_program_mapper(compiler):
+            assert owner is not None, 'GCC header units are always provisioned for a target'
+            unit_outputs, unit_bmis = self._provision_gcc_program_header_unit_edges(
+                compiler, header_units, args, class_subdir, owner, rulename)
+            return unit_outputs, [], unit_bmis
         is_msvc = family == 'msvc'
         is_gcc = family == 'gcc'
         suffix = compiler.get_module_bmi_suffix()
@@ -5776,6 +5936,53 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 consumer_args += cargs
         return outputs, consumer_args, bmis
 
+    def _provision_gcc_program_header_unit_edges(self, compiler: Compiler,
+                                                 header_units: T.List[str],
+                                                 args: T.Union['CompilerArgs', T.List[str]],
+                                                 class_subdir: T.Optional[str],
+                                                 owner: build.BuildTarget,
+                                                 rulename: str
+                                                 ) -> T.Tuple[T.List[str], T.List[T.Tuple[str, str]]]:
+        """_provision_header_unit_edges for GCC asking a mapper server.
+
+        The server matches a unit by the real path of whatever name GCC asks
+        for, so every spelling of one header -- through any -I entry, from a
+        subdirectory, under a spaced path -- reaches one BMI per BMI class,
+        stored at a path Meson picks. Nothing here predicts what GCC will call
+        the unit, and no edge is ever respelled or linked. The unit edge asks
+        the server too, through the declaring target's manifest (written by the
+        caller with the pairs returned here), so a unit built for one declarer
+        and reused by another is still found by its real path.
+
+        Returns (unit outputs, (real path, BMI) pairs).
+        """
+        tag = self._gcc_bmi_class_tag(class_subdir)
+        manifest = self._gcc_units_manifest(owner, tag)
+        suffix = compiler.get_module_bmi_suffix()
+        build_dir = self.environment.get_build_dir()
+        outputs: T.List[str] = []
+        bmis: T.List[T.Tuple[str, str]] = []
+        for hu in header_units:
+            mode, spelling = self._parse_header_unit(hu)
+            # Where the header resolves, which a probe answers for a system
+            # unit; check_header_unit_names has reported one resolving nowhere.
+            name = self._header_unit_gcc_name(compiler, args, mode, spelling)
+            if name is None:
+                continue
+            real = os.path.realpath(os.path.join(build_dir, name))
+            key = f'{mode}:{real}:{tag}'
+            output = self._header_units.get(key)
+            if output is None:
+                output = self._class_header_unit_path(key, spelling, suffix)
+                self._add_header_unit_edge(
+                    output, rulename, args, spelling, mode, None, owner, False, True,
+                    mapper_args=self._gcc_program_mapper_args(compiler, tag, manifest))
+                self._header_units[key] = output
+            if output not in outputs:
+                outputs.append(output)
+            bmis.append((real, output))
+        return outputs, bmis
+
     def _get_or_create_header_unit_edge(self, key: str, output: str,
                                         mapper_name: T.Optional[str],
                                         rulename: str,
@@ -5807,10 +6014,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                               args: T.Union['CompilerArgs', T.List[str]],
                               spelling: str, mode: str, mapper: T.Optional[str],
                               owner: T.Optional[build.BuildTarget],
-                              is_msvc: bool, is_gcc: bool) -> None:
+                              is_msvc: bool, is_gcc: bool,
+                              mapper_args: T.Optional[T.List[str]] = None) -> None:
         """One HEADER_UNIT edge, in the one shape every naming mode shares. The
         caller has already chosen the output path and, where the compiler
-        resolves a unit through one, written the mapper this only wires in.
+        resolves a unit through one, written the mapper this only wires in --
+        or, for a GCC asking a mapper program, passes its flags as
+        `mapper_args`.
         """
         elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
         elem.add_item('ARGS', args)
@@ -5826,7 +6036,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         else:
             elem.add_item('HULANG', f'c++-{mode}-header')
             elem.add_item('DEPFILE', output + '.d')
-        if is_gcc:
+        if is_gcc and mapper_args is not None:
+            elem.add_item('HUMAPPER', mapper_args)
+        elif is_gcc:
             # A setup-written file is a fine ninja input: what ninja rejects is
             # an input that no rule makes and no file provides.
             elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
@@ -6647,10 +6859,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
             if hu_consumer:
                 compile_commands = commands + hu_consumer
-            mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
-            if mapper_args:
-                compile_commands = compile_commands + mapper_args
-                element.add_dep(rel_obj + '.mapper')
+            if self._gcc_program_mapper(compiler):
+                # The collate writes the TU's table; the server answers the
+                # compile from it.
+                tag = self._gcc_target_bmi_class_tag(target, compiler)
+                compile_commands = compile_commands + self._gcc_program_mapper_args(
+                    compiler, tag, self._gcc_units_manifest(target, tag), rel_obj + '.mapper.json')
+                element.add_dep(rel_obj + '.mapper.json')
+            else:
+                mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
+                if mapper_args:
+                    compile_commands = compile_commands + mapper_args
+                    element.add_dep(rel_obj + '.mapper')
         element.add_item('ARGS', compile_commands)
 
         # NinjaRule.should_use_rspfile counts element.elems too, which will

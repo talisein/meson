@@ -477,6 +477,8 @@ Thread model: posix'''), '21.9.0')
         # drop from the other, and pin that the head is head-independent.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
+        # Mapper files: this pins the static collate flags.
+        be._gcc_mapper_mode = 'file'
         be.build_to_src = '..'
         cpp = mock.MagicMock()
         cpp.get_module_bmi_suffix.return_value = '.gcm'
@@ -1116,6 +1118,8 @@ Thread model: posix'''), '21.9.0')
         # entry / mapper key); the unit keeps GCC's default naming there.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
+        # Mapper files: these pin the static mapper's naming.
+        be._gcc_mapper_mode = 'file'
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = 'gcc'
 
@@ -1166,6 +1170,8 @@ Thread model: posix'''), '21.9.0')
         # a future one-sided change to that seam fails loudly here.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
+        # Mapper files: these pin the static mapper's naming.
+        be._gcc_mapper_mode = 'file'
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = 'gcc'
 
@@ -1665,6 +1671,8 @@ Thread model: posix'''), '21.9.0')
 
         def outputs_for(cid, suffix, builddir):
             be = NinjaBackend.__new__(NinjaBackend)
+            # Mapper files: these pin the static mapper's naming.
+            be._gcc_mapper_mode = 'file'
             be.build_to_src = '..'
             be.all_outputs = set()
             be._bmi_classes = {}
@@ -1744,6 +1752,8 @@ Thread model: posix'''), '21.9.0')
 
         def outputs_for(cid, suffix, builddir):
             be = NinjaBackend.__new__(NinjaBackend)
+            # Mapper files: these pin the static mapper's naming.
+            be._gcc_mapper_mode = 'file'
             be.build_to_src = '..'
             be.all_outputs = set()
             be._bmi_classes = {}
@@ -2693,6 +2703,71 @@ Thread model: posix'''), '21.9.0')
                     self.assertIn('./util.h gcm.cache/,/util.h.gcm', f.read())
             finally:
                 os.chdir(olddir)
+
+    def test_depaccumulate_p1689_program_mapper_table(self):
+        # --mapper-format json writes a mapper program's per-TU table: the
+        # same provides and direct imports as a mapper file, with header units
+        # by real path from the manifest -- whatever spelling the scan
+        # reported. A unit missing from the manifest is an error.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                os.makedirs('src dir/sub')
+                with open('src dir/util.h', 'w', encoding='utf-8'):
+                    pass
+                real = os.path.realpath('src dir/util.h')
+                with open('units.json', 'w', encoding='utf-8') as f:
+                    json.dump({'bmi_class': 'default', 'target': "'t'",
+                               'header_units': {real: 'hu/util.h.0.gcm'}}, f)
+                with open('a.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{
+                        'primary-output': 'a.o',
+                        'provides': [{'logical-name': 'A'}],
+                        'requires': [{'logical-name': 'B'},
+                                     {'logical-name': './src dir/sub/../util.h'}]}]}, f)
+                with open('dep-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({'B': 'gcm.cache/B.gcm'}, f)
+                args = ['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                        '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
+                        '--dep-provmap', 'dep-pm.json',
+                        '--mapper-suffix', '.mapper.json', '--mapper-format', 'json',
+                        '--header-unit-manifest', 'units.json', 'a.ddi']
+                self.assertEqual(run_p1689(args), 0)
+                with open('a.o.mapper.json', encoding='utf-8') as f:
+                    self.assertEqual(json.load(f), {
+                        'modules': {'A': 'gcm.cache/A.gcm', 'B': 'gcm.cache/B.gcm'},
+                        'header_units': {real: 'hu/util.h.0.gcm'}})
+                with open('units.json', 'w', encoding='utf-8') as f:
+                    json.dump({'header_units': {}}, f)
+                with self.assertRaisesRegex(MesonException, 'not declared'):
+                    run_p1689(args)
+            finally:
+                os.chdir(olddir)
+
+    def test_gcc_program_mapper_args(self):
+        # GCC 16 splits a '|program' mapper's command line like a shell
+        # (libiberty's buildargv), so any word can be escaped; older GCC
+        # splits at spaces with no quoting, so a word it cannot pass is an
+        # error naming it. The option always ends in '?', since GCC cuts it
+        # at its last one.
+        cmd = ['/usr/bin/python3', '/opt/my meson/meson.py', '--internal', 'gccmapper']
+        new = GnuCPPCompiler.__new__(GnuCPPCompiler)
+        new.version = '16.1.0'
+        self.assertEqual(new.program_mapper_unquotable(cmd), [])
+        (flag,) = new.get_module_program_mapper_args(cmd, 'default', 'm/u.json', 'x/a?b.o.mapper.json')
+        self.assertEqual(flag, '-fmodule-mapper=|/usr/bin/python3 /opt/my\\ meson/meson.py '
+                               '--internal gccmapper --bmi-class default --units m/u.json '
+                               '--table x/a\\?b.o.mapper.json?')
+        old = GnuCPPCompiler.__new__(GnuCPPCompiler)
+        old.version = '15.3.0'
+        self.assertEqual(old.program_mapper_unquotable(cmd), ['/opt/my meson/meson.py'])
+        with self.assertRaisesRegex(MesonException, 'my meson'):
+            old.get_module_program_mapper_args(cmd, 'default', 'm/u.json')
+        (flag,) = old.get_module_program_mapper_args(cmd[:1] + ['/opt/m.py'], 'c1', 'm/u?.json')
+        self.assertEqual(flag, '-fmodule-mapper=|/usr/bin/python3 /opt/m.py '
+                               '--bmi-class c1 --units m/u?.json?')
 
     def test_gccmapper_lex(self):
         # The request tokenizer: words split on spaces and tabs, quoted
