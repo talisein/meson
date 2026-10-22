@@ -2037,14 +2037,6 @@ class NinjaBackend(backends.Backend):
         # overrides the provider on any conflict.
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
         args = irrelevant + info.relevant_args
-        if family == 'gcc':
-            # GCC names a header unit from the -I spelling it is reached through,
-            # so the variant and the target's own path must feed it the same
-            # spelling to compute one key and emit one edge. The provider's
-            # include dirs arrive here un-rewritten (a fresh _generate_single_compile);
-            # forward-slash them to match the target's (a no-op off Windows).
-            # Include dirs are BMI-irrelevant, so the class key is unchanged.
-            args = self._gcc_module_forward_slash_includes(cpp, args)
         # An interface's `import <hdr>;` must resolve this class's unit BMI,
         # reusing a class-mate target's edges when they exist. Built from the
         # same pre-module args as a target's own units. `args` keeps growing
@@ -2201,55 +2193,6 @@ class NinjaBackend(backends.Backend):
                     break
             else:
                 yield 'pass', arg, None, None, False
-
-    @staticmethod
-    def _map_include_args(inventory: T.Sequence[T.Tuple[str, T.Optional[int]]],
-                          args: T.Iterable[str],
-                          transform: T.Callable[[str], str]) -> T.List[str]:
-        """A compile command with every include directory rewritten through
-        `transform`, each flag's joined-or-separated spelling preserved and
-        every non-include token passed through untouched.
-        """
-        out: T.List[str] = []
-        for kind, flag, d, _rank, joined in NinjaBackend._iter_include_args(inventory, args):
-            if kind == 'pass':
-                out.append(flag)
-            elif joined:
-                assert d is not None, 'a joined include flag always carries a directory'
-                out.append(flag + transform(d))
-            else:
-                out.append(flag)
-                if d is not None:
-                    out.append(transform(d))
-        return out
-
-    def _gcc_module_forward_slash_includes(self, compiler: Compiler,
-                                            args: T.Union['CompilerArgs', T.List[str]]
-                                            ) -> T.Union['CompilerArgs', T.List[str]]:
-        """`args` with every include-search directory forward-slashed, other
-        tokens untouched -- for a GCC module edge (scan, compile, or header-unit
-        build).
-
-        GCC derives a header unit's logical-name from the -I entry's spelling
-        verbatim: reached through '-I..\\dir' a header is named
-        './..\\dir/hdr.h', through '-I../dir' it is named './../dir/hdr.h'.
-        Every backend-side key for the unit -- the mapper key an importer looks
-        it up by, the default CMI path its BMI is written to -- is
-        forward-normalized. Hand GCC a backslashed include dir and the two sides
-        name one unit two ways, so its BMI is built where neither the scan nor a
-        compile looks (and, reached by a bare filename off '-I..\\dir', GCC even
-        collapses the '..' the scan keeps). Forward-slashing the include dirs
-        keeps every derivation on one name.
-
-        Returns `args` unchanged when no include dir holds a backslash (any
-        non-Windows host, so those build files stay byte-identical).
-        """
-        inv = compiler.get_include_dir_flags()
-        if not any(d and '\\' in d
-                   for _kind, _flag, d, _rank, _joined
-                   in self._iter_include_args(inv, args)):
-            return args
-        return self._map_include_args(inv, args, lambda d: d.replace('\\', '/'))
 
     def _gcc_mapper_command(self, compiler: Compiler) -> T.List[str]:
         # Memoised: a GCC that cannot quote looks Meson up on PATH.
@@ -4568,13 +4511,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
-            if family == 'gcc':
-                # The unit's own build reaches the header off these -I dirs and
-                # GCC names it from their spelling, which the mapper key and
-                # default CMI path must match: forward-slash them (a no-op off
-                # Windows). Include dirs are BMI-irrelevant, so the class key is
-                # unchanged.
-                args = self._gcc_module_forward_slash_includes(compiler, args)
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
             if family == 'gcc':
@@ -4622,15 +4558,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             _, irrelevant = compiler.split_bmi_args(
                 self._generate_single_compile(provider, compiler))
             composed = irrelevant + relevant
-            if compiler.cpp_module_family() == 'gcc':
-                # The inherited unit computes one key with the provider's own
-                # variant, so both must feed GCC the same -I spelling. The
-                # provider's include dirs arrive un-rewritten (a fresh
-                # _generate_single_compile), and `relevant` carries none (they
-                # are BMI-irrelevant); forward-slash the composition to match
-                # (a no-op off Windows). Include dirs being BMI-irrelevant, the
-                # class key is unchanged.
-                composed = self._gcc_module_forward_slash_includes(compiler, composed)
             prov_outputs, prov_args, _ = self._provision_header_unit_edges(
                 compiler, units, composed, class_subdir, provider, seen)
             outputs += [o for o in prov_outputs if o not in outputs]
@@ -5539,12 +5466,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         header_deps += istd_dep
         if extra_args is not None:
             commands.extend(extra_args)
-
-        if is_module_edge and compiler.cpp_module_family() == 'gcc':
-            # The scan and compile below share `commands`; a GCC module edge
-            # must see forward-slashed include dirs so the header-unit names it
-            # derives from them match the backend's forward-normalized keys.
-            commands = self._gcc_module_forward_slash_includes(compiler, commands)
 
         element = NinjaBuildElement(self.all_outputs, rel_obj, compiler_name, rel_src)
         self.add_header_deps(target, element, header_deps)

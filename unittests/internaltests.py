@@ -1142,63 +1142,6 @@ Thread model: posix'''), '21.9.0')
             self.assertTrue(a.endswith(suffix))
             self.assertTrue(b.endswith(suffix))
 
-    def test_inherited_header_unit_forward_slashes_provider_includes(self):
-        # A target's own header-unit path forward-slashes its -I dirs. The
-        # BMI-only variant and the inherited-units loop compose a *provider's*
-        # un-rewritten BMI-irrelevant args instead, so on Windows their include
-        # dirs keep backslashes. Routing the composed args through the same
-        # forward-slasher makes both sides resolve the unit through one
-        # spelling. Include dirs being BMI-irrelevant, the class key is
-        # untouched; the rewrite is a strict no-op off Windows.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        with tempfile.TemporaryDirectory() as builddir:
-            os.makedirs(os.path.join(builddir, 'inc', 'sub'))
-            with open(os.path.join(builddir, 'inc', 'sub', 'hdr.h'), 'w', encoding='utf-8') as f:
-                f.write('#pragma once\n')
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._probed_header_units = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = builddir
-            cpp = mock.MagicMock()
-            cpp.get_id.return_value = 'gcc'
-            cpp.get_include_dir_flags.return_value = (
-                ('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
-                ('-iquote', 1), ('-I', 2))
-
-            def name(args):
-                # No real compiler here: a dir that does not resolve on disk
-                # names nothing rather than probing g++.
-                with mock.patch.object(NinjaBackend, '_probe_header_unit_path',
-                                       return_value=None):
-                    return be._header_unit_file(cpp, args, 'user', 'hdr.h')
-
-            # The target's own path (already forward-slashed at provisioning).
-            target_name = name(['-Iinc/sub'])
-            self.assertEqual(target_name, 'inc/sub/hdr.h')
-
-            # The provider's include dirs arrive un-rewritten -- backslashed on
-            # Windows. Left alone they resolve nowhere and name the unit
-            # differently; forward-slashed (as the fix composes them) they name
-            # the one shared unit exactly as the target does.
-            provider_irrelevant = ['-Iinc\\sub']
-            self.assertNotEqual(name(provider_irrelevant), target_name)
-            fixed = be._gcc_module_forward_slash_includes(cpp, provider_irrelevant)
-            self.assertEqual(name(fixed), target_name)
-
-            # The composition order of a provider's irrelevant args and the
-            # class's BMI-relevant args does not matter: either way the shared
-            # key is one name.
-            for composed in (['-Iinc\\sub', '-DFOO'], ['-DFOO', '-Iinc\\sub']):
-                self.assertEqual(
-                    name(be._gcc_module_forward_slash_includes(cpp, composed)),
-                    target_name)
-
-            # A tree with no backslashed include dir is returned unchanged: the
-            # Linux (and any non-Windows) build files stay byte-identical.
-            self.assertEqual(
-                be._gcc_module_forward_slash_includes(cpp, ['-Iinc/sub', '-DFOO']),
-                ['-Iinc/sub', '-DFOO'])
-
     def test_include_dir_flags_inventory(self):
         # The compiler owns the include-flag inventory the backend consumes.
         # GCC/Clang rank the quote-include search order (iquote < I < isystem,
@@ -1217,10 +1160,9 @@ Thread model: posix'''), '21.9.0')
                                       '-iquote': 0, '-I': 0})
 
     def test_include_arg_parsers_consume_inventory(self):
-        # The include-arg parsers consume the compiler inventory: extraction
-        # and rewriting recognize -I, -isystem, -iquote, -idirafter and
-        # -cxx-isystem in both their joined and separated spellings, leaving
-        # every other token alone. Resolution walks GCC's actual search order
+        # The include-arg parser consumes the compiler inventory: it recognizes
+        # -I, -isystem, -iquote, -idirafter and -cxx-isystem in both their
+        # joined and separated spellings, leaving every other token alone. Resolution walks GCC's actual search order
         # and skips -idirafter, whose directories are searched past the
         # standard ones a command-line walk cannot see.
         from mesonbuild.backend.ninjabackend import NinjaBackend
@@ -1237,16 +1179,9 @@ Thread model: posix'''), '21.9.0')
         base = ['-IjoinedA', '-I', 'sepA', '-isystem', 'sysSep',
                 '-isystemJoinedS', '-DFOO', '-Wall']
         self.assertEqual(dirs(base), ['joinedA', 'sepA', 'sysSep', 'JoinedS'])
-        self.assertEqual(
-            NinjaBackend._map_include_args(inventory, base, lambda d: 'R:' + d),
-            ['-IR:joinedA', '-I', 'R:sepA', '-isystem', 'R:sysSep',
-             '-isystemR:JoinedS', '-DFOO', '-Wall'])
 
         new = ['-iquoteQ', '-idirafter', 'DA', '-cxx-isystem', 'CX']
         self.assertEqual(dirs(new), ['Q', 'DA', 'CX'])
-        self.assertEqual(
-            NinjaBackend._map_include_args(inventory, new, lambda d: 'R:' + d),
-            ['-iquoteR:Q', '-idirafter', 'R:DA', '-cxx-isystem', 'R:CX'])
 
         with tempfile.TemporaryDirectory() as d:
             for sub in ('inc', 'q', 'da'):
