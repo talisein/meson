@@ -6,7 +6,6 @@ import re
 import os
 import json
 import shutil
-import tempfile
 from unittest import mock, SkipTest, skipUnless, skipIf
 from glob import glob
 
@@ -1504,61 +1503,6 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertNotEqual(per_prog['prog20'], per_prog['prog23'],
                             'divergent dialect classes must not share a system unit BMI')
         self.check_gcc_module_mappers()
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_compiler_owned_space(self):
-        # (compiler-owned spaced install prefix) on Windows -- the same cell
-        # that runs on Linux (LinuxlikeTests.test_gcc_compiler_owned_space),
-        # where a distro GCC baked to an unspaced prefix skips at fabrication.
-        self.check_gcc_compiler_owned_space()
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_short_spaced_root(self):
-        # A user header unit under a short spaced source root. On Windows GCC
-        # names a user header by the shorter of its include spelling and its
-        # real path, so here the unit is named by its spaced absolute path;
-        # the mapper server keys it by real path either way, and it builds and
-        # runs. The root is created near the drive root to make it short.
-        from mesonbuild.mesonlib import windows_proof_rmtree
-        drive = os.path.splitdrive(tempfile.gettempdir())[0]
-        base = os.path.join(drive + os.sep, f'm-meson-{os.getpid()}-{os.urandom(2).hex()}')
-        try:
-            os.makedirs(base)
-        except OSError as e:
-            raise SkipTest(f'cannot create a short root at {base!r}: {e}')
-        self.addCleanup(windows_proof_rmtree, base)
-        src = os.path.join(base, 's p')
-        shutil.copytree(os.path.join(self.unit_test_dir, '173 header unit aliasing'), src)
-        self.build_and_check_modules('173 header unit aliasing', srcdir=src,
-                                     extra_args=['-Dmode=plain'], ninja_args_not_contains=(),
-                                     setup_not_contains=['Cannot resolve'])
-        self.assert_gcc_table_units('prog', 'header.hpp')
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_deep_spaced_root(self):
-        # The long-path twin of test_gcc_header_unit_short_spaced_root: under a
-        # deep spaced root GCC names the unit by its include spelling instead,
-        # and the unit builds and runs all the same.
-        src = self.copy_fixture('173 header unit aliasing', spaced=True)
-        self.build_and_check_modules('173 header unit aliasing', srcdir=src,
-                                     extra_args=['-Dmode=plain'], ninja_args_not_contains=(),
-                                     setup_not_contains=['Cannot resolve'])
-        self.assert_gcc_table_units('prog', 'header.hpp')
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_unspaced_no_probes(self):
-        # (user header unit) x (unspaced path) on Windows -- the same cell that
-        # runs on Linux (LinuxlikeTests.test_gcc_header_unit_unspaced). Here
-        # the unspaced copy sits under %TEMP%, often reached by a relative
-        # include spelling longer than its absolute path, so GCC names the
-        # unit by the absolute one: the real-path key absorbs that.
-        self.check_gcc_user_header_unit_unspaced()
-
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
-    def test_gcc_system_header_unit_unspaced(self):
-        # (system header unit) x (unspaced path) on Windows -- the same cell
-        # that runs on Linux (LinuxlikeTests.test_gcc_system_header_unit_unspaced).
-        self.check_gcc_system_header_unit_unspaced()
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

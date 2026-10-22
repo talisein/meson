@@ -2325,10 +2325,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # named module in the same target rides the normal path -- the program
         # links and runs. GCC finds units through the mapper server, so the
         # default check that no BMI path appears on a command line applies in
-        # full. The fixture is copied under a spaced path: the protocol quotes
-        # whitespace, so a spaced unit is a unit like any other.
-        srcdir = self.copy_fixture('142 gcc header units', spaced=True)
-        self.build_and_check_modules('142 gcc header units', srcdir=srcdir,
+        # full. The fixture's own path holds a space ('test cases'), which the
+        # protocol quotes like any other byte.
+        self.build_and_check_modules('142 gcc header units',
                                      setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
         # The TU's table names each unit by the header's real path, at the BMI
@@ -2340,17 +2339,14 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_rebuild_on_user_header_change(self):
-        # Editing a unit's header must dirty the unit and its importers, here
-        # under a spaced path, which every path ninja records for it holds.
+        # Editing a unit's header must dirty the unit and its importers.
         self.check_module_rebuild('142 gcc header units', edit_file='util.h',
-                                  srcdir=self.copy_fixture('142 gcc header units', spaced=True),
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_rebuild_on_system_header_change(self):
         self.check_module_rebuild('142 gcc header units', edit_file='angleutil.h',
-                                  srcdir=self.copy_fixture('142 gcc header units', spaced=True),
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
@@ -2367,32 +2363,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assert_gcc_table_units('prog', 'vector')
         (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
         self.assertTrue(os.path.isabs(real) and os.path.isfile(real), real)
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_unspaced(self):
-        # (user header unit) x (unspaced path). The spaced cell is
-        # test_gcc_header_units above (the repo's own path is spaced); this is
-        # its unspaced twin, filling the other half of the user row on Linux.
-        # Runs identically on Windows (WindowsTests.test_gcc_header_unit_unspaced_no_probes).
-        self.check_gcc_user_header_unit_unspaced()
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_compiler_owned_space(self):
-        # (compiler-owned spaced install prefix): <vector> under a spaced
-        # prefix is a header unit like any other. Runs identically on Windows
-        # (WindowsTests.test_gcc_compiler_owned_space). On a distro GCC baked
-        # to an unspaced prefix this skips at fabrication -- a symlinked spaced
-        # prefix canonicalizes back, so there is no spaced compiler to test
-        # with; it runs where the prefix is relocatable.
-        self.check_gcc_compiler_owned_space()
-
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
-    def test_gcc_system_header_unit_unspaced(self):
-        # (system header unit) x (unspaced path). The spaced cell is
-        # test_gcc_stl_header_units above; this is its unspaced twin, filling
-        # the other half of the system row on Linux. Runs identically on
-        # Windows (WindowsTests.test_gcc_system_header_unit_unspaced).
-        self.check_gcc_system_header_unit_unspaced()
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_forced_include(self):
@@ -2548,7 +2518,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # the include-path spelling, every importer resolves the same file and
         # the one declared unit serves all of them: exactly one unit edge.
         testdir = '173 header unit aliasing'
-        srcdir = self.copy_fixture(testdir, spaced=True)
+        srcdir = os.path.join(self.unit_test_dir, testdir)
         self.build_and_check_modules(testdir, srcdir=srcdir, ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
 

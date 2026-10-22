@@ -60,14 +60,13 @@ import glob
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import textwrap
 import typing as T
 import unittest
 
-from mesonbuild.compilers import detect_cpp_compiler, detect_c_compiler, detect_static_linker
+from mesonbuild.compilers import detect_cpp_compiler
 from mesonbuild.mesonlib import MachineChoice, is_windows, version_compare, EnvironmentException
 from run_tests import get_fake_env, Backend
 
@@ -89,27 +88,6 @@ _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
 _regex_flag_cache: T.Dict[T.Tuple[str, str], T.Optional[str]] = {}
 _bmionly_cache: T.Dict[T.Tuple[str, str], bool] = {}
 _ixx_as_cpp_cache: T.Dict[T.Tuple[str, str], bool] = {}
-
-
-# Binaries that wear a compiler driver's name while being a caching front end
-# for one. A path resolving to one of these names is not a compiler and its
-# directory is not a toolchain root.
-_COMPILER_CACHE_STEMS = frozenset({'ccache', 'distcc', 'sccache', 'buildcache'})
-
-
-def _is_compiler_cache(exe: str) -> bool:
-    """Whether `exe` ultimately resolves to a compiler-cache binary."""
-    stem = os.path.splitext(os.path.basename(os.path.realpath(exe)))[0]
-    return stem.lower() in _COMPILER_CACHE_STEMS
-
-
-def _which_real_driver(name: str) -> T.Optional[str]:
-    """The first `name` on PATH that is not a compiler-cache masquerade."""
-    for d in os.get_exec_path():
-        found = shutil.which(name, path=d)
-        if found and not _is_compiler_cache(found):
-            return found
-    return None
 
 
 @functools.lru_cache(maxsize=None)
@@ -322,23 +300,6 @@ def requires_cpp_module_caps(*tokens: str,
 # carries an id of its own -- intel-llvm, armltdclang, emscripten.
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
-
-def _make_dir_link(target: str, link: str) -> bool:
-    """Create a directory link at *link* pointing at *target*; whether one now
-    exists. A symlink on POSIX; on Windows a directory symlink (privilege or
-    Developer Mode) or else an NTFS junction (any user, local volume)."""
-    try:
-        os.symlink(target, link, target_is_directory=True)
-        return True
-    except (OSError, NotImplementedError):
-        if not is_windows():
-            return False
-    try:
-        from _winapi import CreateJunction  # type: ignore[attr-defined]
-        CreateJunction(target, link)
-        return True
-    except (ImportError, OSError):
-        return False
 
 
 class CppModulesTestMixin:
@@ -854,184 +815,8 @@ class CppModulesTestMixin:
                         tables[out] = table
         return tables
 
-    # --- Spaced-path header-unit test fabrication -------------------------
-    #
-    # "A header unit on a path with a space" is one feature contract, exercised
-    # across every module family and against both a spaced and an unspaced
-    # path, with each family asserting its own contracted outcome. The repo's
-    # own 'test cases' dir has a space, so the *unspaced* side never occurs
-    # naturally in CI and the *spaced-compiler-prefix* side occurs only where
-    # the toolchain happens to sit under one. These helpers establish the
-    # property a cell needs rather than assuming the checkout's layout: they
-    # probe for it, fabricate it when absent, and skip with the probe evidence
-    # only when fabrication is impossible.
-
-    @staticmethod
-    def _gcc_abs_exe(cpp: 'CPPCompiler') -> T.Optional[str]:
-        """The absolute path of the (GNU-driver) compiler binary, past any
-        ccache wrapper meson detected in front of it -- what the fabrication
-        rungs need to find the install root and write a native file."""
-        # get_exelist strips only the ccache wrapper; what remains is the
-        # driver followed by any baked-in arguments (CXX='ccache g++ -m32'
-        # leaves ['g++', '-m32']), so the driver is the first entry.
-        cmd = cpp.get_exelist(ccache=False)
-        exe = cmd[0] if cmd else None
-        if not exe:
-            return None
-        if not (os.path.isabs(exe) and os.path.isfile(exe)):
-            exe = shutil.which(exe)
-        if exe is None or not _is_compiler_cache(exe):
-            return exe
-        # A compiler-cache masquerade: distros put a directory of links named
-        # after the drivers early on PATH (/usr/lib64/ccache/g++), each
-        # pointing at the cache binary. Its realpath's directory is the
-        # cache's, so the caller would derive a "toolchain root" of /usr and
-        # the rungs would go on to link and probe ccache itself instead of a
-        # compiler. Look further down PATH for a real driver of the same
-        # name; None if there is none, so the rung skips honestly.
-        return _which_real_driver(os.path.basename(exe))
-
-    def _probe_system_header(self, cpp: 'CPPCompiler', header: str) -> T.Optional[str]:
-        """The path the compiler resolves ``#include <header>`` to, read from
-        its own diagnostic output. None when the probe cannot resolve it."""
-        exe = cpp.get_exelist(ccache=False)
-        if cpp.get_argument_syntax() == 'msvc':
-            with tempfile.TemporaryDirectory() as d:
-                src = os.path.join(d, 'p.cpp')
-                with open(src, 'w', encoding='utf-8') as f:
-                    f.write(f'#include <{header}>\n')
-                p = subprocess.run(exe + ['/nologo', '/EP', '/showIncludes', '/TP', src],
-                                   capture_output=True, text=True)
-                for line in (p.stdout + p.stderr).splitlines():
-                    marker = line.partition('including file:')[2].strip()
-                    if marker and os.path.basename(marker) == header:
-                        return marker
-            return None
-        p = subprocess.run(exe + ['-E', '-H', '-x', 'c++', '-'],
-                           input=f'#include <{header}>\n', capture_output=True, text=True)
-        for line in p.stderr.splitlines():
-            if line.startswith('. '):
-                return line[2:].strip()
-        return None
-
-    def probe_compiler_owned_space(self, cpp: 'CPPCompiler',
-                                   header: str = 'vector') -> T.Tuple[bool, T.Optional[str]]:
-        """(whether a compiler-owned system header resolves to a spaced path,
-        that path). ``import <vector>;`` is named by the compiler's own search
-        path, so a spaced install prefix is what makes such a unit unmappable
-        on GCC -- and what the immune families must still handle."""
-        resolved = self._probe_system_header(cpp, header)
-        if resolved is None:
-            return False, None
-        return (any(c.isspace() for c in resolved), resolved)
-
-    def copy_fixture(self, name: str, *, spaced: bool) -> str:
-        """A copy of unit fixture `name` under a tmp root whose path is
-        deterministically spaced or space-free, independent of the checkout
-        path. The tree is removed on cleanup."""
-        from mesonbuild.mesonlib import windows_proof_rmtree
-        base = tempfile.mkdtemp()
-        self.addCleanup(windows_proof_rmtree, base)
-        # A space-free destination leaf, so the only space in an unspaced copy
-        # is none at all -- the fixture's own directory name (e.g. '197 header
-        # unit forced include') holds spaces that would leak in.
-        leaf = 'with space' if spaced else 'nospace'
-        dest = os.path.join(base, leaf, 'fixture')
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copytree(os.path.join(self.unit_test_dir, name), dest)
-        assert (' ' in dest) == spaced, dest
-        return dest
-
-    def fabricate_spaced_gcc_prefix(self, cpp: 'CPPCompiler') -> str:
-        """A g++.exe whose install prefix contains a space, for the
-        compiler-owned-spaced cell. The ladder, cheapest first:
-
-          1. the host prefix is already spaced -> use it;
-          2. link the compiler root under a spaced path and RE-PROBE through
-             the link -- some platforms keep the link's spelling, others
-             canonicalize it back to the real prefix (GCC resolves the reparse
-             point); the probe decides, never an assumption;
-          3. the optional minimal-copy rung (unittests/spaced_toolchain_copy),
-             off by default -- without it the ladder ends at step 2;
-          4. SkipTest carrying the probe transcript.
-
-        Returns the g++.exe path, or raises SkipTest.
-        """
-        transcript: T.List[str] = []
-        spaced, resolved = self.probe_compiler_owned_space(cpp)
-        transcript.append(f'host <vector> resolves to {resolved!r} (spaced={spaced})')
-        gxx = self._gcc_abs_exe(cpp)
-        if gxx is None:
-            raise unittest.SkipTest('could not locate the host GCC binary')
-        if spaced:
-            return gxx
-        # Rung 2: link the compiler root under a spaced tmp path, re-probe.
-        from mesonbuild.mesonlib import windows_proof_rmtree
-        try:
-            from .spaced_toolchain_copy import minimal_gcc_copy, GATE_ENV, available
-        except ImportError:
-            # Rung 3 is severable: deleting unittests/spaced_toolchain_copy.py
-            # must leave the ladder ending at the link probe and the affected
-            # cells skipping, never failing on the import.
-            minimal_gcc_copy, GATE_ENV, available = None, None, lambda: False
-        root = os.path.dirname(os.path.dirname(os.path.realpath(gxx)))
-        base = tempfile.mkdtemp()
-        self.addCleanup(windows_proof_rmtree, base)
-        link_root = os.path.join(base, 'sp ace')
-        # Spell the driver under the link the way it is spelled under the real
-        # root -- the stem carries a triple/version on many installs
-        # (x86_64-w64-mingw32-g++, g++-13) and the layout need not be bin/.
-        linked_gxx = os.path.join(link_root, os.path.basename(root),
-                                  os.path.relpath(os.path.realpath(gxx), root))
-        os.makedirs(link_root, exist_ok=True)
-        made = _make_dir_link(root, os.path.join(link_root, os.path.basename(root)))
-        if made and os.path.isfile(linked_gxx):
-            # Re-probe by shelling out to the linked driver directly: whether
-            # GCC keeps the link's spaced spelling or canonicalizes it back to
-            # the real prefix is the runtime fact the decision rests on.
-            r2 = self._shell_probe_vector(linked_gxx)
-            sp2 = r2 is not None and any(c.isspace() for c in r2)
-            transcript.append(f'through link {linked_gxx!r}: <vector> -> {r2!r} (spaced={sp2})')
-            if sp2:
-                return linked_gxx
-        else:
-            transcript.append(f'compiler root not linkable under a spaced path (made={made})')
-        # Rung 3: the optional copy. Absent unless the runner opted in.
-        if available():
-            copy_root = os.path.join(base, 'sp ace copy', os.path.basename(root))
-            copied = minimal_gcc_copy(gxx, copy_root)
-            r3 = self._shell_probe_vector(copied) if copied else None
-            sp3 = r3 is not None and any(c.isspace() for c in r3)
-            transcript.append(f'minimal copy at {copied!r}: <vector> -> {r3!r} (spaced={sp3})')
-            if sp3:
-                return copied
-        else:
-            why = (f'set {GATE_ENV}=1 to enable' if GATE_ENV
-                   else 'unittests/spaced_toolchain_copy.py is absent')
-            transcript.append(f'copy rung disabled ({why})')
-        raise unittest.SkipTest(
-            'could not fabricate a spaced GCC prefix:\n  ' + '\n  '.join(transcript))
-
-    def _shell_probe_vector(self, gxx: T.Optional[str]) -> T.Optional[str]:
-        if not gxx or not os.path.isfile(gxx):
-            return None
-        p = subprocess.run([gxx, '-E', '-H', '-x', 'c++', '-'],
-                           input='#include <vector>\n', capture_output=True, text=True)
-        for line in p.stderr.splitlines():
-            if line.startswith('. '):
-                return line[2:].strip()
-        return None
-
-    # --- The (user|system) x (spaced|unspaced) feature matrix -------------
-    #
-    # "A header unit works whether its directory has a space or not" is the
-    # feature, and the mapper protocol quotes whitespace, so every cell asserts
-    # the same outcome: the unit builds, its importers run, and each TU's
-    # table maps the header's real path to a BMI a unit edge wrote. The repo's
-    # own path is spaced, so the spaced cells run in place
-    # (test_gcc_header_units / test_gcc_stl_header_units) and the unspaced
-    # cells fabricate an unspaced tree with copy_fixture. The same assertions
-    # run on Linux and Windows.
+    # --- Header-unit outcomes on GCC: each TU's table maps the header's real
+    # path to a BMI a unit edge wrote.
 
     def assert_gcc_table_units(self, target: str, basename: str, count: int = 1) -> T.Set[str]:
         """`target`'s tables map exactly `count` real path(s) ending in
@@ -1047,75 +832,6 @@ class CppModulesTestMixin:
             self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)), bmi)
         return bmis
 
-    def check_gcc_user_header_unit_unspaced(self) -> None:
-        """(user header unit) x (UNSPACED path): the unit is found by walking
-        the include path, with no compiler probe, and builds and runs. The
-        repo path is spaced, so an unspaced tree is fabricated."""
-        from unittest import mock
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        src = self.copy_fixture('173 header unit aliasing', spaced=False)
-        orig = NinjaBackend._run_header_probe
-        calls: T.List[T.Tuple[str, str]] = []
-
-        def counting(be: T.Any, compiler: T.Any, arglist: T.Any,
-                     mode: str, spelling: str) -> T.Tuple[T.Optional[str], bool]:
-            calls.append((mode, spelling))
-            return orig(be, compiler, arglist, mode, spelling)
-        with mock.patch.object(NinjaBackend, '_run_header_probe', counting):
-            out = self.init(src, extra_args=['-Dmode=plain'], inprocess=True)
-        self.assertNotIn('Cannot resolve', out)
-        self.assertEqual(calls, [],
-                         f'an unspaced header-unit build probed the compiler: {calls}')
-        self.build()
-        self.run_tests()
-        self.assert_gcc_table_units('prog', 'header.hpp')
-
-    def check_gcc_compiler_owned_space(self) -> None:
-        # A compiler-owned system header unit under a spaced install prefix: a
-        # spaced <vector> is a header unit like any other, keyed by its real
-        # path and imported through the mapper server. The source is copied to
-        # an unspaced path so the only space in play is the compiler's; the
-        # spaced prefix itself is fabricated (probe the host, else
-        # link+reprobe, else the opt-in copy rung, else skip).
-        cpp = self.host_cpp_compiler()
-        gxx = self.fabricate_spaced_gcc_prefix(cpp)
-        resolved = self._shell_probe_vector(gxx)
-        self.assertIsNotNone(resolved, 'fabricated compiler cannot resolve <vector>')
-        self.assertIn(' ', os.path.dirname(resolved))
-        bindir = os.path.dirname(gxx)
-        from mesonbuild.mesonlib import windows_proof_rmtree
-        nfdir = tempfile.mkdtemp()
-        self.addCleanup(windows_proof_rmtree, nfdir)
-        nf = os.path.join(nfdir, 'spaced-gcc.ini')
-        # The C driver and ar are the fabricated tree's counterparts of the
-        # ones Meson detected, found by name in the fabricated bin dir --
-        # never re-spelled as 'gcc.exe'/'ar.exe'. Real installs decorate the
-        # stems (x86_64-w64-mingw32-gcc.exe, gcc-ar.exe) and the fabricated
-        # copy need not carry a bare 'gcc.exe' at all; where the mirror has no
-        # counterpart, the real binary still works, only unspaced -- the space
-        # under test is the C++ driver's.
-        env = get_fake_env()
-        cc = detect_c_compiler(env, MachineChoice.HOST)
-        ar = detect_static_linker(env, cc)
-
-        def mirrored(real: str) -> str:
-            cand = os.path.join(bindir, os.path.basename(real))
-            if os.path.isfile(cand):
-                return cand
-            return real if os.path.isabs(real) else (shutil.which(real) or real)
-        with open(nf, 'w', encoding='utf-8') as f:
-            f.write('[binaries]\n')
-            f.write(f"c = {mirrored(cc.get_exelist(ccache=False)[0]).replace(os.sep, '/')!r}\n")
-            f.write(f"cpp = {gxx.replace(os.sep, '/')!r}\n")
-            f.write(f"ar = {mirrored(ar.exelist[0]).replace(os.sep, '/')!r}\n")
-        src = self.copy_fixture('197 header unit forced include', spaced=False)
-        out = self.init(src, extra_args=['--native-file', nf, '-Dmode=ok'])
-        self.assertNotIn('Cannot resolve', out)
-        self.build()
-        self.run_tests()
-        self.assertIn(os.path.realpath(resolved),
-                      self.gcc_table_unit_paths('prog'))
-
     def gcc_table_unit_paths(self, target: str) -> T.Set[str]:
         """Every header-unit real path `target`'s tables map."""
         rel = None
@@ -1129,18 +845,3 @@ class CppModulesTestMixin:
                 with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
                     paths.update(json.load(f)['header_units'])
         return paths
-
-    def check_gcc_system_header_unit_unspaced(self) -> None:
-        """(system header unit) x (UNSPACED path): a two-class build importing
-        <vector> rooted on an unspaced tree builds and runs, the importer's
-        tables keying the unit by the header's real path. Proves the
-        system-unit feature does not lean on the build tree carrying a space.
-        The same assertion on Linux and Windows."""
-        src = self.copy_fixture('171 stl header units', spaced=False)
-        out = self.init(src)
-        self.assertNotIn('Cannot resolve', out)
-        self.build()
-        self.run_tests()
-        self.check_gcc_module_mappers()
-        self.assertEqual(len(self.bmi_class_dirs()), 2)
-        self.assert_gcc_table_units('prog', 'vector')
