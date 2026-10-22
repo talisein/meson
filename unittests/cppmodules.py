@@ -67,7 +67,6 @@ import textwrap
 import typing as T
 import unittest
 
-from mesonbuild.backend.ninjabackend import HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN
 from mesonbuild.compilers import detect_cpp_compiler, detect_c_compiler, detect_static_linker
 from mesonbuild.mesonlib import MachineChoice, is_windows, version_compare, EnvironmentException
 from run_tests import get_fake_env, Backend
@@ -324,6 +323,24 @@ def requires_cpp_module_caps(*tokens: str,
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
 
+def _make_dir_link(target: str, link: str) -> bool:
+    """Create a directory link at *link* pointing at *target*; whether one now
+    exists. A symlink on POSIX; on Windows a directory symlink (privilege or
+    Developer Mode) or else an NTFS junction (any user, local volume)."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        if not is_windows():
+            return False
+    try:
+        from _winapi import CreateJunction  # type: ignore[attr-defined]
+        CreateJunction(target, link)
+        return True
+    except (ImportError, OSError):
+        return False
+
+
 class CppModulesTestMixin:
 
     """Shared driver for C++ module tests; mix into a BasePlatformTests
@@ -547,7 +564,7 @@ class CppModulesTestMixin:
         because nothing can link the target at all."""
         # The private dir carries the target's output name (app.p / app.exe.p
         # for an executable, libmylib.a.p / mylib.lib.p for a static library) --
-        # glob rather than hardcode any of them, as assert_alias_mapper_key does.
+        # glob rather than hardcode any of them.
         patterns = [os.path.join(self.builddir, f'{target}.p', 'provided-modules.json'),
                     os.path.join(self.builddir, f'{target}.*.p', 'provided-modules.json'),
                     os.path.join(self.builddir, f'lib{target}.*.p', 'provided-modules.json')]
@@ -634,55 +651,6 @@ class CppModulesTestMixin:
         self.assertTrue(os.path.isfile(os.path.join(self.builddir, 'generated.h')),
                         'building the unit did not run its generator first')
 
-    def assert_alias_mapper_key(self, target: str, obj: str, alias: bool = True) -> str:
-        """The BMI a GCC TU resolves header.hpp to, checking the mapper carries a
-        line keyed by the spelling that TU's compile computes -- textually, '..'
-        and all, since that is what the compiler keys a unit by. The collate
-        joins every name of one BMI into the mapper, so other header.hpp lines
-        (the file's other spellings, pointing at the same BMI) may sit alongside;
-        this asserts the one the TU asks for is present and returns the BMI."""
-        # The private dir carries the target's output suffix (prog.p on POSIX,
-        # prog.exe.p on Windows) and so does the object (.o vs .obj) -- glob
-        # rather than hardcode either. The dot before each wildcard keeps
-        # 'prog' from also matching 'progfoo's directory.
-        patterns = [os.path.join(self.builddir, f'{target}.p', f'{obj}.*.mapper'),
-                    os.path.join(self.builddir, f'{target}.*.p', f'{obj}.*.mapper')]
-        matches = [m for pat in patterns for m in glob.glob(pat)]
-        self.assertEqual(len(matches), 1,
-                         f'{" or ".join(patterns)}: expected one mapper, got {matches}')
-        path = matches[0]
-        keyre = re.compile(r'^\./meson-private/i/[0-9a-z]+/foo/\.\./header\.hpp$'
-                           if alias else r'^\./meson-private/i/[0-9a-z]+/header\.hpp$')
-        with open(path, encoding='utf-8') as f:
-            lines = [ln for ln in f.read().splitlines() if 'header.hpp' in ln]
-        keyed = [ln for ln in lines if keyre.match(ln.partition(' ')[0])]
-        self.assertEqual(len(keyed), 1,
-                         f'{path}: expected one line keyed by the compile spelling, got {lines}')
-        _, _, bmi = keyed[0].partition(' ')
-        self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
-                        f'mapper names {bmi}, which nothing produced')
-        return bmi
-
-    def assert_header_unit_alias_link(self, canonical_bmi: str, count: int = 1) -> None:
-        """An alias spelling's own default-named path holds the class's BMI
-        itself, not a second build of it: scans carry no mapper, so a TU
-        importing through the alias reaches the unit only there. One link edge
-        per aliased spelling per class, so `count` is the total; the given
-        canonical BMI must be the target of one of them."""
-        outs = []
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('build ') and 'cpp_header_unit_alias' in line:
-                    outs.append(line[len('build '):].partition(': ')[0].strip())
-        self.assertEqual(len(outs), count, f'expected {count} alias link edge(s), got {outs}')
-        for out in outs:
-            alias_path = os.path.join(self.builddir, out)
-            self.assertTrue(os.path.isfile(alias_path), f'alias link {out} was not built')
-        self.assertTrue(
-            any(os.path.samefile(os.path.join(self.builddir, out),
-                                 os.path.join(self.builddir, canonical_bmi)) for out in outs),
-            f'none of {outs} is the canonical BMI {canonical_bmi}')
-
     def header_unit_bmis_of(self, target: str, basename: str) -> T.Set[str]:
         """The header-unit BMIs `target`'s own compiles resolve for `basename`.
         Read from its per-TU mapper tables on GCC, where no unit BMI path
@@ -707,7 +675,7 @@ class CppModulesTestMixin:
             with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
                 units = json.load(f)['header_units']
             bmis.update(b for real, b in units.items()
-                        if basename in os.path.basename(real))
+                        if os.path.basename(real) == basename)
         return bmis
 
     def bmi_class_dirs(self) -> T.List[str]:
@@ -961,109 +929,19 @@ class CppModulesTestMixin:
             return False, None
         return (any(c.isspace() for c in resolved), resolved)
 
-    # The build-relative alias root Meson routes a spaced user header unit
-    # through (HEADER_UNIT_ALIAS_ROOT + '/' + a base36 digest). GCC compares a
-    # user header's absolute real path against the spelling it was reached by
-    # and keeps the shorter, so shorter-wins fires only where the real fixture
-    # root is shorter than this. Derived from the backend's own alias-root
-    # spelling, not a magic number, so it tracks a re-spelling of the scheme;
-    # the digest length matches _dir_alias_root's base length.
-    _ALIAS_ROOT_SPELLING_LEN = len(HEADER_UNIT_ALIAS_ROOT + '/') + HEADER_UNIT_ALIAS_DIGEST_LEN
-    # The spaced leaf a shallow fixture is copied into (the header's real path
-    # tail is common to both sides of GCC's comparison and cancels, so only the
-    # root dir length -- base + this leaf -- decides the defeat).
-    _SHORT_SPACED_LEAF = 's p'
-
-    def _short_fixture_base(self) -> str:
-        """A base directory for a shallow spaced fixture, short enough that the
-        fixture root (base + the spaced leaf) is shorter than the alias root --
-        the only way GCC's shorter-of-two canonicalization discards the alias
-        and shorter-wins fires. The ladder: the platform temp dir first (managed
-        mkdtemp space) when its layout is already short enough, else a
-        distinctively named base created near the filesystem root. Neither
-        working is a skip with the computed lengths, never a long-path fallback
-        (a long path cannot provoke the defeat). The chosen base registers its
-        own cleanup the moment it exists, so every exit path removes it, and the
-        near-root base is created (exist_ok=False), never adopted."""
-        from mesonbuild.mesonlib import windows_proof_rmtree
-        limit = self._ALIAS_ROOT_SPELLING_LEN
-        margin = 2
-
-        def root_len(base: str) -> int:
-            return len(os.path.abspath(os.path.join(base, self._SHORT_SPACED_LEAF)))
-
-        diags: T.List[str] = []
-        # Rung 1: the platform temp dir. Managed and collision-safe; used only
-        # when its layout already clears the limit (true on a short tmpdir like
-        # /tmp, not on Windows' deep AppData\Local\Temp).
-        tmp = tempfile.mkdtemp(prefix='m-meson-')
-        self.addCleanup(windows_proof_rmtree, tmp)
-        n = root_len(tmp)
-        diags.append(f'temp base {tmp!r}: fixture root len {n}')
-        if n + margin <= limit:
-            return tmp
-
-        # Rung 2: a distinctively named, collision-resistant base created near
-        # the filesystem root. Created, never adopted; cleanup registered the
-        # instant it exists; an unwritable root is a skip, not a force-remove.
-        marker = f'm-meson-{os.getpid()}-{os.urandom(2).hex()}'
-        if os.name == 'nt':
-            drive = os.path.splitdrive(tempfile.gettempdir())[0]
-            near = os.path.join(drive + os.sep, marker) if drive else None
-        else:
-            # No POSIX near-root rung: GCC shortens a USER header only under
-            # HAVE_DOS_BASED_FILE_SYSTEM, which is Windows-only, so a user
-            # header on POSIX is never canonicalized to its real path -- the
-            # alias is kept whatever the fixture root's length, and shorter-wins
-            # cannot be provoked at all. A near-root spaced fixture here would
-            # root a tree that can never exercise the defeat, so skip with the
-            # reason rather than fabricate a misleading one. (The only caller is
-            # the Windows-only shorter-wins cell; this arm just refuses to lie
-            # if it is ever reached off Windows.)
-            raise unittest.SkipTest(
-                'shorter-wins is not provocable on POSIX: a user header is '
-                'never shortened to its real path (the shortening is guarded by '
-                'HAVE_DOS_BASED_FILE_SYSTEM, a Windows-only macro), so no '
-                'fixture-root length can defeat the space-free alias here; '
-                + '; '.join(diags))
-        if near is not None:
-            try:
-                os.makedirs(near, exist_ok=False)
-            except OSError as e:
-                diags.append(f'near-root {near!r} not creatable: {e}')
-            else:
-                self.addCleanup(windows_proof_rmtree, near)
-                n = root_len(near)
-                diags.append(f'near-root base {near!r}: fixture root len {n}')
-                if n + margin <= limit:
-                    return near
-        raise unittest.SkipTest(
-            f'cannot root a spaced fixture shorter than the {limit}-char alias '
-            'root to provoke shorter-wins; ' + '; '.join(diags))
-
-    def copy_fixture(self, name: str, *, spaced: bool, deep: bool = True) -> str:
+    def copy_fixture(self, name: str, *, spaced: bool) -> str:
         """A copy of unit fixture `name` under a tmp root whose path is
         deterministically spaced or space-free, independent of the checkout
-        path. `deep` (spaced only) pads the root so it stays longer than the
-        meson-private/i alias root, keeping the alias the shorter spelling GCC
-        prefers; a shallow spaced root (deep=False) is rooted short enough that
-        GCC discards the alias, which is how shorter-wins is provoked. The tree
-        is removed on cleanup."""
+        path. The tree is removed on cleanup."""
         from mesonbuild.mesonlib import windows_proof_rmtree
-        if spaced and not deep:
-            # The short base registers its own cleanup (or skips). The space
-            # lives in the leaf copied straight into -- no extra component, so
-            # the root stays under the alias length computed above.
-            dest = os.path.join(self._short_fixture_base(), self._SHORT_SPACED_LEAF)
-        else:
-            base = tempfile.mkdtemp()
-            self.addCleanup(windows_proof_rmtree, base)
-            leaf = ('deep padded root ' * 2 + 'with space') if spaced else 'nospace'
-            # A space-free destination leaf, so the only space in an unspaced
-            # copy is none at all -- the fixture's own directory name (e.g. '197
-            # header unit forced include') holds spaces that would leak in.
-            dest = os.path.join(base, leaf, 'fixture')
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+        base = tempfile.mkdtemp()
+        self.addCleanup(windows_proof_rmtree, base)
+        # A space-free destination leaf, so the only space in an unspaced copy
+        # is none at all -- the fixture's own directory name (e.g. '197 header
+        # unit forced include') holds spaces that would leak in.
+        leaf = 'with space' if spaced else 'nospace'
+        dest = os.path.join(base, leaf, 'fixture')
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copytree(os.path.join(self.unit_test_dir, name), dest)
         assert (' ' in dest) == spaced, dest
         return dest
@@ -1083,7 +961,6 @@ class CppModulesTestMixin:
 
         Returns the g++.exe path, or raises SkipTest.
         """
-        from mesonbuild.backend.ninjabackend import NinjaBackend
         transcript: T.List[str] = []
         spaced, resolved = self.probe_compiler_owned_space(cpp)
         transcript.append(f'host <vector> resolves to {resolved!r} (spaced={spaced})')
@@ -1111,8 +988,7 @@ class CppModulesTestMixin:
         linked_gxx = os.path.join(link_root, os.path.basename(root),
                                   os.path.relpath(os.path.realpath(gxx), root))
         os.makedirs(link_root, exist_ok=True)
-        made = NinjaBackend._make_dir_link(
-            root, os.path.join(link_root, os.path.basename(root)))
+        made = _make_dir_link(root, os.path.join(link_root, os.path.basename(root)))
         if made and os.path.isfile(linked_gxx):
             # Re-probe by shelling out to the linked driver directly: whether
             # GCC keeps the link's spaced spelling or canonicalizes it back to
@@ -1150,115 +1026,35 @@ class CppModulesTestMixin:
                 return line[2:].strip()
         return None
 
-    def gcc_mapper_keys(self, builddir: T.Optional[str] = None) -> T.List[str]:
-        """Every key (first whitespace-delimited field) of every GCC mapper
-        file in the build tree."""
-        builddir = builddir or self.builddir
-        keys: T.List[str] = []
-        for dirpath, _dirs, files in os.walk(builddir):
-            for fn in files:
-                if not fn.endswith('.mapper'):
-                    continue
-                with open(os.path.join(dirpath, fn), encoding='utf-8') as f:
-                    for line in f:
-                        line = line.rstrip('\n')
-                        if line:
-                            keys.append(line)
-        return keys
-
-    def assert_no_spaced_mapper_key(self, spaced_marker: str,
-                                    builddir: T.Optional[str] = None) -> None:
-        """No GCC mapper carries a line naming a unit under `spaced_marker` (the
-        known spaced fragment of the source or compiler tree). A spaced key ends
-        at the first space, so GCC would bind the wrong name and leave the real
-        one a hard 'no such module' -- the degrade drops the line entirely, so
-        the marker must appear in no mapper at all."""
-        for line in self.gcc_mapper_keys(builddir):
-            self.assertNotIn(spaced_marker, line,
-                             f'a mapper carries a spaced-path unit line: {line!r}')
-
-    def _header_unit_edge_args(self, basename: str) -> T.Tuple[T.List[str], str]:
-        """The (ARGS, SPELLING) of the GCC header-unit build edge for `basename`,
-        read from build.ninja -- the include path and spelling GCC resolves the
-        unit through."""
-        args: T.List[str] = []
-        spelling = ''
-        in_edge = False
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('build ') and 'HEADER_UNIT' in line:
-                    out = line[len('build '):].partition(': ')[0].strip()
-                    in_edge = basename in os.path.basename(out)
-                elif in_edge and line.startswith(' ARGS ='):
-                    val = line.partition('=')[2].strip()
-                    args = re.findall(r'"([^"]*)"', val) or val.split()
-                elif in_edge and line.startswith(' SPELLING ='):
-                    spelling = line.partition('=')[2].strip().strip('"')
-                elif in_edge and not line.startswith(' '):
-                    in_edge = False
-        return args, spelling
-
-    def assert_alias_carried(self, basename: str) -> None:
-        """GCC actually resolves the spaced user header unit `basename` through
-        its space-free alias root, not the header's real path. GCC keeps the
-        shorter of the two, so a deep checkout keeps the alias but a short one
-        discards it for the shorter real path (shorter-wins) -- which the
-        mapper-keyed build cannot survive. Probing under the unit's own build
-        args, require the alias to be carried, so a short-checkout box fails
-        here with a pointed message rather than a mysterious downstream error.
-        A no-op where no alias is in play (an unspaced checkout)."""
-        args, spelling = self._header_unit_edge_args(basename)
-        if not any('meson-private/i/' in a.replace('\\', '/') for a in args):
-            return
-        cpp = self.host_cpp_compiler()
-        cmd = cpp.get_exelist(ccache=False) + args + ['-E', '-H', '-x', 'c++', '-']
-        p = subprocess.run(cmd, input=f'#include "{spelling}"\n', capture_output=True,
-                           text=True, cwd=self.builddir)
-        resolved = next((l[2:].strip() for l in p.stderr.splitlines()
-                         if l.startswith('. ')), None)
-        self.assertIsNotNone(resolved, f'could not probe the resolved name of {spelling!r}')
-        self.assertNotIn(' ', resolved,
-            f'the space-free alias for header unit {basename!r} was defeated by a '
-            f'shorter real path at this checkout depth (GCC resolved it to '
-            f'{resolved!r}) -- see the shorter-wins degrade. Move the checkout to a '
-            'deeper path, or one without spaces.')
-        self.assertIn('meson-private/i/', resolved.replace('\\', '/'),
-                      f'header unit {basename!r} is not resolved through its '
-                      f'alias root (got {resolved!r})')
-
-    def assert_space_machinery_dormant(self, out: str,
-                                       builddir: T.Optional[str] = None) -> None:
-        """The negative contract: on an unspaced path the space machinery must
-        not stir. No alias roots, no whitespace/degrade warnings, and every GCC
-        mapper key an unaliased name."""
-        builddir = builddir or self.builddir
-        self.assertNotIn('cannot name a header unit', out)
-        self.assertNotIn('a path containing whitespace', out)
-        self.assertNotIn('divergent dialects', out)
-        self.assertFalse(os.path.isdir(os.path.join(builddir, 'meson-private', 'i')),
-                         'an alias root was placed on an unspaced path')
-        with open(os.path.join(builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('meson-private/i/', f.read().replace('\\', '/'))
-
     # --- The (user|system) x (spaced|unspaced) feature matrix -------------
     #
     # "A header unit works whether its directory has a space or not" is the
-    # feature; the mapper-whitespace limit that the alias exists to route around
-    # is platform-independent (a mapper line ends at the first whitespace on
-    # every platform), so every cell of the matrix runs on Linux and on Windows
-    # with the same assertions. The repo's own path is spaced, so the spaced
-    # cells run in place (test_gcc_header_units / test_gcc_stl_header_units) and
-    # the unspaced cells fabricate an unspaced tree with copy_fixture. Only the
-    # alias-LENGTH sensitivity (GCC's shorter-of-two canonicalization defeating
-    # the alias) is genuinely Windows-only and stays in WindowsTests.
+    # feature, and the mapper protocol quotes whitespace, so every cell asserts
+    # the same outcome: the unit builds, its importers run, and each TU's
+    # table maps the header's real path to a BMI a unit edge wrote. The repo's
+    # own path is spaced, so the spaced cells run in place
+    # (test_gcc_header_units / test_gcc_stl_header_units) and the unspaced
+    # cells fabricate an unspaced tree with copy_fixture. The same assertions
+    # run on Linux and Windows.
+
+    def assert_gcc_table_units(self, target: str, basename: str, count: int = 1) -> T.Set[str]:
+        """`target`'s tables map exactly `count` real path(s) ending in
+        `basename` to a header-unit BMI, each one an output of a unit edge and
+        on disk. Returns the BMIs."""
+        bmis = self.header_unit_bmis_of(target, basename)
+        self.assertEqual(len(bmis), count, f'{target}: {basename} BMIs {bmis}')
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            unit_outs = {line[len('build '):].partition(':')[0].strip()
+                         for line in f if line.startswith('build ') and 'HEADER_UNIT' in line}
+        for bmi in bmis:
+            self.assertIn(bmi, unit_outs, f'{bmi} is no header-unit edge output')
+            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)), bmi)
+        return bmis
 
     def check_gcc_user_header_unit_unspaced(self) -> None:
-        """(user header unit) x (UNSPACED path): the space machinery stays
-        dormant. Nothing needs an alias, so none is placed, no shorter-wins
-        probe runs (the detector only probes an aliased name), and the unit
-        builds and runs untouched -- the same outcome on Linux and Windows,
-        because the whitespace limit the alias routes around is the same on
-        both. The repo path is spaced, so an unspaced tree is fabricated."""
+        """(user header unit) x (UNSPACED path): the unit is found by walking
+        the include path, with no compiler probe, and builds and runs. The
+        repo path is spaced, so an unspaced tree is fabricated."""
         from unittest import mock
         from mesonbuild.backend.ninjabackend import NinjaBackend
         src = self.copy_fixture('173 header unit aliasing', spaced=False)
@@ -1271,29 +1067,25 @@ class CppModulesTestMixin:
             return orig(be, compiler, arglist, mode, spelling)
         with mock.patch.object(NinjaBackend, '_run_header_probe', counting):
             out = self.init(src, extra_args=['-Dmode=plain'], inprocess=True)
-        self.assert_space_machinery_dormant(out)
+        self.assertNotIn('Cannot resolve', out)
         self.assertEqual(calls, [],
                          f'an unspaced header-unit build probed the compiler: {calls}')
         self.build()
         self.run_tests()
+        self.assert_gcc_table_units('prog', 'header.hpp')
 
-    def check_gcc_compiler_owned_space_degrades(self) -> None:
-        # A compiler-owned system header unit under a spaced install prefix
-        # cannot be named in a mapper: a mapper key ends at the first space, and
-        # the compile keeps the real (spaced) chain no matter how the scan is
-        # aliased. The contract is a documented degrade -- the unit still builds
-        # at its default path, no mapper carries the spaced key, setup names the
-        # space's true origin (the compiler's own location, not the project),
-        # and a source that imports the unit fails to compile with "no such
-        # module". The source is copied to an unspaced path so the only space in
-        # play is the compiler's; the spaced prefix itself is fabricated (probe
-        # the host, else link+reprobe, else the opt-in copy rung, else skip).
+    def check_gcc_compiler_owned_space(self) -> None:
+        # A compiler-owned system header unit under a spaced install prefix: a
+        # spaced <vector> is a header unit like any other, keyed by its real
+        # path and imported through the mapper server. The source is copied to
+        # an unspaced path so the only space in play is the compiler's; the
+        # spaced prefix itself is fabricated (probe the host, else
+        # link+reprobe, else the opt-in copy rung, else skip).
         cpp = self.host_cpp_compiler()
         gxx = self.fabricate_spaced_gcc_prefix(cpp)
         resolved = self._shell_probe_vector(gxx)
         self.assertIsNotNone(resolved, 'fabricated compiler cannot resolve <vector>')
-        marker = os.path.dirname(resolved)  # the spaced compiler include dir
-        self.assertIn(' ', marker)
+        self.assertIn(' ', os.path.dirname(resolved))
         bindir = os.path.dirname(gxx)
         from mesonbuild.mesonlib import windows_proof_rmtree
         nfdir = tempfile.mkdtemp()
@@ -1322,43 +1114,37 @@ class CppModulesTestMixin:
             f.write(f"ar = {mirrored(ar.exelist[0]).replace(os.sep, '/')!r}\n")
         src = self.copy_fixture('197 header unit forced include', spaced=False)
         out = self.init(src, extra_args=['--native-file', nf, '-Dmode=ok'])
-        # The warning names the compiler's own location, not the project, and
-        # does not offer the move-the-project remedy that only fits a source
-        # space.
-        self.assertIn('a path containing whitespace', out)
-        self.assertIn("compiler's own install location", out)
-        self.assertNotIn('Move the project', out)
-        # The unit BMI builds; the importer fails cleanly at its own compile.
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.build()
-        self.assertIn('no such module', cm.exception.output)
-        self.assertIn('Building C++ header unit', cm.exception.output)
-        # No mapper carries the spaced compiler path -- the poison line the
-        # degrade drops.
-        self.assert_no_spaced_mapper_key(marker)
+        self.assertNotIn('Cannot resolve', out)
+        self.build()
+        self.run_tests()
+        self.assertIn(os.path.realpath(resolved),
+                      self.gcc_table_unit_paths('prog'))
+
+    def gcc_table_unit_paths(self, target: str) -> T.Set[str]:
+        """Every header-unit real path `target`'s tables map."""
+        rel = None
+        for pat in (f'{target}.p', f'{target}.*.p'):
+            for m in glob.glob(os.path.join(self.builddir, pat)):
+                rel = os.path.relpath(m, self.builddir).replace('\\', '/') + '/'
+        self.assertIsNotNone(rel, f'no private dir for {target}')
+        paths: T.Set[str] = set()
+        for out, table in self.gcc_program_tables().items():
+            if out.startswith(rel):
+                with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
+                    paths.update(json.load(f)['header_units'])
+        return paths
 
     def check_gcc_system_header_unit_unspaced(self) -> None:
         """(system header unit) x (UNSPACED path): a two-class build importing
-        <vector> rooted on an unspaced tree. The system include chain is
-        class-aliased for per-class naming -- a BMI-class need with nothing to
-        do with whitespace -- so the unit is named and imported exactly as in
-        the spaced in-place fixture: the same real-name -> class-aliased-BMI
-        mapper line. Proves the system-unit feature does not lean on the build
-        tree carrying a space. The same assertion on Linux and Windows."""
+        <vector> rooted on an unspaced tree builds and runs, the importer's
+        tables keying the unit by the header's real path. Proves the
+        system-unit feature does not lean on the build tree carrying a space.
+        The same assertion on Linux and Windows."""
         src = self.copy_fixture('171 stl header units', spaced=False)
         out = self.init(src)
-        self.assertNotIn('cannot name a header unit', out)
-        self.assertNotIn('divergent dialects', out)
+        self.assertNotIn('Cannot resolve', out)
         self.build()
         self.run_tests()
         self.check_gcc_module_mappers()
-        lines: T.List[str] = []
-        for dirpath, _dirs, files in os.walk(self.builddir):
-            for fn in files:
-                if fn.endswith('.mapper'):
-                    with open(os.path.join(dirpath, fn), encoding='utf-8') as f:
-                        lines += f.read().splitlines()
-        pat = re.compile(r'\S+/vector gcm\.cache/,/meson-private/i/[0-9a-z]+/vector\.gcm$')
-        self.assertTrue(any(pat.search(line) for line in lines),
-                        'no real-name mapping onto a class-aliased <vector> BMI '
-                        f'in an unspaced tree: {lines}')
+        self.assertEqual(len(self.bmi_class_dirs()), 2)
+        self.assert_gcc_table_units('prog', 'vector')

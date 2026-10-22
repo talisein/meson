@@ -659,10 +659,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_unit_configure_file(self):
         # A header written by configure_file is on disk before any of the build
-        # is decided, so it is a header unit like any other -- the counterpart to
-        # the build-time-generated header GCC cannot name (which does not apply to
-        # cl, whose unit is named by its /headerName: import spelling, not a
-        # resolved path). The unit's .ifc is pre-built to the class ifc cache and
+        # is decided, so it is a header unit like any other (cl names a unit by
+        # its /headerName: import spelling, not a resolved path). The unit's .ifc is pre-built to the class ifc cache and
         # its importer resolves it through a /headerUnit:quote mapping.
         self.build_and_check_modules('198 unresolvable header unit',
                                      extra_args=['-Dmode=configure'],
@@ -697,8 +695,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.header_unit_digests('header.hpp')), 1)
         # cl matches a header unit by the *literal* import spelling it scans,
         # not a normalized or resolved path, so an importer-relative
-        # "../header.hpp" matches no target-level declaration. Unlike GCC there
-        # is no alias escape hatch: the GCC-style resolved-path spelling
+        # "../header.hpp" matches no target-level declaration. Unlike GCC, which
+        # keys a unit by its real path, a second declared spelling
         # (foo/../header.hpp, mode 'aliased') still mismatches the scanned
         # "../header.hpp", and the bare spelling itself cl cannot open as a
         # file. Both fail at Meson's collator with a legible message; only the
@@ -1405,199 +1403,81 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertFalse(any('priv.' in line for line in variant_lines),
                          'a BMI-only variant must never compile a private interface')
 
-    def test_gcc_header_unit_space_free_alias(self):
-        # The space-free alias that lets a GCC header unit under a spaced path
-        # be named in a module mapper (a mapper key cannot contain whitespace):
-        # on Windows a directory symlink where the build is privileged, else an
-        # NTFS junction. Either must be traversable and idempotent. This is pure
-        # path machinery, independent of any compiler.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        import mesonbuild.backend.ninjabackend as nb
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real = os.path.join(d, 'sp ace src')
-            os.makedirs(build)
-            os.makedirs(real)
-            with open(os.path.join(real, 'hdr.h'), 'w', encoding='utf-8') as f:
-                f.write('#pragma once\n')
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._dir_aliases = {}
-            be._alias_root_real = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-
-            rel = be._dir_alias_root(real)
-            if rel is None:
-                raise SkipTest('platform can make neither a symlink nor a junction here')
-            self.assertRegex(rel, r'^meson-private/i/[0-9a-z]+$')
-            abs_alias = os.path.join(build, rel)
-            # Traversable: the aliased path reaches the real file.
-            with open(os.path.join(abs_alias, 'hdr.h'), encoding='utf-8') as f:
-                self.assertIn('pragma once', f.read())
-            # It is a link/junction, not a copied tree.
-            self.assertIsNotNone(be._read_dir_link(abs_alias))
-            # Idempotent across a fresh backend, exercising the on-disk readback
-            # (a junction's readlink carries a '\\?\' prefix that must compare
-            # equal to the plain target, so it is not recreated every time).
-            be._dir_aliases = {}
-            self.assertEqual(be._dir_alias_root(real), rel)
-
-            # Force the junction fallback: an unprivileged build cannot make a
-            # symlink, but a junction still names the unit on local NTFS.
-            real2 = os.path.join(d, 'sp ace two')
-            os.makedirs(real2)
-            with open(os.path.join(real2, 'hdr.h'), 'w', encoding='utf-8') as f:
-                f.write('#pragma once\n')
-            be._dir_aliases = {}
-            with mock.patch.object(nb.os, 'symlink', side_effect=OSError):
-                rel2 = be._dir_alias_root(real2)
-            if rel2 is not None:
-                with open(os.path.join(build, rel2, 'hdr.h'), encoding='utf-8') as f:
-                    self.assertIn('pragma once', f.read())
-
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_units(self):
         # A user header unit, a system header unit and a named module in one
         # target build, link and run on Windows. This fixture's own path
-        # contains spaces, which a mapper key cannot hold, so each unit is named
-        # through the space-free alias, and the BMI the mapper points at is the
-        # one the unit edge wrote.
+        # contains spaces, which the mapper protocol quotes, and the TU's table
+        # keys each unit by its real path at the BMI the unit edge wrote.
         self.build_and_check_modules('142 gcc header units',
-                                     setup_not_contains=['divergent dialects',
-                                                         'cannot name a header unit'])
+                                     setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
-        # This fixture's own path is spaced, so the units are named through the
-        # alias root -- unless a short checkout defeats it (shorter-wins).
-        self.assert_alias_carried('util.h')
-        import glob
-        mappers = glob.glob(os.path.join(self.builddir, '*', 'main.cpp.*.mapper'))
-        self.assertEqual(len(mappers), 1, f'expected one main.cpp mapper, got {mappers}')
-        with open(mappers[0], encoding='utf-8') as f:
-            mapper = f.read().splitlines()
         for unit in ('util.h', 'angleutil.h'):
-            pat = rf'\./meson-private/i/[0-9a-z]+/{re.escape(unit)} \S+\.gcm'
-            line = next((l for l in mapper if re.fullmatch(pat, l)), None)
-            self.assertIsNotNone(line, f'no aliased mapping for {unit} in {mapper}')
-            bmi = line.split(' ', 1)[1]
-            self.assertTrue(os.path.isfile(os.path.join(self.builddir, bmi)),
-                            f'mapper names {bmi}, which the unit edge did not write')
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_alias_unavailable_warns(self):
-        # Where no space-free alias can be made (a non-NTFS build volume, or a
-        # build without symlink privilege or junction support), a header unit
-        # under a spaced path stays unnameable and Meson says so at configure
-        # rather than emitting a mapper that fails at compile. Block the alias
-        # directory with a regular file to force that platform's behavior.
-        os.makedirs(os.path.join(self.builddir, 'meson-private'), exist_ok=True)
-        with open(os.path.join(self.builddir, 'meson-private', 'i'), 'w',
-                  encoding='utf-8') as f:
-            f.write('')
-        out = self.init(os.path.join(self.unit_test_dir, '142 gcc header units'))
-        self.assertIn('cannot name a header unit whose path contains a space', out)
-        # All or nothing: with no alias, nothing is respelled -- a half-aliased
-        # target would name the unit one way on its edge and another on its
-        # importers, worse than the diagnosed failure.
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('meson-private/i/', f.read())
+            self.assert_gcc_table_units('prog', unit)
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_aliasing(self):
-        # Windows counterpart of LinuxlikeTests.test_header_unit_aliasing: the
-        # alias link edge (copy.py --link, ninja rule cpp_header_unit_alias) and
-        # the grouping it depends on have never run on this platform.
+        # Windows counterpart of LinuxlikeTests.test_header_unit_aliasing: a
+        # second spelling of a declared file ("../header.hpp" from foo/),
+        # declared or not, reaches the one BMI of that file through one table
+        # entry and one unit edge; a header declared nowhere fails at the scan.
         testdir = '173 header unit aliasing'
+        real = os.path.realpath(os.path.join(self.unit_test_dir, testdir, 'header.hpp'))
         self.build_and_check_modules(testdir, ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
-        # The fixture path is spaced, so the alias must carry the unit's name;
-        # a short checkout would defeat it (shorter-wins) and fail pointedly.
-        self.assert_alias_carried('header.hpp')
 
-        self.new_builddir()
-        self.build_and_check_modules(testdir, extra_args=['-Dmode=aliased'],
-                                     ninja_args_not_contains=(),
-                                     setup_not_contains=['cannot name a header unit'])
-        self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1)
-        self.check_gcc_module_mappers()
-        alias_bmi = self.assert_alias_mapper_key('prog', 'foo_aliased.cpp')
-        plain_bmi = self.assert_alias_mapper_key('prog', 'main.cpp', alias=False)
-        self.assertEqual(alias_bmi, plain_bmi,
-                         'both spellings must resolve the one BMI of the file')
-        # The alias's default-named path holds the canonical BMI itself (a hard
-        # link on NTFS, copy.py's fallback elsewhere) -- not a second build of
-        # it -- and a follow-up build must see nothing to do.
-        self.assert_header_unit_alias_link(alias_bmi)
-        self.assertBuildIsNoop()
+        for mode in ('aliased', 'undeclared'):
+            self.new_builddir()
+            self.build_and_check_modules(testdir, extra_args=[f'-Dmode={mode}'],
+                                         ninja_args_not_contains=(),
+                                         setup_not_contains=['Cannot resolve'])
+            self.assertEqual(len(self.header_unit_bmis('header.hpp')), 1, mode)
+            self.check_gcc_module_mappers()
+            self.assert_gcc_table_units('prog', 'header.hpp')
+            self.assertEqual([p for p in self.gcc_table_unit_paths('prog')
+                              if os.path.basename(p) == 'header.hpp'], [real])
+            self.assertBuildIsNoop()
 
         self.new_builddir()
         self.build_and_check_modules(testdir, extra_args=['-Dmode=classes'],
                                      ninja_args_not_contains=(),
-                                     setup_not_contains=['cannot name a header unit'])
+                                     setup_not_contains=['Cannot resolve'])
         units = self.header_unit_bmis('header.hpp')
         self.assertEqual(len(units), 2, f'expected one BMI per class, got {units}')
-        per_prog = {}
-        for prog in ('prog', 'progfoo'):
-            alias_bmi = self.assert_alias_mapper_key(prog, 'foo_aliased.cpp')
-            plain_bmi = self.assert_alias_mapper_key(prog, 'main.cpp', alias=False)
-            self.assertEqual(alias_bmi, plain_bmi,
-                             f'{prog} must reach one BMI through either spelling')
-            per_prog[prog] = alias_bmi
+        per_prog = {prog: self.assert_gcc_table_units(prog, 'header.hpp')
+                    for prog in ('prog', 'progfoo')}
         self.assertNotEqual(per_prog['prog'], per_prog['progfoo'],
                             'divergent classes must not share a unit BMI')
-        # Each class links the alias spelling's own default path to its own
-        # BMI (one link edge per class), so a mapper-less scan of either
-        # spelling in either class reaches that class's unit.
-        self.assert_header_unit_alias_link(per_prog['prog'], count=2)
-        self.assert_header_unit_alias_link(per_prog['progfoo'], count=2)
         self.assertBuildIsNoop()
+
+        self.new_builddir()
+        self.init(os.path.join(self.unit_test_dir, testdir), extra_args=['-Dmode=missing'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertRegex(cm.exception.stdout,
+                         r"header unit .*other\.hpp is not declared in the "
+                         r"cpp_header_units of target 'prog'")
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # Windows counterpart of LinuxlikeTests.test_gcc_stl_header_units:
         # <vector> resolves to a drive-letter absolute path here, unlike the
         # project-local units of the other fixtures. progfoo's -DFOO makes
-        # this a two-class build, so the unit is class-alias-named -- prog's
-        # scan resolves <vector> through its class's chain aliases (a
-        # build-relative path with no drive letter, since the alias root
-        # lives under the build tree) and the BMI sits at that alias name's
-        # mangled path. The compile still asks the real drive-letter
-        # absolute name, so the TU's mapper must carry that name joined onto
-        # the class-aliased BMI. The old flat drive-letter mangling
-        # (default_cmi_path's 'C:' -> 'C-') only ever applied to a single-class
-        # machine, and survives only on the degraded path now.
+        # this a two-class build; prog's tables key <vector> by that real
+        # path, at the BMI its own class's unit edge wrote.
         self.build_and_check_modules('171 stl header units',
-                                     setup_not_contains=['cannot name a header unit',
-                                                         'divergent dialects'])
+                                     setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
-        import glob
-        mappers = glob.glob(os.path.join(self.builddir, 'prog.*.p', 'main.cpp.*.mapper'))
-        self.assertEqual(len(mappers), 1, f'expected one main.cpp mapper, got {mappers}')
-        with open(mappers[0], encoding='utf-8') as f:
-            mapper = f.read().splitlines()
-        for line in mapper:
-            key, _, bmi = line.partition(' ')
-            # The mapper carries a line per name of the BMI (alias-scan and
-            # real-compile spellings both resolve here); only the real,
-            # drive-letter-absolute one is the compile's own name.
-            if os.path.basename(key) == 'vector' and re.match(r'^[A-Za-z]:', key):
-                self.assertRegex(key, r'^[A-Za-z]:/\S+/vector$',
-                                 'the compile still names the real drive-letter path')
-                bmi_norm = bmi.replace('\\', '/')
-                self.assertRegex(bmi_norm, r'^gcm\.cache/,/meson-private/i/[0-9a-z]+/vector\.gcm$',
-                                 'the class-aliased BMI path must carry no drive letter')
-                break
-        else:
-            self.fail(f'no vector header-unit mapping in {mapper}')
+        self.assert_gcc_table_units('prog', 'vector')
+        (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
+        self.assertRegex(real, r'^[A-Za-z]:', 'the unit is keyed by its drive-letter real path')
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
     def test_header_unit_dialect_divergence(self):
         # Windows mirror of LinuxlikeTests.test_header_unit_dialect_divergence:
         # three declarers of util.h split into two dialect classes (prog20/
-        # prog20b at c++20, prog23 at c++23). A directory symlink or a
-        # junction each keep the aliased text in a unit's resolved name (no
-        # canonicalization through the reparse point), so this needs no
-        # different mechanism here, only the coverage: each class must reach
-        # its own BMI through its own class root, build, and run correctly.
+        # prog20b at c++20, prog23 at c++23). Each class must reach its own BMI
+        # through its own units manifest, build, and run correctly.
         self.build_and_check_modules('168 header unit dialect divergence',
                                      setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
@@ -1617,11 +1497,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_system_header_unit_dialect_divergence(self):
         # Windows mirror of
         # LinuxlikeTests.test_system_header_unit_dialect_divergence: two
-        # classes both import <vector>, named through GCC's own built-in
-        # include chain rather than any -I, so its per-class BMI is reached
-        # by aliasing that whole chain (a junction substitutes for a
-        # built-in directory at the same position, so include_next and
-        # search order still hold). prog20 additionally imports <cstdint>
+        # classes both import <vector>, found through GCC's own built-in
+        # include chain rather than any -I, each class through its own units
+        # manifest. prog20 additionally imports <cstdint>
         # from a TU of its own -- never alongside <vector> in one TU. MinGW's
         # libstdc++ predefines __USE_MINGW_ANSI_STDIO=1 while a bare
         # <stdio.h> unit defaults it to 0, and GCC's cross-module
@@ -1633,11 +1511,6 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('vector')
         self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
-        # A junction alias is build-relative text, so the mangled CMI path
-        # under gcm.cache carries no drive letter -- default_cmi_path's 'C:' ->
-        # 'C-' mangling applies only to the degraded (unaliased) path.
-        for u in units:
-            self.assertNotIn(':', u, f'gated system unit BMI path must be colon-free: {u}')
         per_prog = {p: self.header_unit_bmis_of(p, 'vector') for p in ('prog20', 'prog23')}
         for prog, bmis in per_prog.items():
             self.assertEqual(len(bmis), 1, f'{prog} must resolve one <vector> BMI, got {bmis}')
@@ -1645,93 +1518,53 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                             'divergent dialect classes must not share a system unit BMI')
         self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
-    def test_gcc_header_unit_aliasing_unavailable_warns(self):
-        # Windows counterpart of LinuxlikeTests.test_gcc_header_unit_aliasing_unavailable_warns:
-        # forcing _make_dir_link to fail is platform-independent, so the same
-        # degraded, first-declarer-named-BMI behavior and warning apply here.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        testdir = os.path.join(self.unit_test_dir, '168 header unit dialect divergence')
-        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
-            out = self.init(testdir, inprocess=True)
-        self.assertEqual(out.count('divergent dialects'), 1,
-                         f'expected exactly one divergence warning, got:\n{out}')
-        self.assertIn('prog23', out)
-        self.assertIn('prog20', out)
-        self.assertIn('-std=c++23', out)
-        self.assertIn('will fail when it scans', out)
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.build()
-        self.assertIn('util.h', cm.exception.output)
-
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_aliasing_unavailable_single_class_builds(self):
-        # Windows counterpart of
-        # LinuxlikeTests.test_gcc_header_unit_aliasing_unavailable_single_class_builds:
-        # a single-class machine needs no per-class name, so a forced-negative
-        # aliasing capability costs this fixture nothing.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        testdir = os.path.join(self.unit_test_dir, '197 header unit forced include')
-        with mock.patch.object(NinjaBackend, '_make_dir_link', return_value=False):
-            out = self.init(testdir, extra_args=['-Dmode=ok'], inprocess=True)
-        self.assertNotIn('divergent dialects', out)
-        self.assertNotIn('cannot name a header unit', out)
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            self.assertNotIn('meson-private/i/', f.read())
-        self.build()
-        self.run_tests()
-
-    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_compiler_owned_space_degrades(self):
-        # (compiler-owned spaced install prefix) degrade on Windows -- the same
-        # cell that runs on Linux (LinuxlikeTests.test_gcc_compiler_owned_space_degrades),
+    def test_gcc_compiler_owned_space(self):
+        # (compiler-owned spaced install prefix) on Windows -- the same cell
+        # that runs on Linux (LinuxlikeTests.test_gcc_compiler_owned_space),
         # where a distro GCC baked to an unspaced prefix skips at fabrication.
-        self.check_gcc_compiler_owned_space_degrades()
+        self.check_gcc_compiler_owned_space()
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_shorter_wins_degrades(self):
-        # A user header unit under a short spaced source root: GCC discards the
-        # space-free alias for the shorter, spaced real path (shorter-wins).
-        # Meson detects the discard by probe, degrades the unit to its flat
-        # mapper-less default path (so it still builds), writes no spaced mapper
-        # key, and warns that the alias was placed but defeated. The importer
-        # then fails cleanly. The cell confirms the defeat actually occurred
-        # before asserting -- a root that was not short enough is a skip, not a
-        # false failure.
-        src = self.copy_fixture('173 header unit aliasing', spaced=True, deep=False)
-        out = self.init(src, extra_args=['-Dmode=plain'])
-        if 'discarded it' not in out:
-            raise SkipTest(
-                'the short spaced root did not defeat the alias here (GCC kept '
-                f'it); shorter-wins not provoked at {src!r}')
-        self.assertIn('a path containing whitespace', out)
-        self.assertIn('real path is shorter', out)
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.build()
-        self.assertIn('no such module', cm.exception.output)
-        self.assertIn('Building C++ header unit', cm.exception.output)
-        self.assert_no_spaced_mapper_key('s p')
+    def test_gcc_header_unit_short_spaced_root(self):
+        # A user header unit under a short spaced source root. On Windows GCC
+        # names a user header by the shorter of its include spelling and its
+        # real path, so here the unit is named by its spaced absolute path;
+        # the mapper server keys it by real path either way, and it builds and
+        # runs. The root is created near the drive root to make it short.
+        from mesonbuild.mesonlib import windows_proof_rmtree
+        drive = os.path.splitdrive(tempfile.gettempdir())[0]
+        base = os.path.join(drive + os.sep, f'm-meson-{os.getpid()}-{os.urandom(2).hex()}')
+        try:
+            os.makedirs(base)
+        except OSError as e:
+            raise SkipTest(f'cannot create a short root at {base!r}: {e}')
+        self.addCleanup(windows_proof_rmtree, base)
+        src = os.path.join(base, 's p')
+        shutil.copytree(os.path.join(self.unit_test_dir, '173 header unit aliasing'), src)
+        self.build_and_check_modules('173 header unit aliasing', srcdir=src,
+                                     extra_args=['-Dmode=plain'], ninja_args_not_contains=(),
+                                     setup_not_contains=['Cannot resolve'])
+        self.assert_gcc_table_units('prog', 'header.hpp')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_deep_spaced_alias_wins(self):
-        # A user header unit under a deep spaced source root: the real path is
-        # longer than the alias, so GCC keeps the space-free alias and the unit
-        # builds, links and runs with no warning and no degrade. Guards the
-        # probe against a false-positive on a working spaced-alias project.
-        src = self.copy_fixture('173 header unit aliasing', spaced=True, deep=True)
-        out = self.init(src, extra_args=['-Dmode=plain'])
-        self.assertNotIn('a path containing whitespace', out)
-        self.assertNotIn('discarded it', out)
-        self.assert_alias_carried('header.hpp')
-        self.build()
-        self.run_tests()
+    def test_gcc_header_unit_deep_spaced_root(self):
+        # The long-path twin of test_gcc_header_unit_short_spaced_root: under a
+        # deep spaced root GCC names the unit by its include spelling instead,
+        # and the unit builds and runs all the same.
+        src = self.copy_fixture('173 header unit aliasing', spaced=True)
+        self.build_and_check_modules('173 header unit aliasing', srcdir=src,
+                                     extra_args=['-Dmode=plain'], ninja_args_not_contains=(),
+                                     setup_not_contains=['Cannot resolve'])
+        self.assert_gcc_table_units('prog', 'header.hpp')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_unspaced_no_probes(self):
         # (user header unit) x (unspaced path) on Windows -- the same cell that
-        # runs on Linux (LinuxlikeTests.test_gcc_header_unit_unspaced). The
-        # whitespace limit the alias routes around is platform-independent, so
-        # an unspaced tree leaves the machinery dormant on both.
+        # runs on Linux (LinuxlikeTests.test_gcc_header_unit_unspaced). Here
+        # the unspaced copy sits under %TEMP%, often reached by a relative
+        # include spelling longer than its absolute path, so GCC names the
+        # unit by the absolute one: the real-path key absorbs that.
         self.check_gcc_user_header_unit_unspaced()
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
@@ -1739,39 +1572,6 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # (system header unit) x (unspaced path) on Windows -- the same cell
         # that runs on Linux (LinuxlikeTests.test_gcc_system_header_unit_unspaced).
         self.check_gcc_system_header_unit_unspaced()
-
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
-    def test_header_unit_alias_root_pruning(self):
-        # Windows counterpart of LinuxlikeTests.test_header_unit_alias_root_pruning:
-        # alias roots are keyed by (real dir, class tag) regardless of
-        # platform, so a reconfigure that collapses the class split must
-        # prune the same way here.
-        testdir = os.path.join(self.unit_test_dir, '173 header unit aliasing')
-        alias_root = os.path.join(self.builddir, 'meson-private', 'i')
-
-        self.init(testdir, extra_args=['-Dmode=classes'])
-        self.build()
-        classes_roots = set(os.listdir(alias_root))
-        self.assertGreater(len(classes_roots), 1,
-                           f'expected more than one alias root, got {classes_roots}')
-
-        self.init(testdir, extra_args=['--reconfigure', '-Dmode=plain'])
-        self.build()
-        plain_roots = set(os.listdir(alias_root))
-        self.assertTrue(plain_roots < classes_roots,
-                        f'plain-mode roots {plain_roots} should be a subset of '
-                        f'the classes-mode roots {classes_roots} it reuses')
-        gone = classes_roots - plain_roots
-        self.assertTrue(gone, 'plain mode should have orphaned some per-class roots')
-        for name in gone:
-            self.assertFalse(os.path.exists(os.path.join(alias_root, name)),
-                             f'stale alias root {name} was not pruned')
-
-        self.init(testdir, extra_args=['--reconfigure', '-Dmode=classes'])
-        self.build()
-        reclassed_roots = set(os.listdir(alias_root))
-        self.assertEqual(reclassed_roots, classes_roots,
-                         'the same class keys must reproduce the same alias roots')
 
     def test_non_utf8_fails(self):
         # FIXME: VS backend does not use flags from compiler.get_always_args()

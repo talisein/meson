@@ -1,6 +1,5 @@
-// Importer-relative spelling: resolves to '<here>/../header.hpp', a logical
-// name of its own. Declared as an alias it shares the canonical unit's BMI, so
-// this TU reaches its own class's BMI through the alias name.
+// Importer-relative spelling: resolves to '<here>/../header.hpp', the same file
+// as the plain spelling, so this TU reaches its own class's one BMI of it.
 import "../header.hpp";
 
 #ifdef FOO

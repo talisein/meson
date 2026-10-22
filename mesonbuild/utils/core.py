@@ -180,15 +180,6 @@ class ExecutableSerialisation:
 CPP_MODULE_INTERFACE_SUFFIXES = frozenset({'cppm', 'ixx'})
 
 
-def has_space(s: str) -> bool:
-    """Whether a string holds any whitespace. A GCC module mapper key ends at
-    the first space or tab with no quoting or escape form, so a header unit
-    whose resolved path holds one cannot be named in a mapper: the backend and
-    the collator both refuse to write such a key, degrading the unit to GCC's
-    default (mapper-less) naming instead."""
-    return any(c.isspace() for c in s)
-
-
 def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     """The BMI path a compiler names a C++ module's interface at.
 
@@ -220,43 +211,3 @@ def header_unit_key(path: str) -> str:
     as undeclared rather than silently merged.
     Setup, the collator and the server must all key units this way."""
     return os.path.realpath(path)
-
-
-def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
-    """The CMI path GCC's default (mapper-less) mapping gives a header unit.
-
-    A header unit's logical-name is its resolved header path; GCC stores its
-    CMI under the cache root with '.' and '..' components mangled to ','
-    and ',,' and an absolute path appended as-is: './util.h' ->
-    'gcm.cache/,/util.h.gcm', './../srcx/hdr.h' ->
-    'gcm.cache/,/,,/srcx/hdr.h.gcm', '/usr/include/c++/16/vector' ->
-    'gcm.cache/usr/include/c++/16/vector.gcm'. A Windows drive letter's colon
-    is mangled to a hyphen the same way ('.' and '..' components are, since a
-    literal colon there would read as an NTFS alternate-data-stream separator):
-    'C:/Users/x/vector' -> 'gcm.cache/C-/Users/x/vector.gcm'.
-
-    Backslashes are kept verbatim: GCC does not split the name on them or
-    collapse a '.'/'..' fused to the rest by one, it just writes them into the
-    string (Windows resolves them as separators on disk, GCC does not). Only a
-    leading drive colon is still mangled, even when a backslash fuses the drive
-    to the path: 'C:\\b\\x\\util.h' -> 'gcm.cache/C-\\b\\x\\util.h.gcm', and
-    '.\\util.h' -> 'gcm.cache/.\\util.h.gcm' unchanged. So a backslash-fused
-    component stays one component here.
-
-    Scan edges carry no mapper -- one would disable default naming for named
-    modules too, whose names only the scan itself supplies -- so a scan reaches a
-    unit only here, at the path its own class-embedded name mangles to. The
-    backend builds each class's BMI at its own such path and, where a compile
-    computes a different name than the scan reports, pairs that name with the BMI
-    (--header-unit-bmi); both sides derive the path from this function, which is
-    why it lives here rather than in either of them.
-    """
-    parts = logical_name.split('/')
-    # Only a leading drive colon is mangled, and only there. Match it on the
-    # first '/'-component's 'X:' prefix even when a backslash fuses the drive
-    # to the rest ('C:\\b\\x' arrives as one component); everything after the
-    # colon, backslashes included, is preserved.
-    if parts and len(parts[0]) >= 2 and parts[0][1] == ':' and parts[0][0].isalpha():
-        parts[0] = parts[0][0] + '-' + parts[0][2:]
-    parts = [',' * len(p) if p in ('.', '..') else p for p in parts]
-    return f'{cache_dir}/' + '/'.join(p for p in parts if p) + suffix

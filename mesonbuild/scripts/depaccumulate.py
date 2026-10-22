@@ -17,8 +17,7 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import (CPP_MODULE_INTERFACE_SUFFIXES, MesonException, default_cmi_path, has_space,
-                          header_unit_key, module_to_filename)
+from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, MesonException, header_unit_key, module_to_filename
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -489,19 +488,17 @@ def run_p1689(argv: T.List[str]) -> int:
     targets are told apart by target id, never by name: a name is unique only
     within one subdir.
 
-    With --mapper-suffix it also writes a GCC module mapper per translation
-    unit (<primary-output><suffix>, an implicit input of the compile edge)
-    naming the TU's provides and direct imports: GCC has no per-class
-    module-search-path flag, so relocating BMIs into a class subdirectory
-    means enumerating them per TU. Transitive imports need no entries (GCC
-    reads them from the direct imports' CMIs), so the file is linear in the
-    TU's imports. Written copy-if-different: an unconditional rewrite would
-    recompile the whole target whenever any module in it changed.
-
-    With --mapper-format json the per-TU file is instead the lookup table a
-    GCC mapper program answers the compile from: {"modules": name -> BMI,
-    "header_units": real path -> BMI}, header units resolved by real path
-    through --header-unit-manifest.
+    With --mapper-suffix it also writes, per translation unit, the lookup
+    table Meson's GCC mapper program answers the compile from
+    (<primary-output><suffix>, an implicit input of the compile edge):
+    {"modules": name -> BMI, "header_units": real path -> BMI}, naming the
+    TU's provides and direct imports, header units resolved by real path
+    through --header-unit-manifest. GCC has no per-class module-search-path
+    flag, so relocating BMIs into a class subdirectory means enumerating them
+    per TU. Transitive imports need no entries (GCC reads them from the
+    direct imports' CMIs), so the table is linear in the TU's imports.
+    Written copy-if-different: an unconditional rewrite would recompile the
+    whole target whenever any module in it changed.
     """
     parser = argparse.ArgumentParser(prog='depaccumulate --p1689')
     parser.add_argument('--dyndep', required=True, help='Output Ninja dyndep file.')
@@ -578,31 +575,17 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--header-unit', action='append', default=[], dest='header_units',
                         help='A declared header unit as "<mode>:<spelling>". Repeatable.')
     parser.add_argument('--mapper-suffix', default=None,
-                        help='Also write a GCC module mapper per TU at '
+                        help='Also write a GCC mapper program\'s lookup table per TU at '
                              '<primary-output> + this suffix, mapping its provides '
                              'and direct imports to their BMI paths.')
-    parser.add_argument('--mapper-format', choices=['file', 'json'], default='file',
-                        help='file: a GCC module mapper file; json: a mapper program\'s '
-                             'per-TU lookup table.')
     parser.add_argument('--header-unit-manifest', default=None,
-                        help='With --mapper-format json, the (target, BMI class) manifest '
+                        help='With --mapper-suffix, the (target, BMI class) manifest '
                              'of declared header units by real path.')
     parser.add_argument('--hashed-table-dir', default=None,
-                        help='With --mapper-format json, write each table in this '
+                        help='With --mapper-suffix, write each table in this '
                              'directory, named by a digest of its object path, instead of '
                              'at <primary-output> + suffix: a mapper program command line '
                              'that cannot be quoted cannot name a path holding a space.')
-    parser.add_argument('--default-cmi-root', default=None,
-                        help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
-                             'imports resolve in; mappers reproduce the compiler\'s '
-                             'default header-unit CMI naming under it for any unit not '
-                             'named by --header-unit-bmi.')
-    parser.add_argument('--header-unit-bmi', action='append', default=[], nargs=2,
-                        dest='header_unit_bmis', metavar=('NAME', 'BMI'),
-                        help="A header unit built for this target's own BMI class, as its "
-                             "resolved name (the scan's logical-name) and its BMI path. Two "
-                             "arguments, not one joined pair: a system unit's name is an "
-                             'absolute path, which on Windows carries a colon. Repeatable.')
     parser.add_argument('ddis', nargs='*', help="This target's P1689 scan results.")
     args = parser.parse_args(argv)
 
@@ -617,17 +600,7 @@ def run_p1689(argv: T.List[str]) -> int:
     # ones the .ddi itself uses, and (unlike a source-path) that field is
     # always present, on every compiler.
     private_interface_objs = set(args.private_interface_objs)
-    class_units = {name: bmi for name, bmi in args.header_unit_bmis}
-    # The inverse: every declared name of one BMI. A scan reports one name of a
-    # unit (an alias spelling, say) while a compile asks the mapper for another
-    # (the real one), and a mapper disables GCC's default naming outright, so a
-    # name the compile asks for that is missing from the mapper is a hard "no
-    # such module", not a fallback. Emitting every name of the resolved BMI puts
-    # both there; a line for a name a TU never asks is inert.
-    bmi_to_names: T.Dict[str, T.List[str]] = {}
-    for name, bmi in args.header_unit_bmis:
-        bmi_to_names.setdefault(bmi, []).append(name)
-    # Real path -> BMI of every header unit declared for this BMI class, for a
+    # Real path -> BMI of every header unit declared for this BMI class, for the
     # mapper program's tables. A scan reports a unit by whatever name it
     # reached it through; its real path is what identifies it.
     manifest_units: T.Dict[str, str] = {}
@@ -842,8 +815,7 @@ def run_p1689(argv: T.List[str]) -> int:
             rule_src = next((p.get('source-path') for p in rule.get('provides', [])
                              if p.get('source-path')), None)
             display = rule_src if rule_src is not None else obj
-            maplines: T.List[str] = []
-            # The same lookups as a mapper program's table.
+            # The mapper program's lookups for this TU.
             table_modules: T.Dict[str, str] = {}
             table_units: T.Dict[str, str] = {}
             outs: T.List[str] = []
@@ -855,7 +827,6 @@ def run_p1689(argv: T.List[str]) -> int:
                     # edge. The mapper (a BMI-only variant here: GCC is the
                     # only compiler taking both flags) sends the export to
                     # that declared output, the rule's primary-output.
-                    maplines.append(f'{name} {obj}')
                     table_modules[name] = obj
                 else:
                     # Same private/shared choice as the provides loop above,
@@ -865,7 +836,6 @@ def run_p1689(argv: T.List[str]) -> int:
                     bmidir = args.private_bmi_dir if name in private_names else args.bmi_dir
                     bmi = module_to_filename(name, bmidir, args.bmi_suffix)
                     outs.append(bmi)
-                    maplines.append(f'{name} {bmi}')
                     table_modules[name] = bmi
             reqs: T.List[str] = []
             for req in rule.get('requires', []):
@@ -882,7 +852,7 @@ def run_p1689(argv: T.List[str]) -> int:
                                 f'{obj} imports header unit "{req["logical-name"]}", '
                                 "which is not declared in this target's "
                                 'cpp_header_units.')
-                    if args.mapper_format == 'json':
+                    if args.mapper_suffix is not None:
                         # Relative to the build directory, the collate's own
                         # working directory, like every name GCC reports.
                         name = req['logical-name']
@@ -893,37 +863,6 @@ def run_p1689(argv: T.List[str]) -> int:
                                 f'{obj} imports header unit "{name}", which is not '
                                 "declared in this target's cpp_header_units.")
                         table_units[real] = bmi
-                    elif args.default_cmi_root is not None:
-                        # A unit named outright for this TU's class is looked up;
-                        # one left at the default-named path is reconstructed
-                        # (the reconstruction branch is load-bearing: the scan's
-                        # name reconstructs to the BMI, and --header-unit-bmi
-                        # carries the compile names). Then every other name of
-                        # that BMI joins in, so the reported name and the one the
-                        # compile computes both resolve.
-                        name = req['logical-name']
-                        # The scan may report the name with Windows separators
-                        # (an absolute 'C:\\...' import spells its own
-                        # backslashes; -I-derived names are forward-slashed at
-                        # the compile edge). class_units keys and the default
-                        # CMI path are forward-normalized, so key the BMI lookup
-                        # by the forward form. The importer computes its query
-                        # name from its own source spelling, though, so the
-                        # mapper line it reads keeps the reported name.
-                        key = name.replace('\\', '/')
-                        bmi = class_units.get(key) or default_cmi_path(
-                            key, args.default_cmi_root, args.bmi_suffix)
-                        for n in dict.fromkeys([name, *bmi_to_names.get(bmi, [])]):
-                            # A name holding whitespace cannot be a mapper key:
-                            # GCC reads the key only to the first space, so the
-                            # line would bind the wrong name and leave the real
-                            # one unresolved. Such a unit keeps GCC's default
-                            # naming and is reached at its default CMI path
-                            # instead, so the line is dropped rather than
-                            # written broken.
-                            if has_space(n):
-                                continue
-                            maplines.append(f'{n} {bmi}')
                     continue
                 name = req['logical-name']
                 modfile = resolvable.get(name)
@@ -969,13 +908,12 @@ def run_p1689(argv: T.List[str]) -> int:
                 # class-cache directory every target in this class resolves
                 # public modules through.
                 req_dir = args.private_bmi_dir if name in private_names else args.bmi_dir
-                maplines.append(f'{name} {module_to_filename(name, req_dir, args.bmi_suffix)}')
                 table_modules[name] = module_to_filename(name, req_dir, args.bmi_suffix)
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
             dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
-            if args.mapper_suffix is not None and args.mapper_format == 'json':
+            if args.mapper_suffix is not None:
                 table = obj + args.mapper_suffix
                 if args.hashed_table_dir is not None:
                     digest = hashlib.sha1(obj.encode('utf-8')).hexdigest()[:16]
@@ -983,9 +921,6 @@ def run_p1689(argv: T.List[str]) -> int:
                 _write_if_different(table, json.dumps(
                     {'modules': table_modules, 'header_units': table_units},
                     indent=1, sort_keys=True) + '\n')
-            elif args.mapper_suffix is not None:
-                _write_if_different(obj + args.mapper_suffix,
-                                    ''.join(line + '\n' for line in maplines))
 
     with open(args.provmap, 'w', encoding='utf-8') as pm:
         json.dump(provided, pm)

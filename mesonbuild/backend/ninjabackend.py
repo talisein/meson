@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict
 from dataclasses import dataclass
 from enum import Enum, unique
 from functools import lru_cache
@@ -36,7 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import as_posix, get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
-from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, default_cmi_path, header_unit_key
+from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, header_unit_key
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 
@@ -614,35 +614,6 @@ class BmiVariant:
     provmap: str
     dyndep: str
 
-# The build-relative parent directory of every header-unit alias root. GCC
-# names a header unit by the text of the path it resolved through and does not
-# resolve a link in that text, so a link placed under here renames a unit
-# without moving its header (see NinjaBackend._dir_alias_root). Every alias
-# spelling is a child of this directory. Named once, so the path constructors
-# and the recognition checks that must agree on the spelling cannot drift apart
-# -- a single edit here re-spells the whole scheme.
-#
-# Kept deliberately short. GCC otherwise keeps the shorter of an include
-# spelling and a header's realpath (dropping the longer alias and the per-unit
-# name it carries); the fewer characters this root and its digest spend, the
-# more often the alias stays the shorter of the two and survives that
-# canonicalization -- so the parent is a single letter and the digest is a
-# compact base36.
-HEADER_UNIT_ALIAS_ROOT = 'meson-private/i'
-# The base length of an alias-root digest, in base36 (0-9a-z) characters. A
-# collision lengthens one directory's digest past this (see _dir_alias_root),
-# but on real inputs nothing collides and this is the whole length. Named so
-# the tests derive the alias-root spelling length rather than hardcode it.
-HEADER_UNIT_ALIAS_DIGEST_LEN = 5
-
-
-class _AliasRootCollision(Exception):
-    """Signalled by _place_dir_alias when the candidate spelling is already
-    this run's alias root for a *different* real directory -- a digest
-    collision. The caller resolves it by lengthening the newcomer's digest and
-    retrying, leaving the incumbent's already-placed link untouched.
-    """
-
 
 class NinjaBackend(backends.Backend):
 
@@ -671,18 +642,7 @@ class NinjaBackend(backends.Backend):
         # - https://github.com/mesonbuild/meson/issues/9479#issuecomment-953485040
         self.allow_thin_archives = PerMachine[bool](True, True)
         self.import_std: T.Optional[ImportStdInfo] = None
-        # (unit key, consumer id) pairs already warned about for a header unit
-        # shared across dialects, so each divergence is reported once; the class
-        # that first declared each unit is recorded at edge creation.
-        self._warned_header_unit_divergence: T.Set[T.Tuple[str, str]] = set()
-        # (mode, spelling) -> the BMI class, target and machine that first
-        # declared it, for the divergence warning on a unit that still shares
-        # one flat BMI: the degraded path where per-class naming is unavailable
-        # (see warn_on_header_unit_divergence). The machine is folded in because
-        # that flat BMI is shared build-wide, so two machines declaring one unit
-        # there also collide -- across compilers whose BMIs do not interchange.
-        self._header_unit_class: T.Dict[str, T.Tuple[T.Tuple[str, ...], str, MachineChoice]] = {}
-        # Spellings already warned about for a header unit GCC cannot name.
+        # Spellings already warned about for a header unit that resolves nowhere.
         # Keyed by the unit, not the importer: the unit is what is unnameable,
         # and every target importing it fails the same way.
         self._warned_header_unit_names: T.Set[str] = set()
@@ -691,37 +651,12 @@ class NinjaBackend(backends.Backend):
         # importer too, unlike the unnameable warning: it is the target's args
         # that are wrong, and another target declaring the same unit is fine.
         self._warned_preincluded_header_units: T.Set[T.Tuple[str, str]] = set()
-        # (real directory, class tag) -> build-relative alias root (None if the
-        # platform could not make one), for GCC header-unit naming. The class
-        # tag is None for a space-free mapper key and a BMI-class digest for a
-        # per-class unit name; the two keyings never share a root.
-        self._dir_aliases: T.Dict[T.Tuple[str, T.Optional[str]], T.Optional[str]] = {}
-        # Inverse of the above for the roots that exist: alias root ->
-        # real directory, so an already-aliased path can be re-aliased to
-        # another class (a BMI-only variant re-targets the provider's spelling).
-        self._alias_root_real: T.Dict[str, str] = {}
-        # Whether this build tree can make directory links at all, decided once
-        # (a canary link) so every target agrees: two same-class targets that
-        # disagreed would compute two names for one BMI. None until probed.
-        self._aliasing_available: T.Optional[bool] = None
         # The command line each GCC starts the mapper server with.
         self._gcc_mapper_commands: T.Dict[T.Tuple[T.Any, ...], T.List[str]] = {}
         # Where the compiler resolves a header unit to, memoised: the probe
         # spawns the compiler, and a unit is declared by many targets. The
         # value is (resolved path or None, whether the compiler exited clean).
         self._probed_header_units: T.Dict[T.Tuple[T.Any, ...], T.Tuple[T.Optional[str], bool]] = {}
-        # The compiler's built-in system include chain, in search order: a GCC
-        # system-mode header unit is named through this chain, so aliasing it
-        # renames the unit per class. Keyed by (for_machine, id, exelist,
-        # arglist) because args that reshape the chain (--sysroot et al.) are
-        # BMI-relevant and so drive distinct classes that must each alias their
-        # own chain; the arglist is the whole key rather than a hand-picked
-        # subset (see _gcc_include_chain).
-        self._gcc_include_chains: T.Dict[T.Tuple[T.Any, ...], T.List[str]] = {}
-        # Machines whose system-unit chain aliasing has already reported a
-        # degradation, so the warning that a chain-alias root could not be
-        # placed fires once per (machine, compiler) rather than per declarer.
-        self._warned_system_chain_alias: T.Set[T.Tuple[T.Any, ...]] = set()
         # Header units: global dedup of unit build edges, keyed by
         # (mode, resolved header identity) -- plus the declarer's BMI class where
         # the compiler builds units per class -> the edge output (the real BMI on
@@ -730,14 +665,12 @@ class NinjaBackend(backends.Backend):
         # distinct BMIs; a unit with no identity to resolve -- a system header, or
         # a user one off the -I path -- falls back to its spelling, where that
         # spelling is the only axis a same-name collision could split on anyway.
-        # Plus per-target caches of those outputs
-        # (ordered before the target's scans/compiles), of the flags MSVC and
-        # clang compiles need to name each unit's BMI, and of the (resolved name,
-        # BMI) pairs a GCC target's mapper lines are written from.
+        # Plus per-target caches of those outputs (ordered before the target's
+        # scans/compiles) and of the flags MSVC and clang compiles need to name
+        # each unit's BMI.
         self._header_units: T.Dict[str, str] = {}
         self._target_header_unit_outputs: T.Dict[str, T.List[str]] = {}
         self._target_header_unit_consumer_args: T.Dict[str, T.List[str]] = {}
-        self._target_header_unit_bmis: T.Dict[str, T.List[T.Tuple[str, str]]] = {}
         # Per-target header units inherited from the module providers it links,
         # grouped by provider (cl only -- see _imported_header_units).
         self._target_imported_header_units: T.Dict[str, T.List[T.Tuple[build.BuildTarget, T.List[str]]]] = {}
@@ -745,22 +678,15 @@ class NinjaBackend(backends.Backend):
         # generator) of the target writes, so a unit exporting a generated
         # header can order behind the edge that produces it.
         self._target_generated_outputs: T.Dict[str, T.List[str]] = {}
-        # (mode, resolved file) -> the spelling of it that builds the BMI, so
-        # declared spellings of one file share it; and the alias spellings'
-        # default-named paths already linked to a group's BMI.
+        # (mode, resolved file) -> the spelling of it that builds the BMI on
+        # cl and clang, so declared spellings of one file share it.
         self._header_unit_group: T.Dict[T.Tuple[str, str], str] = {}
-        self._header_unit_alias_links: T.Dict[str, str] = {}
         # BMI class registry, frozen by _compute_bmi_class_registry before any
         # target is generated; only populated for compilers that
         # supports_bmi_classes(). Variants are memoized per (provider id,
         # class key); provider interface-unit sources are recorded during the
         # provider's own compile generation.
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
-        # Set by _compute_bmi_class_registry: true only when the frozen registry
-        # can respell some target's cached compile args (a spaced multi-class GCC
-        # header-unit target), which is the sole reason to drop the pre-freeze
-        # compile-arg caches.
-        self._post_freeze_respell_possible = False
         self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
         self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
         # Normalized declared-source paths per (target id, module kwarg). The
@@ -922,27 +848,9 @@ class NinjaBackend(backends.Backend):
                         captured_compile_args_per_target[target.get_id()] = self.generate_common_compile_args_per_src_type(target)
 
             self._compute_bmi_class_registry()
-            # Freezing the registry itself calls _generate_single_compile, which
-            # caches each target's compile args -- but a spaced multi-class GCC
-            # header-unit target respells those through its BMI-class root, a
-            # class the registry only knows once frozen. Only then can a cached
-            # arg differ post-freeze, so drop the pre-freeze cache only in that
-            # case (_post_freeze_respell_possible); otherwise the args are
-            # unchanged and the recompute would be pure waste.
-            if self._post_freeze_respell_possible:
-                self._generate_single_compile_target_args.cache_clear()
-                # _bmi_class_key_of derives its answer from those same args, so
-                # any key memoized before the freeze is stale for the same
-                # reason -- gate it identically.
-                self._bmi_class_key_of.cache_clear()
             for t in ProgressBar(self.build.get_targets().values(), desc='Generating targets'):
                 self.generate_target(t)
             mlog.log_timestamp("Targets generated")
-            # Every alias root this generation needs has now been placed or
-            # adopted (targets no longer generating means _alias_root_real is
-            # complete), so any stale one a prior configure left behind can be
-            # told apart from a live one and swept.
-            self._prune_stale_dir_aliases()
             self.add_build_comment(NinjaComment('Test rules'))
             self.generate_tests()
             mlog.log_timestamp("Tests generated")
@@ -1959,13 +1867,10 @@ class NinjaBackend(backends.Backend):
         declared header units are passed so the collator can flag an import of
         one this target never declared (cl reports header-unit requires from a
         cold scan; GCC cannot, so it is omitted there). A GCC target's collate
-        also writes the per-TU module mappers (--mapper-suffix, in lockstep
-        with the compile edges' get_module_mapper_args paths) its BMI lookups
-        go through. A mapper disables GCC's default module->CMI naming
-        outright, so it must also name every header unit the TU imports: the one
-        the compile computes a name for that differs from the scan's, paired
-        outright (--header-unit-bmi), and the scan-reported names by reproducing
-        the default naming under the shared cache (--default-cmi-root).
+        also writes the per-TU tables (--mapper-suffix, in lockstep with the
+        compile edges' --table paths) the mapper server answers its BMI lookups
+        from, header units included, found by real path in the target's units
+        manifest (--header-unit-manifest).
 
         --private-map (this target's own private module names) is always
         passed; --private-bmi-dir/--private-interface-object/--all-provides-private
@@ -2016,14 +1921,13 @@ class NinjaBackend(backends.Backend):
             interface_sources = sorted(self._module_interface_paths(target)
                                        | self._internal_partition_paths(target)
                                        | self._private_module_interface_paths(target))
-        header_unit_bmis: T.List[T.Tuple[str, str]] = []
         if family == 'gcc':
+            # Writes the units manifest the collate reads.
             self.provision_header_units(target, cpp)
-            header_unit_bmis = self._target_header_unit_bmis.get(target.get_id(), [])
         return self._collate_depargs(
             cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
             harvests=harvests, interface_sources=interface_sources,
-            header_unit_bmis=header_unit_bmis, header_units=target.cpp_header_units,
+            header_units=target.cpp_header_units,
             units_manifest=self._gcc_units_manifest(
                 cpp, target, self._gcc_target_bmi_class_tag(target, cpp))
             if family == 'gcc' else None)
@@ -2032,7 +1936,6 @@ class NinjaBackend(backends.Backend):
                          dep_provmaps: T.List[str],
                          dep_private_maps: T.List[T.Tuple[str, str, str]],
                          harvests: bool, interface_sources: T.List[str],
-                         header_unit_bmis: T.List[T.Tuple[str, str]],
                          header_units: T.List[str],
                          units_manifest: T.Optional[str] = None) -> T.List[str]:
         """Assemble the collator flags shared by a target's own collate and a
@@ -2058,8 +1961,7 @@ class NinjaBackend(backends.Backend):
             # header unit it imports, keyed by real path as found in the
             # (target, BMI class) manifest the server reads for scans.
             assert units_manifest is not None
-            depargs += ['--mapper-suffix', '.mapper.json', '--mapper-format', 'json',
-                        '--header-unit-manifest', units_manifest]
+            depargs += ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', units_manifest]
             if not cpp.program_mapper_quotes():
                 depargs += ['--hashed-table-dir', GCC_HASHED_TABLE_DIR]
         for p in interface_sources:
@@ -2071,23 +1973,6 @@ class NinjaBackend(backends.Backend):
             for hu in header_units:
                 mode, spelling = self._parse_header_unit(hu)
                 depargs += ['--header-unit', f'{mode}:{spelling}']
-        return depargs
-
-    def _header_unit_bmi_args(self, cpp: Compiler,
-                              bmis: T.List[T.Tuple[str, str]]) -> T.List[str]:
-        # The compile-computed name of each unit paired with its BMI. A pair
-        # whose name is the BMI's own stem is dropped: --default-cmi-root already
-        # reconstructs it, so the pair would be redundant (which covers a whole
-        # spaced or single-class build, where the scan and compile names
-        # coincide with the stem). What survives is a BMI sitting at a name
-        # other than its own -- a real-spelling compile whose BMI stands at the
-        # scan's alias-named path -- so the collate learns that name too.
-        cache_dir = cpp.get_module_cache_dir()
-        suffix = cpp.get_module_bmi_suffix()
-        depargs: T.List[str] = []
-        for name, bmi in bmis:
-            if bmi != default_cmi_path(name, cache_dir, suffix):
-                depargs += ['--header-unit-bmi', name, bmi]
         return depargs
 
     def _module_provmap_for(self, consumer: build.BuildTarget,
@@ -2165,9 +2050,8 @@ class NinjaBackend(backends.Backend):
         # same pre-module args as a target's own units. `args` keeps growing
         # below, so the unit edges get their own copy.
         hu_outputs, hu_args, hu_bmis = self._provision_class_header_units(
-            cpp, provider, args.copy(), class_key,
-            self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key),
-            vid, None)
+            cpp, provider, args.copy(),
+            self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key))
         # A GCC variant's edges ask the mapper server for its own class.
         variant_tag = self._gcc_bmi_class_tag(info.subdir)
         variant_units: T.Optional[str] = None
@@ -2264,7 +2148,7 @@ class NinjaBackend(backends.Backend):
             cpp, head, dep_provmaps=dep_provmaps, dep_private_maps=dep_private_maps,
             harvests=True,
             interface_sources=[os.path.normpath(rec.rel_src) for rec in recs],
-            header_unit_bmis=hu_bmis, header_units=provider.cpp_header_units,
+            header_units=provider.cpp_header_units,
             units_manifest=variant_units)
         self._add_module_collate_edge(
             cpp, [variant.dyndep, variant.provmap], ddis,
@@ -2294,442 +2178,6 @@ class NinjaBackend(backends.Backend):
                 'contents of imported BMIs), so Meson makes it fall back to the real '
                 'compiler for them; module-enabled sources will not benefit from ccache.',
                 once=True, fatal=False)
-
-    @staticmethod
-    def _render_bmi_divergence(name_a: str, key_a: T.Tuple[str, ...],
-                               name_b: str, key_b: T.Tuple[str, ...]) -> str:
-        """The "<flags> only in <target>" clauses of the header-unit divergence
-        warning."""
-        adiff = sorted((Counter(key_a) - Counter(key_b)).keys())
-        bdiff = sorted((Counter(key_b) - Counter(key_a)).keys())
-        parts = [', '.join(repr(f) for f in diff) + f' only in {n!r}'
-                 for diff, n in ((adiff, name_a), (bdiff, name_b)) if diff]
-        return '; '.join(parts) + '.'
-
-    # What GCC records as a CMI's dialect and refuses to read it back under, cut
-    # down to the flags a Meson option sets (cpp_std, cpp_eh, cpp_rtti). Its full
-    # set is wider and moves between releases; a flag reaching it through raw
-    # cpp_args is left to GCC's own scan error.
-    _GCC_DIALECT_FLAGS = frozenset({'-fno-exceptions', '-fno-rtti'})
-
-    @classmethod
-    def _dialect_of(cls, class_key: T.Tuple[str, ...]) -> T.Tuple[str, ...]:
-        return tuple(sorted(f for f in class_key
-                            if f.startswith('-std=') or f in cls._GCC_DIALECT_FLAGS))
-
-    def warn_on_header_unit_divergence(self, target: build.BuildTarget,
-                                       class_key: T.Tuple[str, ...],
-                                       unit_key: str, spelling: str) -> None:
-        """Warn when targets declaring one header unit disagree on the dialect,
-        or on the machine, once per (unit, consumer).
-
-        Reached only on the degraded path: the build tree cannot make the
-        directory links a per-class unit is named through (machine-wide), or a
-        system unit resolves through neither its aliased chain nor a reclassed
-        -I and lands on its real path (per unit; see the fall-through in
-        _provision_header_unit_edges). There
-        a scan can only reach the unit at its one default-named path, whichever
-        class built it, and GCC rejects a CMI whose dialect differs from the
-        reader's. Two machines sharing that one flat path is the same hazard on
-        another axis: the build-machine and host-machine compilers write
-        incompatible BMIs to it. A user or system unit earns a BMI per class and
-        per machine otherwise -- named through its class's include-path or
-        built-in-chain aliases -- and never arrives here. Warned about because
-        GCC's own error names a CMI path and a language level, not the two
-        targets that disagree.
-        """
-        owner_key, owner_name, owner_machine = self._header_unit_class[unit_key]
-        machine_split = target.for_machine != owner_machine
-        if not machine_split and self._dialect_of(class_key) == self._dialect_of(owner_key):
-            return
-        pair = (unit_key, target.get_id())
-        if pair in self._warned_header_unit_divergence:
-            return
-        self._warned_header_unit_divergence.add(pair)
-        if machine_split:
-            mlog.warning(
-                f'Targets {target.name!r} and {owner_name!r} import the same C++ '
-                f'header unit {spelling!r} but build for different machines '
-                f'({target.for_machine.get_lower_case_name()} and '
-                f'{owner_machine.get_lower_case_name()}); on this degraded path '
-                'they share one default-named header unit BMI, which the '
-                'build-machine and host-machine compilers write incompatibly, so '
-                'this build will fail when it scans. Declare the unit in only one '
-                "machine's targets, or give the tree the directory links a "
-                'per-machine unit is named through.')
-            return
-        mlog.warning(
-            f'Targets {target.name!r} and {owner_name!r} import the same C++ '
-            f'header unit {spelling!r} but compile with divergent dialects: '
-            + self._render_bmi_divergence(target.name, self._dialect_of(class_key),
-                                          owner_name, self._dialect_of(owner_key))
-            + ' GCC records the dialect in the header unit and rejects it under '
-            'any other, so this build will fail when it scans. Give the targets '
-            'the same cpp_std, cpp_eh and cpp_rtti, or stop sharing the unit '
-            'between them.')
-
-    @staticmethod
-    def _has_space(s: str) -> bool:
-        return any(c.isspace() for c in s)
-
-    @staticmethod
-    def _read_dir_link(abs_alias: str) -> T.Optional[str]:
-        """The target a directory link points at, or None if it is not a link.
-
-        os.readlink reads a POSIX symlink and, on Python >= 3.8, a Windows
-        directory symlink or junction; it raises OSError on a real directory or
-        a missing path. A junction's target comes back with a '\\\\?\\'
-        extended-length prefix, which is stripped so the value compares equal to
-        the plain target it was made from.
-        """
-        try:
-            target = os.readlink(abs_alias)
-        except OSError:
-            return None
-        prefix = '\\\\?\\'
-        if mesonlib.is_windows() and target.startswith(prefix):
-            target = target[len(prefix):]
-        return target
-
-    @staticmethod
-    def _same_dir(a: str, b: str) -> bool:
-        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
-
-    @staticmethod
-    def _remove_dir_link(abs_alias: str) -> None:
-        # A Windows directory symlink and a junction are both reparse-point
-        # directories, removed with rmdir; a POSIX symlink is removed with
-        # unlink.
-        if mesonlib.is_windows():
-            os.rmdir(abs_alias)
-        else:
-            os.unlink(abs_alias)
-
-    @staticmethod
-    def _make_dir_link(target: str, link: str) -> bool:
-        """Create a directory link at *link* pointing at *target*. Never raises;
-        returns whether a link now exists.
-
-        POSIX makes a symlink. Windows tries a directory symlink first -- it
-        needs privilege or Developer Mode but is the only form that reaches a
-        target on a network share -- then falls back to an NTFS junction, which
-        any user can make on a local volume. A platform that can do neither
-        (FAT/exFAT, or a junction target off the local volume) leaves the header
-        unit unnameable, and check_header_unit_names reports it.
-        """
-        if not mesonlib.is_windows():
-            try:
-                os.symlink(target, link)
-                return True
-            except (OSError, NotImplementedError):
-                return False
-        try:
-            os.symlink(target, link, target_is_directory=True)
-            return True
-        except OSError:
-            pass
-        try:
-            from _winapi import CreateJunction
-        except ImportError:
-            return False
-        try:
-            CreateJunction(target, link)
-            return True
-        except OSError:
-            return False
-
-    @staticmethod
-    def _alias_root_prefix() -> str:
-        """The alias-root directory with its trailing separator: the prefix
-        every alias spelling begins with, and the string a recognizer slices
-        off to recover the tail an aliased directory preserves."""
-        return HEADER_UNIT_ALIAS_ROOT + '/'
-
-    @staticmethod
-    def _is_alias_spelling(s: str) -> bool:
-        """Whether `s` names, or descends from, a header-unit alias root --
-        separator-insensitively, so a backslashed Windows spelling matches too.
-        A mapper key carries the alias root partway through its text (after a
-        './' or an include-flag prefix), so this is a substring test, not an
-        anchored one."""
-        return NinjaBackend._alias_root_prefix() in s.replace('\\', '/')
-
-    @staticmethod
-    def _base36(n: int) -> str:
-        """`n` (>= 0) rendered in lowercase base36 (0-9a-z), with no leading
-        zeros beyond a bare '0'. Lowercase is mandatory: a case-insensitive
-        filesystem (Windows, the default macOS one) folds two mixed-case
-        spellings together, so an uppercase digit would let two distinct digests
-        collapse onto one link and silently misname every unit under one of
-        them."""
-        if n == 0:
-            return '0'
-        digits = '0123456789abcdefghijklmnopqrstuvwxyz'
-        out: T.List[str] = []
-        while n:
-            n, r = divmod(n, 36)
-            out.append(digits[r])
-        return ''.join(reversed(out))
-
-    @staticmethod
-    def _alias_root_digest(real_dir: str, class_tag: T.Optional[str]) -> str:
-        """The full base36 digest an alias-root spelling truncates.
-
-        The None keying hashes the directory alone -- its path is the whole
-        identity. A class tag folds in so one directory yields a distinct root
-        per class; the NUL separator keeps two (tag, dir) splits from colliding
-        on their concatenation.
-
-        The sha256 is re-based from hex into base36 so the spelling spends fewer
-        characters per bit of digest -- a shorter alias survives GCC's
-        shorter-of-two canonicalization more often (see HEADER_UNIT_ALIAS_ROOT).
-        Left-zero-padded so the full string is always at least as long as the
-        base length a truncation slices, keeping the base-length prefix
-        well defined for any input; a 256-bit hash is at most 50 base36 digits.
-        """
-        if class_tag is None:
-            h = hashlib.sha256(real_dir.encode()).hexdigest()
-        else:
-            h = hashlib.sha256((class_tag + '\0' + real_dir).encode()).hexdigest()
-        return NinjaBackend._base36(int(h, 16)).rjust(HEADER_UNIT_ALIAS_DIGEST_LEN, '0')
-
-    def _dir_alias_root(self, real_dir: str,
-                        class_tag: T.Optional[str] = None) -> T.Optional[str]:
-        """A build-relative alias root for a directory, reached through a link
-        that does not move the files under it, or None when the platform cannot
-        express one (the caller then falls back to check_header_unit_names).
-
-        GCC names a header unit by the *text* of the path it was resolved
-        through, and does not resolve the link in that text, so routing an
-        include path through an alias root renames every unit under it without
-        moving a header. This serves two unrelated needs:
-
-        - class_tag is None: a space-free spelling of a spaced directory. A
-          module mapper cannot quote whitespace, so a unit under a spaced path
-          is otherwise unnameable.
-        - class_tag is a BMI-class digest: a per-class name for a unit, so that
-          each BMI class reaches a header through its own root and so earns its
-          own default-named CMI.
-
-        The root is a pure function of (real_dir, class_tag): two classes over
-        one directory get two roots, and one class across reconfigures gets the
-        same root -- *unless* two roots collide on their truncated digest (see
-        below). The link is a symlink on POSIX; on Windows a directory symlink
-        where the build has the privilege for it, else an NTFS junction (see
-        _make_dir_link).
-
-        The spelling truncates a base36 sha256 to HEADER_UNIT_ALIAS_DIGEST_LEN
-        digits, so two distinct (dir, tag) inputs colliding there is
-        astronomically unlikely -- but not impossible, and two roots sharing a
-        spelling would be two names for one link, silently misnaming every unit
-        under one of them. Guard it: allocation is first-come-wins, so on a
-        collision with a root this run already placed for a *different* real
-        directory, the newcomer lengthens its own digest one base36 digit at a
-        time until it separates while the incumbent's link stands. That makes a
-        collided root's length depend on which directory this generation
-        happened to allocate first -- it is order-dependent by construction, not
-        order-independent. On real inputs nothing collides at the base length,
-        so the loop runs once and the spelling is exactly the base-length root.
-        """
-        try:
-            return self._dir_aliases[(real_dir, class_tag)]
-        except KeyError:
-            pass
-        full = self._alias_root_digest(real_dir, class_tag)
-        # Start at the base length and lengthen only on a genuine in-run
-        # collision. The cap is the full digest: reaching it would mean two
-        # directories share an entire sha256, which does not happen, so the
-        # fall-through past the loop is unreachable in practice and degrades to
-        # no alias rather than misnaming.
-        for length in range(HEADER_UNIT_ALIAS_DIGEST_LEN, len(full) + 1):
-            try:
-                return self._place_dir_alias(
-                    real_dir, class_tag,
-                    f'{self._alias_root_prefix()}{full[:length]}')
-            except _AliasRootCollision:
-                continue
-        self._dir_aliases[(real_dir, class_tag)] = None
-        return None
-
-    def _place_dir_alias(self, real_dir: str, class_tag: T.Optional[str],
-                         rel: str) -> T.Optional[str]:
-        # The shared half of the alias-root makers: create (or adopt) the link
-        # at `rel` and register it both ways, so idempotency and re-classing
-        # behave the same whichever spelling the root uses.
-        #
-        # `rel` may already be a root this run placed, and the meaning splits on
-        # which directory it stands for:
-        #  - the SAME real directory (a different class tag whose digest happened
-        #    to truncate here): a hit -- the link is already right, adopt it.
-        #  - a DIFFERENT real directory: an in-run digest collision. Report it so
-        #    the caller lengthens the newcomer's digest; the incumbent's link,
-        #    already emitted into that root's args, must not move.
-        # A `rel` NOT in the in-run registry but present on disk as a link is a
-        # stale root from a prior run (a moved source dir, a dropped class): it
-        # is remove-and-replaced below, exactly as before.
-        incumbent = self._alias_root_real.get(rel.replace('\\', '/'))
-        if incumbent is not None:
-            if self._same_dir(incumbent, real_dir):
-                self._dir_aliases[(real_dir, class_tag)] = rel
-                return rel
-            raise _AliasRootCollision
-        alias: T.Optional[str] = None
-        abs_alias = os.path.join(self.environment.get_build_dir(), rel)
-        try:
-            os.makedirs(os.path.dirname(abs_alias), exist_ok=True)
-            # Idempotent: regeneration must land on the same link, and a stale
-            # one (source dir moved) must be replaced, not kept.
-            existing = self._read_dir_link(abs_alias)
-            if existing is not None and self._same_dir(existing, real_dir):
-                alias = rel
-            else:
-                if existing is not None:
-                    self._remove_dir_link(abs_alias)
-                if self._make_dir_link(real_dir, abs_alias):
-                    alias = rel
-        except OSError:
-            mlog.debug(f'Could not create an alias root for {real_dir!r}.')
-        self._dir_aliases[(real_dir, class_tag)] = alias
-        if alias is not None:
-            self._alias_root_real[alias.replace('\\', '/')] = real_dir
-        return alias
-
-    def _prune_stale_dir_aliases(self) -> None:
-        """Remove alias-root entries this generation did not (re)place.
-
-        A root is a pure function of (real dir, class tag): a reconfigure that
-        drops a divergence, or renames a class by changing a BMI-affecting
-        option, computes a different set of roots than the one on disk from
-        the run before. The orphaned entries are harmless sitting there -- a
-        dangling or still-valid link a few bytes each -- but nothing else ever
-        reclaims them, so left alone they accumulate across every reconfigure.
-        `_alias_root_real` names exactly the roots this run placed or adopted
-        (registered through `_place_dir_alias`), so anything else under the
-        root directory that is itself a directory link is stale and goes; a
-        plain directory or file is never touched.
-
-        Run once, after every target has been generated, so this reads the
-        finished registry rather than a partial one target order could
-        change. A depfile from an earlier build may still name a path this
-        prunes, but pruning only ever follows a changed class set, and a
-        changed class set respells the affected scans' `-I` entries (and,
-        for a user unit, its source) the same way -- their command line is
-        therefore different too, so ninja reruns those scans regardless of
-        whether the old depfile path still resolves; a missing path there
-        only makes that happen sooner, never later.
-        """
-        build_dir = self.environment.get_build_dir()
-        live = set(self._alias_root_real.keys())
-        root = HEADER_UNIT_ALIAS_ROOT
-        abs_root = os.path.join(build_dir, root)
-        try:
-            names = os.listdir(abs_root)
-        except OSError:
-            # No current root to scan (a build that placed none, or one first
-            # laid out before the root existed): nothing to prune here, but a
-            # legacy root from an older spelling may still need reclaiming.
-            names = []
-        for name in names:
-            if name == '.canary':
-                # Only ever a transient probe of _header_unit_aliasing_available,
-                # never a registered root, but also never stale-scannable.
-                continue
-            rel = f'{root}/{name}'
-            if rel in live:
-                continue
-            abs_entry = os.path.join(abs_root, name)
-            if self._read_dir_link(abs_entry) is None:
-                continue
-            self._remove_dir_link(abs_entry)
-        self._reclaim_legacy_alias_root()
-
-    def _reclaim_legacy_alias_root(self) -> None:
-        """One-time migration off the previous alias-root spelling.
-
-        The root was once meson-private/imap, before HEADER_UNIT_ALIAS_ROOT was
-        shortened. A reconfigure of a build first laid out by an older Meson
-        leaves that directory and the links under it orphaned: nothing this run
-        places names them, so the prune above -- which only ever scans the
-        current root -- never reaches them. Reclaim them here with the same
-        conservatism as that prune: remove only the directory links under the
-        legacy root (a symlink or junction, never a plain file or a real
-        directory), then the legacy directory itself once emptying the links
-        leaves it empty. A surviving non-link entry keeps the directory, and is
-        never touched.
-        """
-        legacy = 'meson-private/imap'
-        abs_legacy = os.path.join(self.environment.get_build_dir(), legacy)
-        try:
-            names = os.listdir(abs_legacy)
-        except OSError:
-            return
-        for name in names:
-            abs_entry = os.path.join(abs_legacy, name)
-            if self._read_dir_link(abs_entry) is None:
-                continue
-            self._remove_dir_link(abs_entry)
-        # Only if removing the links emptied it: a plain file or directory left
-        # under the legacy root (or a leftover canary) keeps it, and rmdir on a
-        # non-empty directory raises, which is exactly the conservative outcome.
-        try:
-            os.rmdir(abs_legacy)
-        except OSError:
-            pass
-
-    def _respell_dir(self, d: str, class_tag: T.Optional[str] = None,
-                     force_all: bool = False) -> T.Optional[str]:
-        """A respelled build-relative directory, reached through an alias root.
-
-        A directory under the source tree is respelled by substituting the
-        source root's alias for its prefix, keeping the tail intact. That
-        textual substitution is the whole point: a unit declared as
-        'foo/../hdr.h' and an importer in foo/ must produce the same key, which
-        they only do while they share one alias prefix. Aliasing each directory
-        separately would give the importer 'foo_alias/../hdr.h' and the unit
-        'root_alias/foo/../hdr.h' -- two names for one BMI, and neither finds
-        the other's.
-
-        Two callers with different needs: a space-free spelling of a spaced
-        directory (the default), and a per-class spelling that embeds the BMI
-        class in every unit name reached through the directory (force_all,
-        which respells even a space-free directory since the class part must
-        ride regardless of whitespace).
-        """
-        # Already an alias root: respelling it again would alias a symlink and
-        # (outside the source tree) collapse the tail. The first pass is
-        # authoritative, so a compile respelled through the class root and its
-        # scan respelled again land on one spelling.
-        if d.replace('\\', '/').startswith(self._alias_root_prefix()):
-            return d
-        if not force_all and not self._has_space(d):
-            return d
-        root = self.build_to_src
-        # Separator-insensitive: build_to_src and d are OS-joined (backslash on
-        # Windows), so a literal '/' prefix check would never match a
-        # subdirectory there and each one would fall through to being aliased
-        # on its own -- exactly the two-names-for-one-BMI outcome above warns
-        # against.
-        if d == root or d.replace('\\', '/').startswith(root.replace('\\', '/') + '/'):
-            alias = self._dir_alias_root(self.environment.get_source_dir(), class_tag)
-            return None if alias is None else alias + d[len(root):]
-        # Outside the source tree (an absolute include dir, or a generated
-        # source under a spaced build subdirectory): nothing traverses out of
-        # it, so it needs no prefix preserved and can be aliased whole.
-        return self._dir_alias_root(
-            os.path.normpath(os.path.join(self.environment.get_build_dir(), d)),
-            class_tag)
-
-    def _respell_path(self, p: str, class_tag: T.Optional[str] = None,
-                      force_all: bool = False) -> T.Optional[str]:
-        # Only the directory matters: a quote-form import searches the
-        # includer's directory first, spelled as the source was spelled on the
-        # command line, so that is what lands in the key. A spaced basename is
-        # harmless -- it is never a mapper key.
-        head, tail = os.path.split(p)
-        if not head:
-            return p
-        alias = self._respell_dir(head, class_tag, force_all)
-        return None if alias is None else os.path.join(alias, tail)
 
     @staticmethod
     def _iter_include_args(inventory: T.Sequence[T.Tuple[str, T.Optional[int]]],
@@ -2802,53 +2250,6 @@ class NinjaBackend(backends.Backend):
                    in self._iter_include_args(inv, args)):
             return args
         return self._map_include_args(inv, args, lambda d: d.replace('\\', '/'))
-
-    def _respell_include_args(self, compiler: Compiler, args: T.List[str],
-                              class_tag: T.Optional[str] = None,
-                              force_all: bool = False) -> T.List[str]:
-        return self._map_include_args(
-            compiler.get_include_dir_flags(), args,
-            lambda d: self._respell_dir(d, class_tag, force_all) or d)
-
-    def _reclass_dir(self, d: str, new_tag: T.Optional[str]) -> str:
-        """A build-relative directory respelled through the alias root of
-        `new_tag`'s BMI class, whatever class it currently carries.
-
-        A directory not yet aliased is respelled outright (force_all, so a
-        space-free directory still picks up the class part). One already routed
-        through an alias root -- a BMI-only variant inherits the provider's
-        class-respelled include path -- is un-aliased back to its real
-        directory first (the inverse map), then re-aliased through the new
-        class's root, so the variant reaches its own class's unit BMI rather
-        than the provider's.
-        """
-        norm = d.replace('\\', '/')
-        prefix = self._alias_root_prefix()
-        if norm.startswith(prefix):
-            # The alias root is the single component after the prefix; the rest
-            # is the tail a source-tree alias preserves. Recover the real
-            # directory the root stands for and re-alias it through new_tag.
-            first = norm[len(prefix):].split('/', 1)[0]
-            rel = prefix + first
-            tail = d[len(rel):]
-            real_dir = self._alias_root_real.get(rel)
-            if real_dir is None:
-                return d
-            new_alias = self._dir_alias_root(real_dir, new_tag)
-            return d if new_alias is None else new_alias + tail
-        return self._respell_dir(d, new_tag, force_all=True) or d
-
-    def _reclass_path(self, p: str, new_tag: T.Optional[str]) -> str:
-        head, tail = os.path.split(p)
-        if not head:
-            return p
-        return os.path.join(self._reclass_dir(head, new_tag), tail)
-
-    def _reclass_include_args(self, compiler: Compiler, args: T.List[str],
-                              new_tag: T.Optional[str]) -> T.List[str]:
-        return self._map_include_args(
-            compiler.get_include_dir_flags(), args,
-            lambda d: self._reclass_dir(d, new_tag))
 
     def _gcc_mapper_command(self, compiler: Compiler) -> T.List[str]:
         # Memoised: a GCC that cannot quote looks Meson up on PATH.
@@ -2935,73 +2336,6 @@ class NinjaBackend(backends.Backend):
         with open(full, 'w', encoding='utf-8') as f:
             f.write(content)
 
-    def _header_unit_aliasing_available(self) -> bool:
-        """Whether this build tree can make the directory links a per-class GCC
-        header unit is named through, decided once for the whole build.
-
-        Degrade the whole machine, not one target: two same-class targets that
-        disagreed on whether they alias would compute two names for one BMI. A
-        FAT/exFAT tree, or a Windows junction target off the volume, cannot
-        express a link, and then the class fork falls back to the shared-flat
-        naming plus the divergence warning.
-        """
-        if self._aliasing_available is None:
-            rel = f'{self._alias_root_prefix()}.canary'
-            abs_canary = os.path.join(self.environment.get_build_dir(), rel)
-            try:
-                os.makedirs(os.path.dirname(abs_canary), exist_ok=True)
-                if self._read_dir_link(abs_canary) is not None:
-                    self._remove_dir_link(abs_canary)
-                ok = self._make_dir_link(self.environment.get_build_dir(), abs_canary)
-                if ok:
-                    self._remove_dir_link(abs_canary)
-                self._aliasing_available = ok
-            except OSError:
-                self._aliasing_available = False
-        return self._aliasing_available
-
-    def _header_unit_spelling(self, hu: str,
-                              compiler: Compiler,
-                              class_tag: T.Optional[str] = None,
-                              force_all: bool = False) -> T.Tuple[str, str]:
-        """(mode, spelling) of a declared header unit as the edges spell it.
-
-        A spaced spelling is respelled on GCC through the same alias its
-        importers resolve through -- both sides must name the unit identically
-        or they name two different units.
-        """
-        mode, spelling = self._parse_header_unit(hu)
-        if compiler.cpp_module_family() == 'gcc' and (force_all or self._has_space(spelling)) \
-                and not self._gcc_program_mapper(compiler):
-            spelling = self._respell_path(spelling, class_tag, force_all) or spelling
-        return mode, spelling
-
-    def _compile_needs_space_free_respell(self, target: build.BuildTarget, compiler: Compiler) -> bool:
-        """Whether this target's compile include path and sources are respelled
-        through an alias root: only GCC module targets that declare header
-        units. A named module's mapper key is its module name, which cannot
-        contain whitespace, so nothing else needs it.
-
-        Only spaced entries actually move -- a mapper key cannot hold a space --
-        so a target with no spaced path is respelled to itself and keeps the
-        real spelling on its compile. The per-class scan respell is separate
-        (generate_cpp_module_scan): a non-spaced unit's class rides its scan
-        name, never its compile, so no alias reaches the CMI. A GCC asking a
-        mapper program needs none of it: the protocol quotes whitespace.
-        """
-        return (compiler.get_language() == 'cpp' and compiler.cpp_module_family() == 'gcc'
-                and bool(target.cpp_header_units)
-                and self.target_uses_p1689_cpp_modules(target)
-                and not self._gcc_program_mapper(compiler))
-
-    def _include_dirs_of(self, compiler: Compiler,
-                         args: T.Iterable[str]) -> T.List[str]:
-        # The include search path of a compile command, in command-line order,
-        # every include flag the compiler accepts (see get_include_dir_flags).
-        return [d for kind, _flag, d, _rank, _joined
-                in self._iter_include_args(compiler.get_include_dir_flags(), args)
-                if kind == 'inc' and d is not None]
-
     @staticmethod
     def _without_forced_includes(args: T.Iterable[str]) -> T.List[str]:
         """A compile command with its forced includes (-include, -imacros) and
@@ -3031,15 +2365,16 @@ class NinjaBackend(backends.Backend):
                 out.append(arg)
         return out
 
-    def _header_unit_mapper_key(self, compiler: Compiler,
-                                args: T.Union['CompilerArgs', T.List[str]],
-                                spelling: str,
-                                generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
-        """The path a GCC module mapper would have to name a header unit by:
-        the header as resolved on the include path, which is what an importer
-        looks the unit up as. None when the spelling resolves nowhere on this
-        target's -I path -- a system header out of the compiler's own search
-        path, whose location we would have to probe the compiler to learn.
+    def _header_unit_include_path(self, compiler: Compiler,
+                                  args: T.Union['CompilerArgs', T.List[str]],
+                                  spelling: str,
+                                  generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
+        """Which file a user header unit is, found by walking the target's own
+        include path for it: the -I entry joined with the spelling, relative
+        to the build directory unless the entry is absolute. None when the
+        spelling resolves nowhere on this target's -I path -- a header out of
+        the compiler's own search path, whose location we would have to probe
+        the compiler to learn.
 
         Directories are walked in the compiler's actual search order, not
         command-line order, so a first hit is the file the compiler would open:
@@ -3067,52 +2402,23 @@ class NinjaBackend(backends.Backend):
                 return os.path.join(d, spelling)
         return None
 
-    def _header_unit_gcc_name(self, compiler: Compiler,
-                              args: T.Union['CompilerArgs', T.List[str]],
-                              mode: str, spelling: str,
-                              generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
-        """The name GCC gives a header unit: the key an importer looks it up by,
-        and the stem of the CMI path it writes by default.
+    def _header_unit_file(self, compiler: Compiler,
+                          args: T.Union['CompilerArgs', T.List[str]],
+                          mode: str, spelling: str,
+                          generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
+        """Which file a declared header unit is, as a path relative to the
+        build directory or an absolute one; None when it resolves nowhere.
 
-        It is the header as the command line spells it -- './' plus the -I entry
-        plus the spelling, or the path outright when that entry (or, for a system
-        header, the compiler's own search path) is absolute. The text is kept as
-        found: '..' is not collapsed, so a header reached two ways has two names.
-        None when the header resolves nowhere.
-
-        The textual spelling is authoritative, with one exception: a user unit
-        reached through a space-free alias (a spaced source tree respelled) can
-        be defeated by GCC's shorter-of-two canonicalization -- GCC keeps the
-        shorter of the alias spelling and the header's real path, and where the
-        real path is shorter it names the unit by that (spaced) path, discarding
-        the alias the textual key reports. That the textual key cannot see, so
-        when an alias is in play the real name is probed and adopted only if it
-        proves GCC named the unit by a path holding whitespace. A winning alias
-        probes back space-free and the textual key stands unchanged; an
-        unaliased name never probes.
-
-        `generated` reaches the include walk (_header_unit_mapper_key) only.
+        A user unit is found by walking the target's own include path, which
+        asks no compiler; `generated` reaches that walk only. A system unit,
+        or a quote-form spelling falling through to the compiler's own search
+        path, can only be found by asking the compiler.
         """
-        key = self._header_unit_mapper_key(compiler, args, spelling, generated) if mode == 'user' else None
-        if key is None:
-            # Off the -I path: a system header, or a quote-form spelling falling
-            # through to the compiler's own search path.
-            key = self._probe_header_unit_path(compiler, args, mode, spelling)
-        elif self._is_alias_spelling(key):
-            probed = self._probe_header_unit_path(compiler, args, mode, spelling)
-            if probed is not None and self._has_space(probed):
-                key = probed
-        if key is None:
-            return None
-        is_abs = os.path.isabs(key)
-        key = key.replace('\\', '/')
-        if is_abs:
-            return key
-        # One './', even when the -I entry is '.': GCC names a hit in the build
-        # directory './hdr.h', not '././hdr.h'.
-        while key.startswith('./'):
-            key = key[2:]
-        return './' + key
+        found = self._header_unit_include_path(compiler, args, spelling, generated) \
+            if mode == 'user' else None
+        if found is None:
+            found = self._probe_header_unit_path(compiler, args, mode, spelling)
+        return found
 
     def _run_header_probe(self, compiler: Compiler, arglist: T.List[str],
                           mode: str, spelling: str) -> T.Tuple[T.Optional[str], bool]:
@@ -3168,163 +2474,6 @@ class NinjaBackend(backends.Backend):
             mlog.debug(f'Could not probe the path of header unit {spelling!r}.')
         return found
 
-    def _gcc_include_chain(self, compiler: Compiler,
-                           args: T.Union['CompilerArgs', T.List[str]]) -> T.List[str]:
-        """GCC's built-in ``#include <...>`` search chain, in order, probed and
-        memoised on the args that shape it.
-
-        A system-mode header unit is named through this chain, not through any
-        -I of ours, so aliasing the chain is what respells such a unit. Only the
-        compiler's own directories are wanted here: a target's own -I/-isystem
-        entries are respelled separately (_reclass_include_args), so any that
-        surface in the probe's ``<...>`` block are dropped, leaving a chain that
-        does not vary with a target's include flags. Non-existent entries GCC
-        lists but never opens are dropped too, as GCC itself skips them.
-
-        Keyed on the probe arglist itself -- the sole thing the chain is a
-        function of -- since args that reshape the built-in chain (--sysroot,
-        -nostdinc++, --gcc-toolchain, -B) are BMI-relevant and so name distinct
-        classes, each of which must alias its own chain. There is no owned
-        inventory of just those flags to key on without hand-listing (the trap),
-        so the whole arglist keys it: include and forced-include differences are
-        left in the key but made irrelevant to the value above, so they only
-        over-split into identical chains -- extra probe spawns at setup, never a
-        wrong reuse. (Include flags could be stripped from the key through
-        get_include_dir_flags to collapse that over-split, but a ~5ms probe is
-        not worth the added reasoning.)
-        """
-        arglist = self._without_forced_includes(args)
-        key = (compiler.for_machine, compiler.get_id(),
-               tuple(compiler.get_exelist()), tuple(arglist))
-        cached = self._gcc_include_chains.get(key)
-        if cached is not None:
-            return cached
-        cmd = compiler.get_exelist() + arglist + ['-E', '-v', '-x', 'c++', '-']
-        block: T.List[str] = []
-        try:
-            _, _, stderr = mesonlib.Popen_safe(cmd, write='\n',
-                                               cwd=self.environment.get_build_dir())
-        except OSError:
-            stderr = ''
-        collecting = False
-        for line in stderr.splitlines():
-            if line.startswith('#include <...> search starts here:'):
-                collecting = True
-            elif line.startswith('End of search list.'):
-                break
-            elif collecting and line.strip():
-                block.append(line.strip())
-        build_dir = self.environment.get_build_dir()
-        def real(d: str) -> str:
-            return os.path.normcase(os.path.realpath(os.path.join(build_dir, d)))
-        user = {real(d) for d in self._include_dirs_of(compiler, arglist)}
-        chain: T.List[str] = []
-        seen: T.Set[str] = set()
-        for d in block:
-            r = real(d)
-            if r in user or r in seen or not os.path.isdir(r):
-                continue
-            seen.add(r)
-            chain.append(d)
-        self._gcc_include_chains[key] = chain
-        return chain
-
-    def _gcc_system_chain_isystem_args(self, compiler: Compiler,
-                                       args: T.Union['CompilerArgs', T.List[str]],
-                                       class_tag: str) -> T.List[str]:
-        """`-isystem` aliases of GCC's whole built-in chain, in order, each
-        routed through `class_tag`'s alias root, led by
-        `-fno-canonical-system-headers`.
-
-        GCC names a system header unit by the search-path text it resolves
-        through, so aliasing the chain renames the unit per class. But the
-        compiler otherwise keeps the shorter of an include spelling and a
-        header's realpath, discarding an alias longer than the realpath (a
-        system realpath can be as short as /usr/include, undercutting any
-        meson-private spelling) and with it the per-class name;
-        -fno-canonical-system-headers turns that off. The flag and the aliases
-        it protects are therefore one unit -- every edge and probe that models
-        this resolution takes both or neither, or its mapper key would not
-        match what the edge asks for.
-
-        The flag rides here and nowhere else, and that is deliberate. Only the
-        scan edges (and the scan-name probes that mirror them) need a system
-        unit to resolve through the aliased chain, so only they compose their
-        args with this function's result. The compile and the header-unit-build
-        edges keep the real, unflagged chain on purpose: their __FILE__,
-        diagnostics and debug info must name the header's real path, not an
-        alias. The two sides do not drift because the scan name a unit is stored
-        under is itself probe-derived under these very args (see
-        _provision_header_unit_edges), while the compile name is probed under
-        the bare args -- one function feeds both, so turning the flag on for one
-        edge and off for the other is impossible without changing this seam. A
-        pinning test asserts the build edge is composed from the bare args, with
-        no chain arg on it.
-
-        GCC dedups include directories by identity, so an alias of a built-in
-        directory substitutes it at the built-in's own position -- search order
-        and include_next are preserved, only the text a resolved system header
-        carries changes. Aliasing a late entry alone would instead hoist it
-        ahead of the earlier chain, so it is the whole chain or, when any one
-        root cannot be placed, none of it: a partially aliased chain is a
-        reordered one, while an empty result just leaves the scan resolving
-        real names and every system unit degrading to the shared flat path.
-        """
-        chain = self._gcc_include_chain(compiler, args)
-        if not chain:
-            return []
-        build_dir = self.environment.get_build_dir()
-        real_dirs = [os.path.normpath(os.path.join(build_dir, d)) for d in chain]
-        if any(self._has_space(rd) for rd in real_dirs):
-            # The compile keeps the real chain, so a system unit under a spaced
-            # compiler prefix is named by that spaced path no matter how the
-            # scan is aliased -- and a spaced name cannot be a mapper key. The
-            # alias would only respell the scan while leaving the compile
-            # unnameable, so it is not placed: scan and compile both resolve the
-            # real spaced chain and meet at the one default-named (mapper-less)
-            # path, the same shared-flat degrade an unplaceable root yields.
-            # check_header_unit_names reports the unit as unmappable.
-            return []
-        out: T.List[str] = ['-fno-canonical-system-headers']
-        for rd in real_dirs:
-            alias = self._dir_alias_root(rd, class_tag)
-            if alias is None:
-                # A root under our own alias-root directory that could not be
-                # placed (a stray entry occupying its digest path) degrades
-                # system-unit naming to the shared flat path -- never a partial,
-                # reordered chain. The result is deterministic per directory, so
-                # every declarer agrees; said once per machine, since the
-                # shared-BMI consequence is otherwise silent until the
-                # divergence warning (or GCC's own scan error) fires.
-                key = (compiler.for_machine, compiler.get_id(),
-                       tuple(compiler.get_exelist()))
-                if key not in self._warned_system_chain_alias:
-                    self._warned_system_chain_alias.add(key)
-                    # The base-length spelling _dir_alias_root first tried for
-                    # this (rd, class_tag): built from the same digest and prefix
-                    # helpers so the named path is the one the code actually
-                    # attempts, and cannot drift from the scheme.
-                    digest = self._alias_root_digest(
-                        rd, class_tag)[:HEADER_UNIT_ALIAS_DIGEST_LEN]
-                    rel = f'{self._alias_root_prefix()}{digest}'
-                    mlog.warning(
-                        f'Cannot create the directory link '
-                        f'{os.path.join(build_dir, rel)!r} '
-                        'that per-class naming of C++ system header units routes '
-                        'through: the path is occupied, or its parent is not a '
-                        'directory. System header units on this machine degrade '
-                        'to one shared BMI per unit, so targets importing one '
-                        'under divergent dialects will conflict.')
-                return []
-            out += ['-isystem', alias]
-        return out
-
-    def _declares_system_header_unit(self, header_units: T.Sequence[str]) -> bool:
-        # Whether any declared unit is system-mode (import <h>;) -- the
-        # per-target trigger for aliasing the built-in chain on scan edges.
-        return any(self._parse_header_unit(hu)[0] == 'system'
-                   for hu in header_units)
-
     def check_header_unit_names(self, target: build.BuildTarget,
                                 args: T.Union['CompilerArgs', T.List[str]]) -> None:
         """Report the declared header units that resolve to no file.
@@ -3351,8 +2500,8 @@ class NinjaBackend(backends.Backend):
         compiler = target.compilers['cpp']
         generated = self._gcc_program_generated_headers(compiler, target)
         for hu in target.cpp_header_units:
-            mode, spelling = self._header_unit_spelling(hu, compiler)
-            if self._header_unit_gcc_name(compiler, args, mode, spelling, generated) is not None:
+            mode, spelling = self._parse_header_unit(hu)
+            if self._header_unit_file(compiler, args, mode, spelling, generated) is not None:
                 continue
             if mode == 'user':
                 raise MesonException(
@@ -3399,8 +2548,8 @@ class NinjaBackend(backends.Backend):
             return
         compiler = target.compilers['cpp']
         for hu in target.cpp_header_units:
-            mode, spelling = self._header_unit_spelling(hu, compiler)
-            if self._header_unit_gcc_name(compiler, args, mode, spelling) is None:
+            mode, spelling = self._parse_header_unit(hu)
+            if self._header_unit_file(compiler, args, mode, spelling) is None:
                 # Resolves nowhere even without the forced includes: a different
                 # complaint, and not this one's to make.
                 continue
@@ -3427,10 +2576,6 @@ class NinjaBackend(backends.Backend):
         Memoized: re-asked once per source on the ninja-gen hot path, and each
         answer rebuilds the target's whole compile-arg list to split and sort
         it. The key is frozen per target at generation time.
-
-        The memo is dropped alongside the compile-arg cache once
-        _compute_bmi_class_registry has run: this reads those args, so it
-        inherits the same staleness hazard they have across the freeze.
         """
         cpp = target.compilers['cpp']
         return cpp.get_bmi_class_key(self._generate_single_compile(target, cpp))
@@ -3452,21 +2597,15 @@ class NinjaBackend(backends.Backend):
         chosen dir cannot feed back into the key.
         """
         per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
-        needs_respell = False
         for t in self.build.get_targets().values():
             if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
                 continue
             cpp = t.compilers['cpp']
             if not cpp.supports_bmi_classes():
                 continue
-            needs_respell = needs_respell or self._compile_needs_space_free_respell(t, cpp)
             relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
         multi = sum(len(classes) for classes in per_machine.values()) > 1
-        # A target's cached compile args only differ across the freeze when the
-        # class subdir goes from None to a digest (multi) and that target is one
-        # whose include path and sources are respelled through the class root.
-        self._post_freeze_respell_possible = multi and needs_respell
         for machine, classes in per_machine.items():
             for key, relevant in classes.items():
                 subdir = hashlib.sha256(
@@ -5439,16 +4578,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             class_key = compiler.get_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
             if family == 'gcc':
-                # The only place a unit GCC cannot name is reported. The edges
-                # below just skip such a unit; what it means is decided here.
+                # The only place a unit that resolves nowhere is reported. The
+                # edges below just skip such a unit; what it means is decided
+                # here.
                 self.check_header_unit_names(target, args)
                 # Costs a probe only on a target that forces includes at all.
                 self.warn_on_preincluded_header_units(target, args)
             outputs, consumer_args, bmis = self._provision_class_header_units(
-                compiler, target, args, class_key, class_subdir, target.name, target)
+                compiler, target, args, class_subdir)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
-        self._target_header_unit_bmis[tid] = bmis
         if family == 'gcc':
             # Every module edge of the target asks the mapper server, which
             # reads this whether or not the target declares any units.
@@ -5458,10 +4597,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
     def _provision_class_header_units(self, compiler: Compiler, target: build.BuildTarget,
                                       args: T.Union['CompilerArgs', T.List[str]],
-                                      class_key: T.Tuple[str, ...],
-                                      class_subdir: T.Optional[str],
-                                      declarer: str,
-                                      warn_target: T.Optional[build.BuildTarget]
+                                      class_subdir: T.Optional[str]
                                       ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
         """Every header unit `target`'s TUs must be able to name, in one class:
         the units it declares itself, plus the ones it inherits by importing
@@ -5475,13 +4611,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         and the provider's variant compute one key and emit one edge, whichever
         of them the backend generates first. The provider is the owner too, so a
         unit exporting a header that target generates still orders behind its
-        generator. The (GCC name, BMI) pairs stay the target's own: they feed
-        GCC's mapper, and GCC inherits nothing here.
+        generator. The (real path, BMI) pairs stay the target's own: they feed
+        GCC's units manifest, and GCC inherits nothing here.
         """
         seen: T.List[T.List[str]] = []
         outputs, consumer_args, bmis = self._provision_header_unit_edges(
-            compiler, target.cpp_header_units, args, class_key, class_subdir,
-            declarer, warn_target, target, seen)
+            compiler, target.cpp_header_units, args, class_subdir, target, seen)
         relevant, _ = compiler.split_bmi_args(args)
         for provider, units in self._imported_header_units(target, compiler):
             _, irrelevant = compiler.split_bmi_args(
@@ -5497,8 +4632,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # class key is unchanged.
                 composed = self._gcc_module_forward_slash_includes(compiler, composed)
             prov_outputs, prov_args, _ = self._provision_header_unit_edges(
-                compiler, units, composed, class_key, class_subdir,
-                provider.name, None, provider, seen)
+                compiler, units, composed, class_subdir, provider, seen)
             outputs += [o for o in prov_outputs if o not in outputs]
             consumer_args += prov_args
         return outputs, consumer_args, bmis
@@ -5513,8 +4647,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         interface was built with. So a TU importing a module whose interface
         imports a header unit has to be handed that unit's BMI as well, or cl
         fails the import outright (C7612, "could not find header unit"). GCC
-        reaches the unit at its default-named CMI path and Clang records the
-        pcm's own path inside the importing pcm, so neither needs this -- and on
+        finds the unit through the mapper server, by real path, and Clang
+        records the pcm's own path inside the importing pcm, so neither needs this -- and on
         Clang it would be actively harmful, since a unit named for a target is
         loaded into every one of its TUs, which is what makes declaring a std
         header unit alongside `import std;` unusable there.
@@ -5525,7 +4659,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         cached = self._target_imported_header_units.get(tid)
         if cached is not None:
             return cached
-        seen = {self._header_unit_spelling(hu, compiler) for hu in target.cpp_header_units}
+        seen = {self._parse_header_unit(hu) for hu in target.cpp_header_units}
         groups: T.List[T.Tuple[build.BuildTarget, T.List[str]]] = []
         for t in sorted(self.get_all_linked_targets(target), key=lambda t: t.get_id()):
             if not isinstance(t, build.BuildTarget) or not t.cpp_header_units \
@@ -5534,7 +4668,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 continue
             units: T.List[str] = []
             for hu in t.cpp_header_units:
-                key = self._header_unit_spelling(hu, compiler)
+                key = self._parse_header_unit(hu)
                 if key not in seen:
                     seen.add(key)
                     units.append(hu)
@@ -5566,9 +4700,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         A HEADER_UNIT edge reads the header off disk at run time but names no
         input, so a build-time-generated header must be wired in as an
-        order-only dep or the edge can run before its generator does. GCC
-        reaches here for such a unit only when it asks a mapper program; with
-        mapper files it cannot name a header that does not exist at setup.
+        order-only dep or the edge can run before its generator does.
         """
         if owner is None:
             return []
@@ -5583,22 +4715,19 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
     def _provision_header_unit_edges(self, compiler: Compiler,
                                      header_units: T.List[str],
                                      args: T.Union['CompilerArgs', T.List[str]],
-                                     class_key: T.Tuple[str, ...],
                                      class_subdir: T.Optional[str],
-                                     declarer: str,
-                                     warn_target: T.Optional[build.BuildTarget],
-                                     owner: T.Optional[build.BuildTarget] = None,
+                                     owner: build.BuildTarget,
                                      seen_consumer_args: T.Optional[T.List[T.List[str]]] = None
                                      ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
         """The edge-emitting half of provision_header_units, also used by
-        BMI-only module variants to build their class's units (with no
-        warn_target: reuse there is same-class by construction). `owner` is the
+        BMI-only module variants to build their class's units. `owner` is the
         target whose generators may supply a declared header, used to order a
-        unit edge behind a build-time-generated header. `seen_consumer_args` lets
-        a caller that provisions one class's units in several calls -- a target's
-        own plus each imported provider's -- share the flag dedup across them.
-        Returns (unit outputs, per-unit consumer args, per-unit (GCC name, BMI)
-        pairs).
+        unit edge behind a build-time-generated header; on GCC it also names
+        the units manifest the unit edge asks the mapper server from.
+        `seen_consumer_args` lets a caller that provisions one class's units in
+        several calls -- a target's own plus each imported provider's -- share
+        the flag dedup across them. Returns (unit outputs, per-unit consumer
+        args, GCC's per-unit (real path, BMI) pairs).
         """
         if not header_units:
             return [], [], []
@@ -5608,31 +4737,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # projects declaring header units grow the rule.
             self.generate_cpp_header_unit_rule(compiler)
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
-        if self._gcc_program_mapper(compiler):
-            assert owner is not None, 'GCC header units are always provisioned for a target'
+        if family == 'gcc':
             unit_outputs, unit_bmis = self._provision_gcc_program_header_unit_edges(
                 compiler, header_units, args, class_subdir, owner, rulename)
             return unit_outputs, [], unit_bmis
         is_msvc = family == 'msvc'
-        is_gcc = family == 'gcc'
         suffix = compiler.get_module_bmi_suffix()
-        cache_dir = compiler.get_module_cache_dir()
         outputs: T.List[str] = []
         consumer_args: T.List[str] = []
         if seen_consumer_args is None:
             seen_consumer_args = []
-        bmis: T.List[T.Tuple[str, str]] = []
-        # The chain aliases the declarer's scan edges will carry, mirrored here
-        # so the scan names below are computed under the same include path the
-        # scan actually resolves through. Per declarer, not per unit: one scan
-        # resolves every system header through the aliased chain or none.
-        chain_args: T.List[str] = []
-        if is_gcc and class_subdir is not None \
-                and self._header_unit_aliasing_available() \
-                and self._declares_system_header_unit(header_units):
-            chain_args = self._gcc_system_chain_isystem_args(compiler, args, class_subdir)
         for hu in header_units:
-            mode, spelling = self._header_unit_spelling(hu, compiler)
+            mode, spelling = self._parse_header_unit(hu)
             # One BMI per file and, when classes are in play, per class; the
             # canonical spelling of the group builds it and the others are extra
             # names for it (see the provision_header_units docstring). Within a
@@ -5644,181 +4760,21 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             ident = self._header_unit_identity(compiler, args, mode, spelling)
             canon = self._canonical_header_unit(compiler, args, mode, spelling, ident)
             base = f'{mode}:{ident if ident is not None else canon}'
-            if is_gcc and mode == 'user' and class_subdir is not None \
-                    and self._header_unit_aliasing_available():
-                # The supported per-class path: every class aliases symmetrically,
-                # with no designated owner class. The scan resolves the unit
-                # under the class root (its name embeds the class, hence a
-                # class-specific default CMI path a mapper-less scan can read);
-                # the compile keeps its own spelling and a per-unit mapper writes
-                # the CMI to that scan-named path. On a non-spaced tree the two
-                # spellings differ and the CMI records the real path; on a spaced
-                # tree both are the space-free alias and coincide.
-                scan_args = self._reclass_include_args(compiler, list(args), class_subdir) + chain_args
-                scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
-                compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
-                if scan_name is None or compile_name is None:
-                    continue
-                if not self._has_space(compile_name):
-                    key = f'{base}:{class_subdir}'
-                    output = self._get_or_create_header_unit_edge(
-                        key, default_cmi_path(scan_name, cache_dir, suffix),
-                        compile_name, rulename, args, canon, mode, owner,
-                        is_msvc, is_gcc)
-                    outputs.append(output)
-                    # The pair carries the compile-computed name; the collate
-                    # joins every name of this BMI into each importer's mapper,
-                    # so a scan reporting the alias name and a compile asking the
-                    # real one both resolve. A pair whose name is the BMI's own
-                    # stem is redundant with --default-cmi-root reconstruction
-                    # and suppressed there.
-                    bmis.append((compile_name, output))
-                    if spelling != canon:
-                        # An extra declared spelling of the same file: one BMI,
-                        # an extra name for it. A scan through the alias reaches
-                        # the unit only at that spelling's own default path, so
-                        # link the BMI there; the compile resolves it through the
-                        # mapper.
-                        alias_scan = self._header_unit_gcc_name(compiler, scan_args, mode, spelling)
-                        alias_compile = self._header_unit_gcc_name(compiler, args, mode, spelling)
-                        if alias_scan is not None:
-                            link = self._alias_header_unit_link(alias_scan, output, cache_dir, suffix)
-                            if link not in outputs:
-                                outputs.append(link)
-                            # The compile resolves the alias spelling to the one
-                            # BMI through the mapper; the link only serves the
-                            # mapper-less scan. So the pair names that BMI, not
-                            # the link. A mapper key holds no whitespace, so a
-                            # spaced name -- GCC discarding the space-free alias
-                            # for the shorter, spaced real path, likelier here
-                            # than for canon since this spelling is longer -- is
-                            # not paired at all; the unit keeps GCC's default
-                            # naming at that real path (check_header_unit_names
-                            # reports it).
-                            if alias_compile is not None and not self._has_space(alias_compile):
-                                bmis.append((alias_compile, output))
-                    continue
-                # A spaced compile name means GCC discarded the space-free alias
-                # for the shorter, spaced real path, which no mapper can hold.
-                # The per-class aliased path cannot name this unit; fall through
-                # to the shared flat naming, mapper-less at that real path's
-                # default. check_header_unit_names reports it.
-            if is_gcc and mode == 'system' and chain_args:
-                # The per-class path for a system unit on a multi-class machine.
-                # Its name is the built-in chain path the compiler resolves it
-                # to, which no -I of ours renames -- so the scan aliases the
-                # whole chain and reads the unit under this class's roots, while
-                # the compile keeps the real chain (so __FILE__, diagnostics and
-                # debug info stay real). The scan name is build-relative through
-                # the alias root, so the CMI path it mangles to is colon-free
-                # even on Windows; default_cmi_path keeps the drive-letter mangling
-                # for the degraded path alone.
-                scan_args = self._reclass_include_args(compiler, list(args), class_subdir) + chain_args
-                scan_name = self._header_unit_gcc_name(compiler, scan_args, mode, canon)
-                compile_name = self._header_unit_gcc_name(compiler, args, mode, canon)
-                if scan_name is not None and compile_name is not None \
-                        and scan_name != compile_name \
-                        and not self._has_space(compile_name):
-                    key = f'{base}:{class_subdir}'
-                    output = self._get_or_create_header_unit_edge(
-                        key, default_cmi_path(scan_name, cache_dir, suffix),
-                        compile_name, rulename, args, canon, mode, owner,
-                        is_msvc, is_gcc)
-                    outputs.append(output)
-                    # The pair carries the compile-computed (real chain) name;
-                    # the collate joins every name of this BMI into each
-                    # importer's mapper, so a scan reporting the alias name and
-                    # a compile asking the real one both resolve.
-                    bmis.append((compile_name, output))
-                    continue
-                # A spaced compile name (a system unit resolving into a spaced
-                # -isystem of the target's own, past a space-free built-in
-                # chain) is unnameable in a mapper, so it also falls through to
-                # the shared flat naming, mapper-less at its default path.
-                # Identical names mean the alias did not enter resolution at all
-                # (the scan reported the real name for this unit): the flagged
-                # chain args defeat the compiler's shorter-of-two canonicalization,
-                # so a placed alias survives, but a unit resolving through neither
-                # the aliased chain nor a reclassed -I still lands on its real
-                # path. Fall through to the shared flat naming that name reaches --
-                # the same degradation, per unit, that a link-less tree is
-                # machine-wide.
             key = base if class_subdir is None else f'{base}:{class_subdir}'
-            name: T.Optional[str] = None
-            mappable = flat = False
-            if is_gcc:
-                name = self._header_unit_gcc_name(compiler, args, mode, canon)
-                if name is None:
-                    # A header that resolves nowhere has no name, and GCC derives
-                    # both halves of a unit's identity from the name: the mapper
-                    # key its importers look it up by, and the default CMI path it
-                    # writes the BMI to. An edge for it could only declare an
-                    # output GCC will not write -- with no name there is no mapper
-                    # to send it elsewhere, so it falls back to that default path --
-                    # leaving the output permanently missing and the edge, plus
-                    # every scan and compile ordered on it, dirty on every ninja
-                    # run. So the unit is not built at all, and nothing waits on a
-                    # BMI that will not appear. check_header_unit_names has already
-                    # said so at setup (fatally, for a user unit).
-                    continue
-                owner_key, _, _ = self._header_unit_class.setdefault(
-                    base, (class_key, declarer, compiler.for_machine))
-                if warn_target is not None:
-                    self.warn_on_header_unit_divergence(warn_target, class_key, base, canon)
-                # A mapper key holds no whitespace, so a unit under a spaced path
-                # keeps GCC's default naming and takes no mapper of its own
-                # (check_header_unit_names reports it).
-                mappable = not self._has_space(name)
-                # Scan edges carry no mapper, so a scan of any class reaches a
-                # unit only at its default-named path. The class that declared it
-                # first therefore builds its BMI there -- not a copy of one -- and
-                # only the other classes get a class-keyed path. Those classes
-                # scan against the owner's macros, which can misdirect a scan only
-                # if the unit computes a macro from flag-dependent state and that
-                # macro gates an import; their compiles resolve their own BMI
-                # regardless.
-                flat = not mappable or class_key == owner_key
-                if flat:
-                    key = base
-            if is_gcc and flat:
-                assert name is not None, 'a unit GCC cannot name is skipped above'
-                output_path = default_cmi_path(name, cache_dir, suffix)
-            else:
-                output_path = self._class_header_unit_path(key, canon, suffix)
-            output = self._get_or_create_header_unit_edge(
-                key, output_path, name if mappable else None,
-                rulename, args, canon, mode, owner, is_msvc, is_gcc)
+            output = self._header_units.get(key)
+            if output is None:
+                output = self._class_header_unit_path(key, canon, suffix)
+                self._add_header_unit_edge(output, rulename, args, canon, mode, owner, is_msvc)
+                self._header_units[key] = output
             outputs.append(output)
-            if is_gcc:
-                # This target's scans read the unit at the default-named path
-                # whatever class it is in, so order that BMI before them too.
-                flat_output = self._header_units[base]
-                if flat_output not in outputs:
-                    outputs.append(flat_output)
-                # Every declared spelling of the group names the class's one BMI.
-                alias = spelling != canon
-                sname = self._header_unit_gcc_name(compiler, args, mode, spelling) \
-                    if alias else name
-                # A spaced name cannot be a mapper key, so it is never paired
-                # here: the unit took no mapper of its own (mappable is False
-                # above) and keeps GCC's default naming, which its importers
-                # reach without a pair. Pairing it would only feed a broken key
-                # into their mappers.
-                if sname is not None and not self._has_space(sname):
-                    bmis.append((sname, output))
-                if alias and mappable and sname is not None and not self._has_space(sname):
-                    link = self._alias_header_unit_link(sname, flat_output, cache_dir, suffix)
-                    if link not in outputs:
-                        outputs.append(link)
-            # Returns [] on GCC: its consumers resolve through the mapper. Whole
-            # lists, not flags, are deduped: clang names only the BMI, so two
-            # spellings of one unit repeat a flag it must see once, while cl
+            # Whole lists, not flags, are deduped: clang names only the BMI, so
+            # two spellings of one unit repeat a flag it must see once, while cl
             # names the spelling too and needs a pair for each.
             cargs = compiler.get_header_unit_consumer_args(mode, spelling, output)
             if cargs and cargs not in seen_consumer_args:
                 seen_consumer_args.append(cargs)
                 consumer_args += cargs
-        return outputs, consumer_args, bmis
+        return outputs, consumer_args, []
 
     def _provision_gcc_program_header_unit_edges(self, compiler: Compiler,
                                                  header_units: T.List[str],
@@ -5827,13 +4783,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                                  owner: build.BuildTarget,
                                                  rulename: str
                                                  ) -> T.Tuple[T.List[str], T.List[T.Tuple[str, str]]]:
-        """_provision_header_unit_edges for GCC asking a mapper server.
+        """_provision_header_unit_edges for GCC, which asks a mapper server.
 
         The server matches a unit by the real path of whatever name GCC asks
         for, so every spelling of one header -- through any -I entry, from a
         subdirectory, under a spaced path -- reaches one BMI per BMI class,
         stored at a path Meson picks. Nothing here predicts what GCC will call
-        the unit, and no edge is ever respelled or linked. The unit edge asks
+        the unit. The unit edge asks
         the server too, through the declaring target's manifest (written by the
         caller with the pairs returned here), so a unit built for one declarer
         and reused by another is still found by its real path.
@@ -5852,7 +4808,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # Where the header resolves -- or will, once the owner's generators
             # have run -- which a probe answers for a system unit;
             # check_header_unit_names has reported one resolving nowhere.
-            name = self._header_unit_gcc_name(compiler, args, mode, spelling, generated)
+            name = self._header_unit_file(compiler, args, mode, spelling, generated)
             if name is None:
                 continue
             real = header_unit_key(os.path.join(build_dir, name))
@@ -5861,7 +4817,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             if output is None:
                 output = self._class_header_unit_path(key, spelling, suffix)
                 self._add_header_unit_edge(
-                    output, rulename, args, spelling, mode, None, owner, False, True,
+                    output, rulename, args, spelling, mode, owner, False,
                     mapper_args=self._gcc_program_mapper_args(compiler, tag, manifest))
                 self._header_units[key] = output
             if output not in outputs:
@@ -5869,67 +4825,30 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             bmis.append((real, output))
         return outputs, bmis
 
-    def _get_or_create_header_unit_edge(self, key: str, output: str,
-                                        mapper_name: T.Optional[str],
-                                        rulename: str,
-                                        args: T.Union['CompilerArgs', T.List[str]],
-                                        canon: str, mode: str,
-                                        owner: T.Optional[build.BuildTarget],
-                                        is_msvc: bool, is_gcc: bool) -> str:
-        """This key's unit BMI, building its edge once. The first caller for a
-        key fixes the BMI at `output` and, when `mapper_name` is set, writes the
-        per-unit mapper that binds that name to it -- the key GCC resolves the
-        unit through. The mapper lives under meson-private even when the BMI does
-        not: written at setup and never rebuilt, it must not sit in a cache
-        directory the compiler owns and a user may clear. A naming that needs no
-        mapper passes None. Later callers for the key reuse the fixed BMI.
-        """
-        existing = self._header_units.get(key)
-        if existing is not None:
-            return existing
-        mapper: T.Optional[str] = None
-        if mapper_name is not None:
-            mapper = self._class_header_unit_path(key, canon, '.mapper')
-            self._write_header_unit_mapper(mapper, mapper_name, output)
-        self._add_header_unit_edge(output, rulename, args, canon, mode,
-                                   mapper, owner, is_msvc, is_gcc)
-        self._header_units[key] = output
-        return output
-
     def _add_header_unit_edge(self, output: str, rulename: str,
                               args: T.Union['CompilerArgs', T.List[str]],
-                              spelling: str, mode: str, mapper: T.Optional[str],
+                              spelling: str, mode: str,
                               owner: T.Optional[build.BuildTarget],
-                              is_msvc: bool, is_gcc: bool,
+                              is_msvc: bool,
                               mapper_args: T.Optional[T.List[str]] = None) -> None:
-        """One HEADER_UNIT edge, in the one shape every naming mode shares. The
-        caller has already chosen the output path and, where the compiler
-        resolves a unit through one, written the mapper this only wires in --
-        or, for a GCC asking a mapper program, passes its flags as
-        `mapper_args`.
+        """One HEADER_UNIT edge, in the one shape every compiler shares. The
+        caller has already chosen the output path; a GCC edge passes the flags
+        that make it ask the mapper server as `mapper_args`.
         """
         elem = NinjaBuildElement(self.all_outputs, output, rulename, [])
         elem.add_item('ARGS', args)
-        # GCC names the unit from the -c spelling verbatim and looks its BMI up
-        # by that name; the per-unit mapper this edge wires in is keyed on the
-        # forward-normalized name, as every backend-side key is. So the spelling
-        # fed to -c must be forward-slashed too, or GCC queries the mapper by a
-        # backslashed name (an absolute 'C:\\...' declared unit) it never holds.
-        # A no-op where the spelling is already forward-slashed.
-        elem.add_item('SPELLING', spelling.replace('\\', '/') if is_gcc else spelling)
+        # GCC's mapper server realpaths whatever name GCC asks for, but a
+        # backslashed spelling (an absolute 'C:\\...' declared unit) on -c is
+        # still forward-slashed, as every other GCC path is. A no-op where the
+        # spelling is already forward-slashed.
+        elem.add_item('SPELLING', spelling.replace('\\', '/') if mapper_args is not None else spelling)
         if is_msvc:
             elem.add_item('HUMODE', 'quote' if mode == 'user' else 'angle')
         else:
             elem.add_item('HULANG', f'c++-{mode}-header')
             elem.add_item('DEPFILE', output + '.d')
-        if is_gcc and mapper_args is not None:
+        if mapper_args is not None:
             elem.add_item('HUMAPPER', mapper_args)
-        elif is_gcc:
-            # A setup-written file is a fine ninja input: what ninja rejects is
-            # an input that no rule makes and no file provides.
-            elem.add_item('HUMAPPER', [f'-fmodule-mapper={mapper}'] if mapper else [])
-            if mapper is not None:
-                elem.add_dep(mapper)
         # The command reads the header off disk; a generated one must be written
         # first. Order-only, like the consumers' own dep on it: the header's
         # content reaches the compile through the BMI's rebuild, not through
@@ -5941,14 +4860,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                args: T.Union['CompilerArgs', T.List[str]],
                                mode: str, spelling: str,
                                ident: T.Optional[str] = None) -> str:
-        """The spelling that builds the BMI for whatever file `spelling` names.
+        """The spelling that builds the cl or clang BMI for whatever file
+        `spelling` names.
 
-        Declared spellings of one file share one BMI; the rest become extra names
-        for it. The group is build-wide, not per-target: a unit's default-named
-        CMI path is a pure function of its resolved name, so each name has to have
-        exactly one producer across the build, and two targets that disagreed on
-        which spelling was canonical would emit two. `ident` is
-        _header_unit_identity when the caller already has it, resolved here
+        Declared spellings of one file share one BMI; the rest become extra
+        names for it. The group is build-wide, not per-target, so every
+        declarer builds the unit under the one spelling that came first. `ident`
+        is _header_unit_identity when the caller already has it, resolved here
         otherwise; the header is realpath'd once either way.
         """
         if ident is None:
@@ -5960,47 +4878,18 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
     def _header_unit_identity(self, compiler: Compiler,
                               args: T.Union['CompilerArgs', T.List[str]],
                               mode: str, spelling: str) -> T.Optional[str]:
-        """Which file a declared header unit names, for grouping its spellings.
-
-        The only place a header-unit path is ever resolved: mapper keys, CMI path
-        mangling and every emitted spelling stay textual, because the compiler
-        names a unit by the text it was reached through. Resolving one of those
-        would both lose the alias GCC is keying on and collapse a space-free
-        include alias back into the spaced path it stands in for.
+        """Which file a declared cl or clang header unit names, for grouping
+        its spellings: the real path the include walk finds.
 
         None for a system unit -- it is named from the compiler's own search path,
         and a file reachable as both a user and a system unit stays two units.
         """
         if mode != 'user':
             return None
-        key = self._header_unit_mapper_key(compiler, args, spelling)
+        key = self._header_unit_include_path(compiler, args, spelling)
         if key is None:
             return None
         return os.path.realpath(os.path.join(self.environment.get_build_dir(), key))
-
-    def _alias_header_unit_link(self, alias_name: str, canonical_bmi: str,
-                                cache_dir: str, suffix: str) -> str:
-        """Put the group's BMI at an alias spelling's default-named path too.
-
-        Scan edges carry no mapper, so a TU importing through an alias reaches the
-        unit only at the path that spelling's own name mangles to. A compile
-        resolves it through the mapper and needs no such file, but the scan that
-        comes first does -- so the BMI is linked there rather than built twice.
-        """
-        output = default_cmi_path(alias_name, cache_dir, suffix)
-        if output not in self._header_unit_alias_links:
-            rulename = 'cpp_header_unit_alias'
-            if not self.ninja.has_rule(rulename):
-                # Lazily, so a build with no aliased unit keeps the rule set it
-                # had. --link hard-links where it can and copies where it cannot.
-                self.add_rule(NinjaRule(
-                    rulename,
-                    self.environment.get_build_command() + ['--internal', 'copy', '--link'],
-                    ['$in', '$out'], 'Aliasing C++ header unit $out'))
-            self.add_build(NinjaBuildElement(self.all_outputs, output, rulename,
-                                             canonical_bmi))
-            self._header_unit_alias_links[output] = canonical_bmi
-        return output
 
     @staticmethod
     def _class_header_unit_path(key: str, spelling: str, suffix: str) -> str:
@@ -6010,24 +4899,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         digest = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
         safe = os.path.basename(spelling) or 'header'
         return f'meson-private/header-units/{safe}.{digest}{suffix}'
-
-    def _write_header_unit_mapper(self, path: str, name: str, output: str) -> None:
-        # The unit edge's whole mapper: one line sending the header GCC is about
-        # to compile to the BMI path the edge declares. Copy-if-different, like
-        # the collate's per-TU mappers: an unchanged mapper must not rebuild its
-        # unit. newline='' because GCC's mapper parser reads a key to the newline
-        # without stripping a carriage return, so a CRLF would break the lookup.
-        full = os.path.join(self.environment.get_build_dir(), path)
-        os.makedirs(os.path.dirname(full), exist_ok=True)
-        line = f'{name} {output}\n'
-        try:
-            with open(full, encoding='utf-8', newline='') as f:
-                if f.read() == line:
-                    return
-        except OSError:
-            pass
-        with open(full, 'w', encoding='utf-8', newline='') as f:
-            f.write(line)
 
     def generate_compile_rules(self) -> None:
         for for_machine in MachineChoice:
@@ -6413,20 +5284,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # Finally add the private dir for the target to the include path. This
         # must override everything else and must be the final path added.
         commands += compiler.get_include_args(self.get_target_private_dir(target), False)
-        if self._compile_needs_space_free_respell(target, compiler):
-            # A header unit is named by the text of the include-path entry it
-            # was resolved through, so a spaced entry must be respelled here --
-            # the one place every consumer (compile, scan, header-unit edge and
-            # BMI variant) draws its include path from. Through the target's own
-            # class root when the machine is multi-class, so a spaced unit's
-            # name embeds its class the way a non-spaced unit's scan name does;
-            # None (a space-free spelling) otherwise. force_all is off: a
-            # non-spaced entry keeps its real spelling here and is aliased only
-            # on the scan.
-            class_key = compiler.get_bmi_class_key(
-                list(target.get_single_compile_base_args(compiler)) + list(commands))
-            tag = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
-            return self._respell_include_args(compiler, list(commands), tag)
         return list(commands)
 
     # Returns a dictionary, mapping from each compiler src type (e.g. 'c', 'cpp', etc.) to a list of compiler arg strings
@@ -6621,16 +5478,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             raise AssertionError(f'BUG: broken generated source file handling for {src!r}')
         else:
             raise InvalidArguments(f'Invalid source type: {src!r}')
-        if self._compile_needs_space_free_respell(target, compiler):
-            # Respelling the include path is not enough: a quote-form import
-            # searches the includer's own directory first, spelled the way the
-            # source was spelled here, and that spelling becomes the unit's
-            # name. Respell before the edge is built, so the compile's $in, the
-            # scan and the recorded interface source all agree. Same class root
-            # as the include respell above; a non-spaced source is untouched.
-            tag = self._header_unit_class_subdir_for(
-                target.for_machine, compiler, self._bmi_class_key_of(target))
-            rel_src = self._respell_path(rel_src, tag) or rel_src
         obj_basename = self.object_filename_from_source(target, compiler, src)
         rel_obj = os.path.join(self.get_target_private_dir(target), obj_basename)
         dep_file = compiler.depfile_for_object(rel_obj)

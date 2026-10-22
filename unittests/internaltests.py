@@ -270,89 +270,6 @@ Thread model: posix'''), '21.9.0')
             with open(dyndep, encoding='utf-8') as f:
                 self.assertIn('ninja_dyndep_version = 1', f.read())
 
-    def test_depaccumulate_header_unit_mapline_join(self):
-        # The GCC collate emits every declared name of a header unit's BMI into
-        # each importer's mapper: a scan reports one name (an alias spelling)
-        # while the compile asks the mapper for another (the real one), and a
-        # mapper disables default naming outright, so a name missing from it is
-        # a hard "no such module". A reverse map bmi -> [names] joins them; a
-        # build with no --header-unit-bmi pairs is unchanged.
-        from mesonbuild.scripts.depaccumulate import run_p1689
-        from mesonbuild.utils.core import default_cmi_path
-
-        def mapper_lines(reported, pairs):
-            with tempfile.TemporaryDirectory() as d:
-                obj = os.path.join(d, 'a.o')
-                ddi = obj + '.ddi'
-                with open(ddi, 'w', encoding='utf-8') as f:
-                    json.dump({'rules': [{'primary-output': obj, 'provides': [],
-                                          'requires': [{'logical-name': reported}]}]}, f)
-                argv = ['--dyndep', os.path.join(d, 'out.dd'),
-                        '--provmap', os.path.join(d, 'pm.json'),
-                        '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
-                        '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache']
-                for name, bmi in pairs:
-                    argv += ['--header-unit-bmi', name, bmi]
-                argv.append(ddi)
-                self.assertEqual(run_p1689(argv), 0)
-                with open(obj + '.mapper', encoding='utf-8') as f:
-                    return [ln for ln in f.read().splitlines() if 'util.h' in ln]
-
-        # Two names bound to one BMI: a require reporting either name gets both
-        # maplines, pointing at that BMI.
-        bmi = default_cmi_path('./a/util.h', 'gcm.cache', '.gcm')
-        pairs = [('./a/util.h', bmi), ('./b/util.h', bmi)]
-        self.assertEqual(sorted(mapper_lines('./a/util.h', pairs)),
-                         sorted([f'./a/util.h {bmi}', f'./b/util.h {bmi}']))
-        self.assertEqual(sorted(mapper_lines('./b/util.h', pairs)),
-                         sorted([f'./a/util.h {bmi}', f'./b/util.h {bmi}']))
-
-        # No pairs: the scan-reported name reconstructs to its own default path,
-        # and nothing joins in -- one mapline, unchanged from before the join.
-        recon = default_cmi_path('./c/util.h', 'gcm.cache', '.gcm')
-        self.assertEqual(mapper_lines('./c/util.h', []), [f'./c/util.h {recon}'])
-
-    def test_depaccumulate_header_unit_spaced_key_dropped(self):
-        # A mapper key ends at the first space with no escape form, so a header
-        # unit whose resolved path holds whitespace (a spaced source tree, or a
-        # compiler-owned header under a spaced install prefix) cannot be named
-        # in a mapper. The collate must drop such a line rather than write a
-        # key GCC would mis-split into a wrong name and a hard "no such module":
-        # the unit keeps GCC's default naming and is reached at its default path.
-        from mesonbuild.scripts.depaccumulate import run_p1689
-        from mesonbuild.utils.core import default_cmi_path
-
-        def mapper_lines(reported, pairs):
-            with tempfile.TemporaryDirectory() as d:
-                obj = os.path.join(d, 'a.o')
-                ddi = obj + '.ddi'
-                with open(ddi, 'w', encoding='utf-8') as f:
-                    json.dump({'rules': [{'primary-output': obj, 'provides': [],
-                                          'requires': [{'logical-name': reported}]}]}, f)
-                argv = ['--dyndep', os.path.join(d, 'out.dd'),
-                        '--provmap', os.path.join(d, 'pm.json'),
-                        '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
-                        '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache']
-                for name, bmi in pairs:
-                    argv += ['--header-unit-bmi', name, bmi]
-                argv.append(ddi)
-                self.assertEqual(run_p1689(argv), 0)
-                with open(obj + '.mapper', encoding='utf-8') as f:
-                    return f.read().splitlines()
-
-        spaced = 'C:/spaced prefix/mingw64/include/c++/16/vector'
-        # A require reporting the spaced name reconstructs to no mapline at all.
-        self.assertEqual(mapper_lines(spaced, []), [])
-        # A spaced name joined in through the reverse bmi -> [names] map (a
-        # --header-unit-bmi pair) is dropped too, while the space-free name
-        # bound to the same BMI still resolves.
-        free = './a/util.h'
-        bmi = default_cmi_path(free, 'gcm.cache', '.gcm')
-        lines = mapper_lines(free, [(free, bmi), (spaced, bmi)])
-        self.assertEqual(lines, [f'{free} {bmi}'])
-        for line in lines:
-            self.assertNotIn('spaced prefix', line)
-
     def test_supports_cpp_modules_p1689(self):
         # The P1689 pipeline (P1689 scan/collate, header units) needs
         # GCC >= 14 or MSVC >= 19.32; an older but modules-capable compiler
@@ -478,41 +395,47 @@ Thread model: posix'''), '21.9.0')
         # drop from the other, and pin that the head is head-independent.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
-        # Mapper files: this pins the static collate flags.
         be.build_to_src = '..'
         cpp = mock.MagicMock()
         cpp.get_module_bmi_suffix.return_value = '.gcm'
         cpp.get_module_cache_dir.return_value = 'gcm.cache'
+        cpp.program_mapper_quotes.return_value = True
 
-        def depargs(family, head, *, harvests, interface_sources, header_units):
+        def depargs(family, head, *, harvests, interface_sources, header_units,
+                    units_manifest=None):
             cpp.cpp_module_family.return_value = family
             return be._collate_depargs(
                 cpp, head, dep_provmaps=['dep/pm.json'],
                 dep_private_maps=[('dep/priv.json', 'id0', 'disp0')],
                 harvests=harvests, interface_sources=interface_sources,
-                # A pair whose BMI is not its name's default path always emits.
-                header_unit_bmis=[('ustd', 'gcm.cache/z.gcm')],
-                header_units=header_units)
+                header_units=header_units, units_manifest=units_manifest)
 
         deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
                 '--dep-provmap', 'dep/pm.json']
-        # GCC target: no harvest stamp, the mapper/CMI flags, no interface list.
+        table = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'm/u.json']
+        # GCC target: no harvest stamp, the table flags, no interface list.
         self.assertEqual(
             depargs('gcc', ['--private-map', 'p.json', 'd'],
-                    harvests=False, interface_sources=[], header_units=[]),
-            ['--private-map', 'p.json', 'd'] + deps
-            + ['--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache',
-               '--header-unit-bmi', 'ustd', 'gcm.cache/z.gcm'])
-        # GCC variant: always harvests, so the mapper block *and* the recompiled
-        # interfaces, the interface list coming after the mapper block.
+                    harvests=False, interface_sources=[], header_units=[],
+                    units_manifest='m/u.json'),
+            ['--private-map', 'p.json', 'd'] + deps + table)
+        # GCC variant: always harvests, so the table block *and* the recompiled
+        # interfaces, the interface list coming after the table block.
         self.assertEqual(
             depargs('gcc', ['--own-private-map', 'p.json', 'd'],
-                    harvests=True, interface_sources=['x.cc'], header_units=[]),
+                    harvests=True, interface_sources=['x.cc'], header_units=[],
+                    units_manifest='m/u.json'),
             ['--own-private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp',
-               '--mapper-suffix', '.mapper', '--default-cmi-root', 'gcm.cache',
-               '--header-unit-bmi', 'ustd', 'gcm.cache/z.gcm',
-               '--interface-source', 'x.cc'])
+            + ['--stamp-suffix', '.gcm.stamp'] + table + ['--interface-source', 'x.cc'])
+        # A GCC that cannot quote its mapper command line keeps its tables at
+        # digest-named paths.
+        cpp.program_mapper_quotes.return_value = False
+        self.assertEqual(
+            depargs('gcc', ['--private-map', 'p.json', 'd'],
+                    harvests=False, interface_sources=[], header_units=[],
+                    units_manifest='m/u.json'),
+            ['--private-map', 'p.json', 'd'] + deps + table
+            + ['--hashed-table-dir', 'meson-private/gcc-module-tables'])
         # Clang: stamp plus the interface list, no mapper block.
         self.assertEqual(
             depargs('clang', ['--private-map', 'p.json', 'd'],
@@ -534,7 +457,8 @@ Thread model: posix'''), '21.9.0')
         for family in ('gcc', 'clang', 'msvc'):
             kw = dict(harvests=(family != 'gcc'),
                       interface_sources=[] if family == 'gcc' else ['x.cc'],
-                      header_units=[])
+                      header_units=[],
+                      units_manifest='m/u.json' if family == 'gcc' else None)
             tgt = depargs(family, ['--private-map', 'p.json', 'd'], **kw)
             var = depargs(family, ['--own-private-map', 'p.json', 'd'], **kw)
             self.assertEqual(tgt[3:], var[3:], family)
@@ -1034,499 +958,6 @@ Thread model: posix'''), '21.9.0')
         self.assertIn('$HUMAPPER', command_str)
         self.assertIn('-fmodule-only', command_str)
 
-    def test_gcc_system_chain_alias_disabled_for_spaced_prefix(self):
-        # The compile keeps the real built-in chain, so a system header unit
-        # under a spaced compiler prefix is named by that spaced path however
-        # the scan is aliased -- and a spaced name is no mapper key. Aliasing
-        # the chain would only respell the scan while leaving the compile
-        # unnameable, so it is not placed: the whole chain degrades to no
-        # aliases (an empty result), and every system unit resolves the real
-        # spaced chain, meeting its BMI at the one default-named path. A
-        # space-free chain is unaffected -- its roots are placed as before.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        with tempfile.TemporaryDirectory() as build:
-            be = NinjaBackend.__new__(NinjaBackend)
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-            cpp = mock.MagicMock()
-
-            spaced = ['C:/spaced prefix/mingw64/include/c++/16',
-                      'C:/spaced prefix/mingw64/include']
-            with mock.patch.object(NinjaBackend, '_gcc_include_chain', return_value=spaced):
-                self.assertEqual(
-                    be._gcc_system_chain_isystem_args(cpp, [], 'tag'), [])
-
-            free = ['C:/mingw64/include/c++/16', 'C:/mingw64/include']
-            placed = []
-            def fake_alias(rd, tag):
-                placed.append(rd)
-                return f'meson-private/i/deadbeef{len(placed)}'
-            with mock.patch.object(NinjaBackend, '_gcc_include_chain', return_value=free), \
-                    mock.patch.object(NinjaBackend, '_dir_alias_root', side_effect=fake_alias):
-                out = be._gcc_system_chain_isystem_args(cpp, [], 'tag')
-            self.assertEqual(out[0], '-fno-canonical-system-headers')
-            self.assertEqual(out.count('-isystem'), len(free))
-            self.assertEqual(len(placed), len(free))
-
-    def test_header_unit_gcc_name_adopts_defeated_alias(self):
-        # A user header unit reached through a space-free alias root is textual
-        # by default, but GCC's shorter-of-two canonicalization can discard the
-        # alias for the header's shorter real path. _header_unit_gcc_name probes
-        # the real name and adopts it only when it proves GCC named the unit by
-        # a spaced path; a winning alias keeps the textual name, and an
-        # unaliased name never probes at all (dormancy/cost).
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        be = NinjaBackend.__new__(NinjaBackend)
-        cpp = mock.MagicMock()
-        aliased = 'meson-private/i/abc123def456/hdr.h'
-
-        # (i) aliased name, probe reports a spaced real path -> adopt it.
-        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
-                mock.patch.object(NinjaBackend, '_probe_header_unit_path',
-                                  return_value='/short sp/hdr.h') as probe:
-            name = be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h')
-            self.assertTrue(be._has_space(name), name)
-            probe.assert_called_once()
-
-        # (ii) aliased name, probe reports the space-free alias (alias won) ->
-        # keep the textual name unchanged.
-        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
-                mock.patch.object(NinjaBackend, '_probe_header_unit_path', return_value=aliased):
-            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'),
-                             './' + aliased)
-
-        # (iii) aliased name, probe fails -> keep the textual name.
-        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value=aliased), \
-                mock.patch.object(NinjaBackend, '_probe_header_unit_path', return_value=None):
-            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'),
-                             './' + aliased)
-
-        # (iv) an unaliased name never probes.
-        with mock.patch.object(NinjaBackend, '_header_unit_mapper_key', return_value='inc/hdr.h'), \
-                mock.patch.object(NinjaBackend, '_probe_header_unit_path') as probe:
-            self.assertEqual(be._header_unit_gcc_name(cpp, [], 'user', 'hdr.h'), './inc/hdr.h')
-            probe.assert_not_called()
-
-    def test_provision_header_unit_edges_drops_spaced_alias_spelling(self):
-        # A file declared under several spellings builds one BMI, and each extra
-        # spelling becomes an extra mapper name for it. That name comes from
-        # _header_unit_gcc_name, which adopts a spaced real path when GCC
-        # discards the space-free alias for the shorter real one -- and a longer
-        # spelling loses that length race more readily than the canonical one.
-        # A mapper key holds no whitespace, so a spaced extra spelling must never
-        # be paired into bmis (whence it would become a --header-unit-bmi argv
-        # entry / mapper key); the unit keeps GCC's default naming there.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        be = NinjaBackend.__new__(NinjaBackend)
-        # Mapper files: these pin the static mapper's naming.
-        cpp = mock.MagicMock()
-        cpp.cpp_module_family.return_value = 'gcc'
-
-        canon, spelling = 'canon/hdr.h', 'aliased/spelled/hdr.h'
-
-        def gcc_name(_compiler, _args, _mode, spell):
-            # The canonical spelling wins its alias; the extra spelling loses it
-            # and is named by the spaced real path.
-            return 'free-name/hdr.h' if spell == canon else 'C:/s p/hdr.h'
-
-        with mock.patch.object(NinjaBackend, 'get_compiler_rule_name', return_value='RULE'), \
-                mock.patch.object(NinjaBackend, '_header_unit_spelling',
-                                  return_value=('user', spelling)), \
-                mock.patch.object(NinjaBackend, '_header_unit_identity',
-                                  return_value='ID'), \
-                mock.patch.object(NinjaBackend, '_canonical_header_unit',
-                                  return_value=canon), \
-                mock.patch.object(NinjaBackend, '_header_unit_aliasing_available',
-                                  return_value=True), \
-                mock.patch.object(NinjaBackend, '_declares_system_header_unit',
-                                  return_value=False), \
-                mock.patch.object(NinjaBackend, '_reclass_include_args',
-                                  return_value=[]), \
-                mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
-                                  side_effect=gcc_name), \
-                mock.patch.object(NinjaBackend, '_get_or_create_header_unit_edge',
-                                  return_value='BMI'), \
-                mock.patch.object(NinjaBackend, '_alias_header_unit_link',
-                                  return_value='LINK'), \
-                mock.patch('mesonbuild.backend.ninjabackend.default_cmi_path',
-                           return_value='CMI'):
-            _outputs, _cargs, bmis = be._provision_header_unit_edges(
-                cpp, ['hdr.h'], [], ('cls',), 'sub', 'decl', None)
-
-        # The canonical (space-free) name is paired; the spaced extra spelling is
-        # not. No pair may carry whitespace.
-        self.assertIn(('free-name/hdr.h', 'BMI'), bmis)
-        for name, _bmi in bmis:
-            self.assertFalse(be._has_space(name), name)
-
-    def test_system_header_unit_build_edge_omits_chain_args(self):
-        # -fno-canonical-system-headers and the aliased -isystem chain ride the
-        # SCAN edges only (see _gcc_system_chain_isystem_args): a system unit's
-        # scan resolves through the aliased chain, but its build edge -- and the
-        # compile that follows -- must keep the real, unflagged chain so __FILE__,
-        # diagnostics and debug info name the header's real path. Pin that the
-        # build edge is composed from the bare args, with no chain arg on it, so
-        # a future one-sided change to that seam fails loudly here.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        be = NinjaBackend.__new__(NinjaBackend)
-        # Mapper files: these pin the static mapper's naming.
-        cpp = mock.MagicMock()
-        cpp.cpp_module_family.return_value = 'gcc'
-
-        bare = ['-Iprog.p', '-std=c++23']
-        chain = ['-fno-canonical-system-headers', '-isystem', 'meson-private/i/aaaaa']
-
-        def gcc_name(_compiler, a, _mode, _spell):
-            # The scan (chain args present) names the unit through the alias; the
-            # compile (bare args) names it by the real system path. They differ,
-            # which is what makes the aliased system branch take the edge.
-            return 'scan/vector' if '-fno-canonical-system-headers' in a else 'real/vector'
-
-        seen_edge_args = []
-
-        def capture_edge(key, output, mapper_name, rulename, edge_args,
-                         canon, mode, owner, is_msvc, is_gcc):
-            seen_edge_args.append(list(edge_args))
-            return 'BMI'
-
-        with mock.patch.object(NinjaBackend, 'get_compiler_rule_name', return_value='RULE'), \
-                mock.patch.object(NinjaBackend, '_header_unit_spelling',
-                                  return_value=('system', 'vector')), \
-                mock.patch.object(NinjaBackend, '_header_unit_identity',
-                                  return_value=None), \
-                mock.patch.object(NinjaBackend, '_canonical_header_unit',
-                                  return_value='vector'), \
-                mock.patch.object(NinjaBackend, '_header_unit_aliasing_available',
-                                  return_value=True), \
-                mock.patch.object(NinjaBackend, '_declares_system_header_unit',
-                                  return_value=True), \
-                mock.patch.object(NinjaBackend, '_gcc_system_chain_isystem_args',
-                                  return_value=chain), \
-                mock.patch.object(NinjaBackend, '_reclass_include_args',
-                                  return_value=[]), \
-                mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
-                                  side_effect=gcc_name), \
-                mock.patch.object(NinjaBackend, '_get_or_create_header_unit_edge',
-                                  side_effect=capture_edge), \
-                mock.patch('mesonbuild.backend.ninjabackend.default_cmi_path',
-                           return_value='CMI'):
-            be._provision_header_unit_edges(
-                cpp, ['vector'], bare, ('cls',), 'sub', 'decl', None)
-
-        # The build edge was composed, and from the bare args: no chain arg (the
-        # flag or an aliased -isystem) may have leaked onto it.
-        self.assertEqual(len(seen_edge_args), 1,
-                         f'expected one build edge, got {seen_edge_args}')
-        self.assertEqual(seen_edge_args[0], bare)
-        for arg in chain:
-            self.assertNotIn(arg, seen_edge_args[0],
-                             f'chain arg {arg!r} leaked onto the system build edge')
-
-    def test_check_header_unit_names_defeated_alias_branch(self):
-        # A defeated alias (real path spaced and shorter than the alias) gets
-        # its own diagnosis: the alias was placed but GCC discarded it, distinct
-        # from an alias that could not be placed at all.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        with tempfile.TemporaryDirectory() as d:
-            src = os.path.join(d, 's p')
-            os.makedirs(src)
-            hdr = os.path.join(src, 'hdr.h')
-            with open(hdr, 'w', encoding='utf-8'):
-                pass
-            build = os.path.join(d, 'b')
-            os.makedirs(build)
-            be = NinjaBackend.__new__(NinjaBackend)
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-            be.environment.get_source_dir.return_value = src
-            cpp = mock.MagicMock()
-            target = mock.MagicMock()
-            target.name = 't'
-            target.compilers = {'cpp': cpp}
-            target.cpp_header_units = ['hdr.h']
-            spaced_real = hdr.replace('\\', '/')
-
-            def run(mapper_key):
-                be._warned_header_unit_names = set()
-                with mock.patch.object(NinjaBackend, '_header_unit_spelling',
-                                       return_value=('user', 'hdr.h')), \
-                        mock.patch.object(NinjaBackend, '_header_unit_gcc_name',
-                                          return_value=spaced_real), \
-                        mock.patch.object(NinjaBackend, '_header_unit_mapper_key',
-                                          return_value=mapper_key), \
-                        mock.patch('mesonbuild.backend.ninjabackend.mlog.warning') as warn:
-                    be.check_header_unit_names(target, [])
-                return warn.call_args[0][0]
-
-            # An alias was placed (the alias root in the textual name) but defeated.
-            defeated = run('meson-private/i/abc123def456/hdr.h')
-            self.assertIn('discarded it', defeated)
-            self.assertIn('real path is shorter', defeated)
-            # No alias in the textual name: the platform could not place one.
-            unplaced = run('s p/hdr.h')
-            self.assertIn('could not place one', unplaced)
-            self.assertNotIn('discarded it', unplaced)
-
-    def test_dir_alias_root_keying(self):
-        # An alias root is a pure function of (real_dir, class_tag): the same
-        # keying must land on the same root across calls (idempotent
-        # regeneration), two tags over one directory must get two roots (that
-        # is what gives two BMI classes two unit names), and a None tag must
-        # produce exactly the legacy space-free path -- same digest input,
-        # same alias-root shape -- so a re-run over one directory regenerates
-        # byte-identically.
-        import hashlib
-        import re
-        from mesonbuild.backend.ninjabackend import (
-            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real = os.path.join(d, 'src dir')
-            os.makedirs(build)
-            os.makedirs(real)
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._dir_aliases = {}
-            be._alias_root_real = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-
-            legacy = be._dir_alias_root(real)
-            if legacy is None:
-                raise unittest.SkipTest('platform cannot make a directory link here')
-            # The None keying is pinned to the base36 digest of the directory
-            # alone, at the base length.
-            digest = NinjaBackend._base36(
-                int(hashlib.sha256(real.encode()).hexdigest(), 16)
-            ).rjust(HEADER_UNIT_ALIAS_DIGEST_LEN, '0')[:HEADER_UNIT_ALIAS_DIGEST_LEN]
-            self.assertEqual(legacy, f'{HEADER_UNIT_ALIAS_ROOT}/{digest}')
-
-            tagged = be._dir_alias_root(real, 'aaaabbbbcccc')
-            other = be._dir_alias_root(real, 'ddddeeeeffff')
-            self.assertIsNotNone(tagged)
-            self.assertIsNotNone(other)
-            # Distinct roots per keying, all in the same alias-root namespace.
-            self.assertEqual(len({legacy, tagged, other}), 3)
-            for rel in (tagged, other):
-                self.assertRegex(
-                    rel,
-                    rf'^{re.escape(HEADER_UNIT_ALIAS_ROOT)}/[0-9a-z]{{{HEADER_UNIT_ALIAS_DIGEST_LEN}}}$')
-                # Each root reaches the same real directory.
-                self.assertTrue(os.path.samefile(os.path.join(build, rel), real))
-            # Same dir + same tag -> the same root, including across a fresh
-            # backend (the on-disk link readback, not just the memo).
-            self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
-            be._dir_aliases = {}
-            self.assertEqual(be._dir_alias_root(real, 'aaaabbbbcccc'), tagged)
-
-    def test_prune_stale_dir_aliases(self):
-        # At the end of generation, a directory link under the alias root
-        # that this run did not (re)place must go -- a class rename or a
-        # dropped divergence orphans the old digest's root -- but a plain
-        # directory or file there, and the transient canary, must survive
-        # untouched.
-        from mesonbuild.backend.ninjabackend import NinjaBackend, HEADER_UNIT_ALIAS_ROOT
-        root_parts = HEADER_UNIT_ALIAS_ROOT.split('/')
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real_a = os.path.join(d, 'a')
-            os.makedirs(build)
-            os.makedirs(real_a)
-
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._dir_aliases = {}
-            be._alias_root_real = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-
-            # A root standing from a run before this one -- as though a
-            # since-renamed class or a dropped divergence placed it.
-            stale_user = be._dir_alias_root(real_a, 'deadbeefcafe')
-            self.assertIsNotNone(stale_user)
-
-            # This run's own bookkeeping starts empty (a fresh NinjaBackend,
-            # as generate() gets) and places only a root over the same real
-            # directory under a different tag -- a renamed class reaching
-            # for the same header through its own root.
-            be._dir_aliases = {}
-            be._alias_root_real = {}
-            live_user = be._dir_alias_root(real_a, 'aaaabbbbcccc')
-            self.assertIsNotNone(live_user)
-            self.assertNotEqual(live_user, stale_user)
-
-            # A non-link entry under the alias root (not an alias root itself)
-            # must survive, and so must a canary somehow left on disk (the
-            # real code always removes it itself; pruning must not reap it by
-            # the ordinary stale-link rule).
-            os.makedirs(os.path.join(build, *root_parts, 'not_a_link_dir'))
-            canary = os.path.join(build, *root_parts, '.canary')
-            os.symlink(build, canary)
-
-            be._prune_stale_dir_aliases()
-
-            priv_entries = os.listdir(os.path.join(build, *root_parts))
-            self.assertIn(os.path.basename(live_user), priv_entries)
-            self.assertNotIn(os.path.basename(stale_user), priv_entries)
-            self.assertIn('not_a_link_dir', priv_entries)
-            self.assertIn('.canary', priv_entries)
-
-    def test_prune_reclaims_legacy_alias_root(self):
-        # The alias root was once meson-private/imap; a reconfigure of a build
-        # first laid out by an older Meson leaves that directory and its links
-        # orphaned. The prune pass reclaims it with the same conservatism it
-        # applies to the current root: a directory link under the legacy root
-        # goes, but a plain directory (or file) there keeps the directory, so
-        # the legacy root is removed only once nothing but links remained.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real = os.path.join(d, 'real')
-            os.makedirs(build)
-            os.makedirs(real)
-
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._alias_root_real = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = build
-
-            # A legacy tree: one directory link (a stale alias root) and one
-            # plain directory (not a link) side by side under meson-private/imap.
-            legacy = os.path.join(build, 'meson-private', 'imap')
-            os.makedirs(legacy)
-            link = os.path.join(legacy, 'deadbeefcafe')
-            try:
-                os.symlink(real, link)
-            except OSError:
-                raise unittest.SkipTest('platform cannot make a directory link here')
-            plain = os.path.join(legacy, 'not_a_link_dir')
-            os.makedirs(plain)
-
-            be._prune_stale_dir_aliases()
-
-            # The link is reclaimed; the plain directory and the legacy parent
-            # (kept non-empty by it) survive untouched.
-            self.assertFalse(os.path.lexists(link),
-                             'the legacy alias-root link was not reclaimed')
-            self.assertTrue(os.path.isdir(plain),
-                            'a plain directory under the legacy root must survive')
-            self.assertTrue(os.path.isdir(legacy),
-                            'a non-empty legacy root must not be removed')
-
-            # With the plain directory gone too, a second pass removes the now
-            # empty legacy root entirely.
-            os.rmdir(plain)
-            be._prune_stale_dir_aliases()
-            self.assertFalse(os.path.exists(legacy),
-                             'an emptied legacy root must be removed')
-
-            # The new-scheme root is untouched by the legacy reclaim.
-            os.makedirs(os.path.join(build, 'meson-private', 'i'), exist_ok=True)
-            new_link = os.path.join(build, 'meson-private', 'i', 'ldued')
-            os.symlink(real, new_link)
-            be._alias_root_real = {'meson-private/i/ldued': real}
-            be._prune_stale_dir_aliases()
-            self.assertTrue(os.path.lexists(new_link),
-                            'the legacy reclaim must not disturb the new alias root')
-
-    def test_dir_alias_root_collision_lengthens_newcomer(self):
-        # Two distinct real directories whose base-length alias-root digests
-        # collide must not end up two names for one link. Allocation is
-        # first-come-wins: the directory allocated first keeps the base-length
-        # spelling, and the newcomer lengthens its own digest by one digit until
-        # it separates, never disturbing the incumbent's already-placed link. A
-        # real collision is astronomically unlikely, so force one by patching the
-        # digest helper to hand both directories the same full hash.
-        from mesonbuild.backend.ninjabackend import (
-            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
-        base_len = HEADER_UNIT_ALIAS_DIGEST_LEN
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real_a = os.path.join(d, 'a')
-            real_b = os.path.join(d, 'b')
-            for p in (build, real_a, real_b):
-                os.makedirs(p)
-
-            def make_backend():
-                be = NinjaBackend.__new__(NinjaBackend)
-                be._dir_aliases = {}
-                be._alias_root_real = {}
-                be.environment = mock.MagicMock()
-                be.environment.get_build_dir.return_value = build
-                return be
-
-            collide = staticmethod(lambda real_dir, class_tag: 'f' * 64)
-            with mock.patch.object(NinjaBackend, '_alias_root_digest', collide):
-                be = make_backend()
-                first = be._dir_alias_root(real_a)
-                if first is None:
-                    raise unittest.SkipTest('platform cannot make a directory link here')
-                second = be._dir_alias_root(real_b)
-                self.assertIsNotNone(second)
-
-                # First-come keeps the base-length spelling; the newcomer is one
-                # digit longer, and the two are distinct.
-                self.assertEqual(first, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * base_len}')
-                self.assertEqual(second, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * (base_len + 1)}')
-                self.assertEqual(len(os.path.basename(second)),
-                                 len(os.path.basename(first)) + 1)
-
-                # Each root reaches its own real directory; the incumbent's link
-                # was never moved to point at the newcomer.
-                self.assertTrue(os.path.samefile(os.path.join(build, first), real_a))
-                self.assertTrue(os.path.samefile(os.path.join(build, second), real_b))
-
-                # A fresh backend, allocating in the same order, reproduces both
-                # roots by reading the on-disk links -- the incumbent adopted,
-                # the newcomer again pushed one digit longer -- with neither
-                # link disturbed. (The order dependence is the point: the first
-                # dir allocated wins the short spelling.)
-                be2 = make_backend()
-                self.assertEqual(be2._dir_alias_root(real_a), first)
-                self.assertEqual(be2._dir_alias_root(real_b), second)
-                self.assertTrue(os.path.samefile(os.path.join(build, first), real_a))
-                self.assertTrue(os.path.samefile(os.path.join(build, second), real_b))
-
-    def test_dir_alias_root_reclaims_stale_link(self):
-        # A collision is only ever with a root THIS run placed. A link left on
-        # disk by an earlier run, for a directory that has since vanished and is
-        # not in this run's registry, is stale -- it must be remove-and-replaced
-        # at the same spelling (no lengthening), the way a moved source dir has
-        # always been reclaimed.
-        from mesonbuild.backend.ninjabackend import (
-            NinjaBackend, HEADER_UNIT_ALIAS_ROOT, HEADER_UNIT_ALIAS_DIGEST_LEN)
-        with tempfile.TemporaryDirectory() as d:
-            build = os.path.join(d, 'build')
-            real_a = os.path.join(d, 'a')
-            real_b = os.path.join(d, 'b')
-            for p in (build, real_a, real_b):
-                os.makedirs(p)
-
-            def make_backend():
-                be = NinjaBackend.__new__(NinjaBackend)
-                be._dir_aliases = {}
-                be._alias_root_real = {}
-                be.environment = mock.MagicMock()
-                be.environment.get_build_dir.return_value = build
-                return be
-
-            collide = staticmethod(lambda real_dir, class_tag: 'f' * 64)
-            with mock.patch.object(NinjaBackend, '_alias_root_digest', collide):
-                be = make_backend()
-                stale = be._dir_alias_root(real_a)
-                if stale is None:
-                    raise unittest.SkipTest('platform cannot make a directory link here')
-                self.assertEqual(stale, f'{HEADER_UNIT_ALIAS_ROOT}/{"f" * HEADER_UNIT_ALIAS_DIGEST_LEN}')
-
-                # The directory the stale link points at is gone; a fresh run
-                # (empty registry) reaches for the same spelling for a different
-                # directory. With the incumbent absent from the in-run registry,
-                # this is the stale-link case: reclaim the base-length spelling.
-                import shutil
-                shutil.rmtree(real_a)
-                be2 = make_backend()
-                reclaimed = be2._dir_alias_root(real_b)
-                self.assertEqual(reclaimed, stale)
-                self.assertTrue(os.path.samefile(os.path.join(build, reclaimed), real_b))
-
     def test_header_unit_grammar_parse(self):
         # provision_header_units and generate_p1689_module_collate_target both
         # parse a declared header unit into (mode, spelling); they share
@@ -1597,226 +1028,128 @@ Thread model: posix'''), '21.9.0')
         self.assertNotIn('-imacrosother.h', cmd)
         self.assertIn('-Iinc', cmd)
 
-    def test_gcc_include_chain_memo_keys_on_args(self):
-        # The built-in chain is a pure function of the probe arglist, so the
-        # memo keys on it: two targets whose args reshape the chain (--sysroot
-        # here) each probe and cache their own. A coarser (machine, compiler)
-        # key would hand the second target the first's chain and so alias the
-        # wrong directories. Include-only differences reshape nothing, so they
-        # over-split into identical chains -- extra spawns, never a wrong reuse.
+    def _header_unit_backend(self, cid, suffix, builddir):
+        # A NinjaBackend and a mocked C++ compiler of family `cid` wired for
+        # provision_header_units on a single-class machine (an empty BMI class
+        # registry), over a real build tree: the include walk finds a unit's
+        # file there without asking the compiler, so no probe runs.
         from mesonbuild.backend.ninjabackend import NinjaBackend
-        with tempfile.TemporaryDirectory() as builddir:
-            # Real dirs: the chain drops any entry GCC lists but does not open.
-            d1 = os.path.join(builddir, 'sys1')
-            d2 = os.path.join(builddir, 'sys2')
-            os.makedirs(d1)
-            os.makedirs(d2)
-            be = NinjaBackend.__new__(NinjaBackend)
-            be._gcc_include_chains = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = builddir
-            cpp = mock.MagicMock()
-            cpp.for_machine = MachineChoice.HOST
-            cpp.get_id.return_value = 'gcc'
-            cpp.get_exelist.return_value = ['g++']
-            cpp.get_include_dir_flags.return_value = (
-                ('-idirafter', None), ('-isystem', 3), ('-iquote', 1), ('-I', 2))
-            proc = mock.MagicMock()
-            proc.returncode = 0
-            stderr = ('#include <...> search starts here:\n'
-                      f' {d1}\n {d2}\nEnd of search list.\n')
+        be = NinjaBackend.__new__(NinjaBackend)
+        be.build_to_src = '..'
+        be.all_outputs = set()
+        be._bmi_classes = {}
+        be._header_units = {}
+        be._header_unit_group = {}
+        be._target_header_unit_outputs = {}
+        be._target_header_unit_consumer_args = {}
+        be._target_generated_outputs = {}
+        be._warned_header_unit_names = set()
+        be._probed_header_units = {}
+        be._target_imported_header_units = {}
+        be._gcc_mapper_commands = {}
+        be.environment = mock.MagicMock()
+        be.environment.get_build_dir.return_value = builddir
+        be.environment.get_build_command.return_value = ['meson']
+        be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
+        be.add_build = mock.MagicMock()
+        cpp = mock.MagicMock()
+        cpp.get_id.return_value = cid
+        cpp.cpp_module_family.return_value = cid
+        cpp.get_exelist.return_value = ['c++']
+        cpp.get_module_bmi_suffix.return_value = suffix
+        cpp.get_module_cache_dir.return_value = 'gcm.cache'
+        cpp.get_header_unit_consumer_args.return_value = []
+        cpp.program_mapper_quotes.return_value = True
+        cpp.get_bmi_class_key.return_value = ()
+        # No provider imports units here: the target declares its own, so
+        # the relevant/irrelevant split is only consulted for an empty
+        # provider loop.
+        cpp.split_bmi_args.return_value = ([], [])
+        # The backend resolves a unit's file through the compiler's
+        # include-flag inventory; a real family shape drives the walk.
+        cpp.get_include_dir_flags.return_value = (
+            (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
+            if cid == 'msvc' else
+            (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+             ('-iquote', 1), ('-I', 2)))
 
-            def probe(args):
-                with mock.patch('mesonbuild.backend.ninjabackend.mesonlib.Popen_safe',
-                                return_value=(proc, '', stderr)) as popen:
-                    chain = be._gcc_include_chain(cpp, args)
-                return chain, popen.call_count
+        def provision(tid, args):
+            target = mock.MagicMock()
+            target.get_id.return_value = tid
+            target.cpp_header_units = ['util.h']
+            target.compilers = {'cpp': cpp}
+            target.get_generated_sources.return_value = []
+            be._generate_single_compile = mock.MagicMock(return_value=args)
+            return be.provision_header_units(target, cpp)[0]
 
-            # A chain-shaping flag splits the memo: two probes, two entries.
-            chain_a, calls_a = probe(['--sysroot=/a'])
-            chain_b, calls_b = probe(['--sysroot=/b'])
-            self.assertEqual(calls_a, 1)
-            self.assertEqual(calls_b, 1)
-            self.assertEqual(len(be._gcc_include_chains), 2)
-            # The same arglist reuses its entry: no second probe.
-            _, calls_again = probe(['--sysroot=/a'])
-            self.assertEqual(calls_again, 0)
-            self.assertEqual(len(be._gcc_include_chains), 2)
-            # Include-only differences reshape nothing: a fresh probe each (the
-            # over-split), but byte-identical chains -- harmless by construction,
-            # since a target's own include dirs are filtered out of the chain.
-            chain_x, calls_x = probe(['-I/x'])
-            chain_y, calls_y = probe(['-I/y'])
-            self.assertEqual(calls_x, 1)
-            self.assertEqual(calls_y, 1)
-            self.assertEqual(chain_x, chain_y,
-                             'an include-only arg difference must over-split into '
-                             'identical chains, never diverge')
-            # Every probe yields the built-in block, in search order.
-            self.assertEqual(chain_a, [d1, d2])
-            self.assertEqual(chain_a, chain_b)
+        return be, provision
 
     def test_header_unit_dedup_shared_by_spelling(self):
-        # On a single-class machine (an empty BMI class registry) a header unit
-        # is deduped globally by (mode, resolved identity) for both compilers:
-        # another target that spells and resolves the same file reuses the one
-        # BMI, even if its compile args differ, so the first edge builds the
-        # unit for every consumer. A same-spelling unit resolving to a different
-        # file is a different identity and earns its own BMI (see
+        # On a single-class machine a header unit is deduped globally by
+        # (mode, resolved file) for every compiler: another target that
+        # resolves the same file reuses the one BMI, even if its compile args
+        # differ, so the first edge builds the unit for every consumer. A
+        # same-spelling unit resolving to a different file is a different unit
+        # and earns its own BMI (see
         # test_header_unit_distinct_files_same_spelling). Per-class dedup on a
         # multi-class machine is covered by the bmi_classes fixture tests.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-
-        def outputs_for(cid, suffix, builddir):
-            be = NinjaBackend.__new__(NinjaBackend)
-            # Mapper files: these pin the static mapper's naming.
-            be.build_to_src = '..'
-            be.all_outputs = set()
-            be._bmi_classes = {}
-            be._header_units = {}
-            be._header_unit_class = {}
-            be._header_unit_group = {}
-            be._target_header_unit_outputs = {}
-            be._target_header_unit_consumer_args = {}
-            be._target_header_unit_bmis = {}
-            be._target_generated_outputs = {}
-            be._warned_header_unit_divergence = set()
-            be._warned_header_unit_names = set()
-            be._probed_header_units = {}
-            be._dir_aliases = {}
-            be._target_imported_header_units = {}
-            # A real build tree holding the header on the -I path: GCC names a
-            # unit by the path it resolves to, so a unit that resolves nowhere is
-            # not built at all and has no output to dedup. The walk finds it here
-            # without asking the compiler, so no probe runs.
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = builddir
-            be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
-            be.add_build = mock.MagicMock()
-            cpp = mock.MagicMock()
-            cpp.get_id.return_value = cid
-            cpp.cpp_module_family.return_value = cid
-            cpp.get_exelist.return_value = ['c++']
-            cpp.get_module_bmi_suffix.return_value = suffix
-            cpp.get_module_cache_dir.return_value = 'gcm.cache'
-            cpp.get_header_unit_consumer_args.return_value = []
-            # No provider imports units here: the target declares its own, so
-            # the relevant/irrelevant split is only consulted for an empty
-            # provider loop.
-            cpp.split_bmi_args.return_value = ([], [])
-            # The backend resolves a unit's identity through the compiler's
-            # include-flag inventory; a real family shape drives the walk.
-            cpp.get_include_dir_flags.return_value = (
-                (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
-                if cid == 'msvc' else
-                (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
-                 ('-iquote', 1), ('-I', 2)))
-
-            def provision(tid, args):
-                target = mock.MagicMock()
-                target.get_id.return_value = tid
-                target.cpp_header_units = ['util.h']
-                target.compilers = {'cpp': cpp}
-                target.get_generated_sources.return_value = []
-                be._generate_single_compile = mock.MagicMock(return_value=args)
-                return be.provision_header_units(target, cpp)[0]
-
-            return (provision('a', ['-Iinc', '-DFOO']),
-                    provision('b', ['-Iinc', '-DBAR']),
-                    provision('c', ['-Iinc', '-DFOO']))
-
         for cid, suffix in (('msvc', '.ifc'), ('gcc', '.gcm')):
             with tempfile.TemporaryDirectory() as builddir:
-                os.makedirs(os.path.join(builddir, 'inc'))
+                os.makedirs(os.path.join(builddir, 'inc', 'sub'))
                 with open(os.path.join(builddir, 'inc', 'util.h'), 'w', encoding='utf-8') as f:
                     f.write('#pragma once\n')
-                a, b, c = outputs_for(cid, suffix, builddir)
-            # Differing args (-DFOO vs -DBAR) never split the BMI: one shared
-            # edge per spelling, regardless of compiler.
-            self.assertEqual(a, b)
-            self.assertEqual(a, c)
-            self.assertTrue(a.endswith(suffix))
+                be, provision = self._header_unit_backend(cid, suffix, builddir)
+                a = provision('a', ['-Iinc', '-DFOO'])
+                b = provision('b', ['-Iinc', '-DBAR'])
+                c = provision('c', ['-Iinc', '-DFOO'])
+                # Differing args (-DFOO vs -DBAR) never split the BMI: one
+                # shared edge, regardless of compiler.
+                self.assertEqual(a, b)
+                self.assertEqual(a, c)
+                self.assertTrue(a.endswith(suffix))
+                self.assertEqual(be.add_build.call_count, 1, cid)
+                if cid == 'gcc':
+                    # GCC keys the unit by its real path, so a target reaching
+                    # the same file through another -I spelling shares it too,
+                    # and every declarer's manifest names that one BMI.
+                    d = provision('d', ['-Iinc/sub/..'])
+                    self.assertEqual(a, d)
+                    self.assertEqual(be.add_build.call_count, 1)
+                    real = os.path.realpath(os.path.join(builddir, 'inc', 'util.h'))
+                    for tid in 'abcd':
+                        with open(os.path.join(builddir, 'meson-private', 'gcc-header-units',
+                                               f'{tid}@default.json'), encoding='utf-8') as f:
+                            self.assertEqual(json.load(f)['header_units'], {real: a}, tid)
 
     def test_header_unit_distinct_files_same_spelling(self):
         # Two targets in one class declare a header unit spelled alike but their
         # -I paths resolve it to different files. The dedup key carries the
-        # resolved identity, so each earns its own BMI: a key of (mode, spelling)
+        # resolved file, so each earns its own BMI: a key of (mode, spelling)
         # alone would hand the second target the first's BMI, built from the
-        # wrong header, silently. Identity is resolvable only for a user unit on
-        # the -I path; a system unit falls back to its spelling, the sole dedup
-        # axis there.
-        from mesonbuild.backend.ninjabackend import NinjaBackend
-
-        def outputs_for(cid, suffix, builddir):
-            be = NinjaBackend.__new__(NinjaBackend)
-            # Mapper files: these pin the static mapper's naming.
-            be.build_to_src = '..'
-            be.all_outputs = set()
-            be._bmi_classes = {}
-            be._header_units = {}
-            be._header_unit_class = {}
-            be._header_unit_group = {}
-            be._target_header_unit_outputs = {}
-            be._target_header_unit_consumer_args = {}
-            be._target_header_unit_bmis = {}
-            be._target_generated_outputs = {}
-            be._warned_header_unit_divergence = set()
-            be._warned_header_unit_names = set()
-            be._probed_header_units = {}
-            be._dir_aliases = {}
-            be._target_imported_header_units = {}
-            be.environment = mock.MagicMock()
-            be.environment.get_build_dir.return_value = builddir
-            be.get_compiler_rule_name = mock.MagicMock(return_value='cpp_HEADER_UNIT')
-            be.add_build = mock.MagicMock()
-            cpp = mock.MagicMock()
-            cpp.get_id.return_value = cid
-            cpp.cpp_module_family.return_value = cid
-            cpp.get_exelist.return_value = ['c++']
-            cpp.get_module_bmi_suffix.return_value = suffix
-            cpp.get_module_cache_dir.return_value = 'gcm.cache'
-            cpp.get_header_unit_consumer_args.return_value = []
-            cpp.split_bmi_args.return_value = ([], [])
-            # The backend resolves a unit's identity through the compiler's
-            # include-flag inventory; a real family shape drives the walk.
-            cpp.get_include_dir_flags.return_value = (
-                (('-idirafter', 0), ('-isystem', 0), ('-iquote', 0), ('-I', 0))
-                if cid == 'msvc' else
-                (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
-                 ('-iquote', 1), ('-I', 2)))
-
-            def provision(tid, incdir):
-                target = mock.MagicMock()
-                target.get_id.return_value = tid
-                target.cpp_header_units = ['util.h']
-                target.compilers = {'cpp': cpp}
-                target.get_generated_sources.return_value = []
-                be._generate_single_compile = mock.MagicMock(return_value=[f'-I{incdir}'])
-                return be.provision_header_units(target, cpp)[0]
-
-            return provision('a', 'inc_a'), provision('b', 'inc_b')
-
+        # wrong header, silently. On cl and clang the file is resolvable only
+        # for a user unit on the -I path; a system unit falls back to its
+        # spelling, the sole dedup axis there.
         for cid, suffix in (('msvc', '.ifc'), ('gcc', '.gcm')):
             with tempfile.TemporaryDirectory() as builddir:
                 for inc in ('inc_a', 'inc_b'):
                     os.makedirs(os.path.join(builddir, inc))
                     with open(os.path.join(builddir, inc, 'util.h'), 'w', encoding='utf-8') as f:
                         f.write(f'#pragma once\n// {inc}\n')
-                a, b = outputs_for(cid, suffix, builddir)
+                _, provision = self._header_unit_backend(cid, suffix, builddir)
+                a = provision('a', ['-Iinc_a'])
+                b = provision('b', ['-Iinc_b'])
             self.assertNotEqual(a, b, f'{cid}: two files sharing a spelling shared one BMI')
             self.assertTrue(a.endswith(suffix))
             self.assertTrue(b.endswith(suffix))
 
     def test_inherited_header_unit_forward_slashes_provider_includes(self):
-        # A target's own header-unit path forward-slashes its -I dirs (GCC names
-        # a unit from the -I spelling, and the mapper key and default CMI path
-        # must match). The BMI-only variant and the inherited-units loop compose
-        # a *provider's* un-rewritten BMI-irrelevant args instead, so on Windows
-        # their include dirs keep backslashes and name the one shared unit a
-        # second way -- two edges for one key, the survivor generation-order
-        # dependent. Routing the composed args through the same forward-slasher
-        # makes both sides compute one name. Include dirs being BMI-irrelevant,
-        # the class key is untouched; the rewrite is a strict no-op off Windows.
+        # A target's own header-unit path forward-slashes its -I dirs. The
+        # BMI-only variant and the inherited-units loop compose a *provider's*
+        # un-rewritten BMI-irrelevant args instead, so on Windows their include
+        # dirs keep backslashes. Routing the composed args through the same
+        # forward-slasher makes both sides resolve the unit through one
+        # spelling. Include dirs being BMI-irrelevant, the class key is
+        # untouched; the rewrite is a strict no-op off Windows.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         with tempfile.TemporaryDirectory() as builddir:
             os.makedirs(os.path.join(builddir, 'inc', 'sub'))
@@ -1837,11 +1170,11 @@ Thread model: posix'''), '21.9.0')
                 # names nothing rather than probing g++.
                 with mock.patch.object(NinjaBackend, '_probe_header_unit_path',
                                        return_value=None):
-                    return be._header_unit_gcc_name(cpp, args, 'user', 'hdr.h')
+                    return be._header_unit_file(cpp, args, 'user', 'hdr.h')
 
             # The target's own path (already forward-slashed at provisioning).
             target_name = name(['-Iinc/sub'])
-            self.assertEqual(target_name, './inc/sub/hdr.h')
+            self.assertEqual(target_name, 'inc/sub/hdr.h')
 
             # The provider's include dirs arrive un-rewritten -- backslashed on
             # Windows. Left alone they resolve nowhere and name the unit
@@ -1884,42 +1217,36 @@ Thread model: posix'''), '21.9.0')
                                       '-iquote': 0, '-I': 0})
 
     def test_include_arg_parsers_consume_inventory(self):
-        # The three include-arg parsers consume the compiler inventory. For -I
-        # and -isystem alone their output is identical to the pre-inventory
-        # hard-coded behavior (regression pin); -iquote/-idirafter/-cxx-isystem
-        # are now recognized for extraction and rewriting too. Resolution walks
-        # GCC's actual search order and skips -idirafter, whose directories are
-        # searched past the standard ones a command-line walk cannot see.
+        # The include-arg parsers consume the compiler inventory: extraction
+        # and rewriting recognize -I, -isystem, -iquote, -idirafter and
+        # -cxx-isystem in both their joined and separated spellings, leaving
+        # every other token alone. Resolution walks GCC's actual search order
+        # and skips -idirafter, whose directories are searched past the
+        # standard ones a command-line walk cannot see.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
-        be._respell_dir = lambda d, class_tag=None, force_all=False: 'R:' + d
-        be._reclass_dir = lambda d, new_tag: 'C:' + d
         cpp = mock.MagicMock()
-        cpp.get_include_dir_flags.return_value = (
-            ('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
-            ('-iquote', 1), ('-I', 2))
+        inventory = (('-cxx-isystem', 3), ('-idirafter', None), ('-isystem', 3),
+                     ('-iquote', 1), ('-I', 2))
+        cpp.get_include_dir_flags.return_value = inventory
+
+        def dirs(args):
+            return [d for kind, _, d, _, _ in NinjaBackend._iter_include_args(inventory, args)
+                    if kind == 'inc']
 
         base = ['-IjoinedA', '-I', 'sepA', '-isystem', 'sysSep',
                 '-isystemJoinedS', '-DFOO', '-Wall']
-        self.assertEqual(be._include_dirs_of(cpp, base),
-                         ['joinedA', 'sepA', 'sysSep', 'JoinedS'])
+        self.assertEqual(dirs(base), ['joinedA', 'sepA', 'sysSep', 'JoinedS'])
         self.assertEqual(
-            be._respell_include_args(cpp, list(base), 'tag'),
+            NinjaBackend._map_include_args(inventory, base, lambda d: 'R:' + d),
             ['-IR:joinedA', '-I', 'R:sepA', '-isystem', 'R:sysSep',
              '-isystemR:JoinedS', '-DFOO', '-Wall'])
-        self.assertEqual(
-            be._reclass_include_args(cpp, list(base), 'tag'),
-            ['-IC:joinedA', '-I', 'C:sepA', '-isystem', 'C:sysSep',
-             '-isystemC:JoinedS', '-DFOO', '-Wall'])
 
         new = ['-iquoteQ', '-idirafter', 'DA', '-cxx-isystem', 'CX']
-        self.assertEqual(be._include_dirs_of(cpp, new), ['Q', 'DA', 'CX'])
+        self.assertEqual(dirs(new), ['Q', 'DA', 'CX'])
         self.assertEqual(
-            be._respell_include_args(cpp, list(new), 'tag'),
+            NinjaBackend._map_include_args(inventory, new, lambda d: 'R:' + d),
             ['-iquoteR:Q', '-idirafter', 'R:DA', '-cxx-isystem', 'R:CX'])
-        self.assertEqual(
-            be._reclass_include_args(cpp, list(new), 'tag'),
-            ['-iquoteC:Q', '-idirafter', 'C:DA', '-cxx-isystem', 'C:CX'])
 
         with tempfile.TemporaryDirectory() as d:
             for sub in ('inc', 'q', 'da'):
@@ -1931,13 +1258,13 @@ Thread model: posix'''), '21.9.0')
             # -I precedes -iquote on the command line, but GCC searches -iquote
             # first, so the resolved key is the iquote path, not the -I one.
             self.assertEqual(
-                be._header_unit_mapper_key(cpp, ['-Iinc', '-iquoteq'], 'h.h'),
+                be._header_unit_include_path(cpp, ['-Iinc', '-iquoteq'], 'h.h'),
                 os.path.join('q', 'h.h'))
             # A file only under an -idirafter directory is left unresolved
             # (None) -- deferred to the compiler probe rather than trusting a
             # hit a standard directory could shadow unseen.
             self.assertIsNone(
-                be._header_unit_mapper_key(cpp, ['-idirafterda'], 'h.h'))
+                be._header_unit_include_path(cpp, ['-idirafterda'], 'h.h'))
 
     def test_cpp_header_units_rejected_on_unsupported_compiler(self):
         # Declaring cpp_header_units on a compiler without header-unit support
@@ -2499,7 +1826,7 @@ Thread model: posix'''), '21.9.0')
         def collate(extra: T.List[str]) -> int:
             return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
                               '--bmi-dir', 'shared', '--bmi-suffix', '.gcm',
-                              '--mapper-suffix', '.mapper',
+                              '--mapper-suffix', '.mapper.json',
                               '--dep-provmap', 'dep-pm.json', *extra,
                               'test1.cppm.o.ddi', 'main1.cpp.o.ddi'])
 
@@ -2520,19 +1847,19 @@ Thread model: posix'''), '21.9.0')
                 # Without --all-provides-private/--private-bmi-dir: both
                 # names resolve at --bmi-dir, as before.
                 self.assertEqual(collate([]), 0)
-                with open('main1.cpp.o.mapper', encoding='utf-8') as f:
-                    self.assertEqual(f.read(),
-                                     'tests shared/tests.gcm\n'
-                                     'libmod shared/libmod.gcm\n')
+                with open('main1.cpp.o.mapper.json', encoding='utf-8') as f:
+                    self.assertEqual(json.load(f)['modules'],
+                                     {'tests': 'shared/tests.gcm',
+                                      'libmod': 'shared/libmod.gcm'})
 
                 # With --all-provides-private and --private-bmi-dir: the
                 # own-provided name resolves at --private-bmi-dir, but the
                 # dependency-provided name still resolves at --bmi-dir.
                 self.assertEqual(collate(['--all-provides-private', '--private-bmi-dir', 'private']), 0)
-                with open('main1.cpp.o.mapper', encoding='utf-8') as f:
-                    self.assertEqual(f.read(),
-                                     'tests private/tests.gcm\n'
-                                     'libmod shared/libmod.gcm\n')
+                with open('main1.cpp.o.mapper.json', encoding='utf-8') as f:
+                    self.assertEqual(json.load(f)['modules'],
+                                     {'tests': 'private/tests.gcm',
+                                      'libmod': 'shared/libmod.gcm'})
             finally:
                 os.chdir(olddir)
 
@@ -2570,16 +1897,21 @@ Thread model: posix'''), '21.9.0')
                                                 '--interface-source', '../src/fmt.cc'])), 0)
             self.assertEqual(run_p1689(args(d, [])), 0)
 
+    def _p1689_units_manifest(self, units):
+        # A (target, BMI class) units manifest, as setup writes it.
+        with open('units.json', 'w', encoding='utf-8') as f:
+            json.dump({'bmi_class': 'default', 'target': "'t'", 'header_units': units}, f)
+
     def test_depaccumulate_p1689_mapper_emission(self):
-        # With --mapper-suffix the collate writes one GCC module mapper per
-        # TU (at the CWD-relative primary-output, like the compiler's own
-        # BMI paths), naming exactly its provides and direct imports:
-        # provides and named-module requires at the class-cache path,
-        # header-unit requires at the compiler's default cache path
-        # (--default-cmi-root; a mapper disables GCC's default mapping, so the
-        # collate must reproduce it). A TU with no module traffic gets an
-        # empty mapper, and no mapper is written at all without the flag.
+        # With --mapper-suffix the collate writes one mapper table per TU (at
+        # the CWD-relative primary-output, like the compiler's own BMI paths),
+        # naming exactly its provides and direct imports: provides and
+        # named-module requires at the class-cache path, header-unit requires
+        # by real path at the BMI the units manifest names. A TU with no
+        # module traffic gets an empty table, and no table is written at all
+        # without the flag.
         from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import header_unit_key
 
         def collate(extra: T.List[str]) -> int:
             return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
@@ -2588,14 +1920,18 @@ Thread model: posix'''), '21.9.0')
                               '--dep-provmap', 'dep-pm.json', *extra,
                               'a.cppm.o.ddi', 'main.cpp.o.ddi', 'plain.cpp.o.ddi'])
 
-        def read(name: str) -> str:
+        def read(name: str) -> T.Any:
             with open(name, encoding='utf-8') as f:
-                return f.read()
+                return json.load(f)
 
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
             try:
+                with open('util.h', 'w', encoding='utf-8'):
+                    pass
+                real = header_unit_key('util.h')
+                self._p1689_units_manifest({real: 'hu/util.h.0.gcm'})
                 with open('a.cppm.o.ddi', 'w', encoding='utf-8') as f:
                     json.dump({'rules': [{
                         'primary-output': 'a.cppm.o',
@@ -2612,17 +1948,18 @@ Thread model: posix'''), '21.9.0')
 
                 self.assertEqual(collate([]), 0)
                 for obj in ('a.cppm.o', 'main.cpp.o', 'plain.cpp.o'):
-                    self.assertFalse(os.path.exists(obj + '.mapper'))
+                    self.assertFalse(os.path.exists(obj + '.mapper.json'))
 
-                self.assertEqual(collate(['--mapper-suffix', '.mapper',
-                                          '--default-cmi-root', 'gcm.cache']), 0)
-                self.assertEqual(read('a.cppm.o.mapper'),
-                                 'A gcm.cache/deadbeefcafe/A.gcm\n'
-                                 'B gcm.cache/deadbeefcafe/B.gcm\n'
-                                 './util.h gcm.cache/,/util.h.gcm\n')
-                self.assertEqual(read('main.cpp.o.mapper'),
-                                 'A gcm.cache/deadbeefcafe/A.gcm\n')
-                self.assertEqual(read('plain.cpp.o.mapper'), '')
+                self.assertEqual(collate(['--mapper-suffix', '.mapper.json',
+                                          '--header-unit-manifest', 'units.json']), 0)
+                self.assertEqual(read('a.cppm.o.mapper.json'), {
+                    'modules': {'A': 'gcm.cache/deadbeefcafe/A.gcm',
+                                'B': 'gcm.cache/deadbeefcafe/B.gcm'},
+                    'header_units': {real: 'hu/util.h.0.gcm'}})
+                self.assertEqual(read('main.cpp.o.mapper.json'), {
+                    'modules': {'A': 'gcm.cache/deadbeefcafe/A.gcm'}, 'header_units': {}})
+                self.assertEqual(read('plain.cpp.o.mapper.json'),
+                                 {'modules': {}, 'header_units': {}})
             finally:
                 os.chdir(olddir)
 
@@ -2637,6 +1974,7 @@ Thread model: posix'''), '21.9.0')
             os.chdir(d)
             try:
                 os.mkdir('variant')
+                self._p1689_units_manifest({})
                 with open('a.gcm.ddi', 'w', encoding='utf-8') as f:
                     json.dump({'rules': [{
                         'primary-output': 'variant/a.gcm',
@@ -2651,12 +1989,12 @@ Thread model: posix'''), '21.9.0')
                      '--dep-provmap', 'dep-pm.json',
                      '--stamp-suffix', '.gcm.stamp',
                      '--interface-source', '../src/a.cppm',
-                     '--mapper-suffix', '.mapper',
-                     '--default-cmi-root', 'gcm.cache', 'a.gcm.ddi']), 0)
-                with open('variant/a.gcm.mapper', encoding='utf-8') as f:
-                    self.assertEqual(f.read(),
-                                     'A variant/a.gcm\n'
-                                     'B gcm.cache/deadbeefcafe/B.gcm\n')
+                     '--mapper-suffix', '.mapper.json',
+                     '--header-unit-manifest', 'units.json', 'a.gcm.ddi']), 0)
+                with open('variant/a.gcm.mapper.json', encoding='utf-8') as f:
+                    self.assertEqual(json.load(f)['modules'],
+                                     {'A': 'variant/a.gcm',
+                                      'B': 'gcm.cache/deadbeefcafe/B.gcm'})
                 with open('out.dd', encoding='utf-8') as f:
                     dd = f.read()
                 # Ordering rides the dep's harvest stamp; no BMI output is
@@ -2667,11 +2005,12 @@ Thread model: posix'''), '21.9.0')
                 os.chdir(olddir)
 
     def test_depaccumulate_p1689_mapper_copy_if_different(self):
-        # Mapper files are implicit inputs of compile edges: a re-collate that
-        # does not change a TU's mapping must leave the file untouched
-        # (mtime included), or every object in the target would recompile
-        # whenever any module in it changes.
+        # Tables are implicit inputs of compile edges: a re-collate that does
+        # not change a TU's mapping must leave the file untouched (mtime
+        # included), or every object in the target would recompile whenever
+        # any module in it changes.
         from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import header_unit_key
 
         def collate(requires: T.List[str]) -> int:
             with open('m.cpp.o.ddi', 'w', encoding='utf-8') as f:
@@ -2682,29 +2021,31 @@ Thread model: posix'''), '21.9.0')
             return run_p1689(['--dyndep', 'out.dd', '--provmap', 'pm.json',
                               '--bmi-dir', 'gcm.cache/deadbeefcafe',
                               '--bmi-suffix', '.gcm',
-                              '--mapper-suffix', '.mapper',
-                              '--default-cmi-root', 'gcm.cache', 'm.cpp.o.ddi'])
+                              '--mapper-suffix', '.mapper.json',
+                              '--header-unit-manifest', 'units.json', 'm.cpp.o.ddi'])
 
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
             try:
+                with open('util.h', 'w', encoding='utf-8'):
+                    pass
+                self._p1689_units_manifest({header_unit_key('util.h'): 'hu/util.h.0.gcm'})
                 self.assertEqual(collate([]), 0)
-                before = os.stat('m.cpp.o.mapper').st_mtime_ns
+                before = os.stat('m.cpp.o.mapper.json').st_mtime_ns
                 self.assertEqual(collate([]), 0)
-                self.assertEqual(os.stat('m.cpp.o.mapper').st_mtime_ns, before,
-                                 'unchanged mapper content must keep its mtime')
+                self.assertEqual(os.stat('m.cpp.o.mapper.json').st_mtime_ns, before,
+                                 'unchanged table content must keep its mtime')
                 self.assertEqual(collate(['./util.h']), 0)
-                with open('m.cpp.o.mapper', encoding='utf-8') as f:
-                    self.assertIn('./util.h gcm.cache/,/util.h.gcm', f.read())
+                with open('m.cpp.o.mapper.json', encoding='utf-8') as f:
+                    self.assertIn('hu/util.h.0.gcm', json.load(f)['header_units'].values())
             finally:
                 os.chdir(olddir)
 
     def test_depaccumulate_p1689_program_mapper_table(self):
-        # --mapper-format json writes a mapper program's per-TU table: the
-        # same provides and direct imports as a mapper file, with header units
-        # by real path from the manifest -- whatever spelling the scan
-        # reported. A unit missing from the manifest is an error.
+        # A table keys header units by real path from the manifest, whatever
+        # spelling the scan reported, spaced or reached through '..'. A unit
+        # missing from the manifest is an error.
         from mesonbuild.scripts.depaccumulate import run_p1689
         from mesonbuild.utils.core import header_unit_key
         olddir = os.getcwd()
@@ -2715,9 +2056,7 @@ Thread model: posix'''), '21.9.0')
                 with open('src dir/util.h', 'w', encoding='utf-8'):
                     pass
                 real = header_unit_key('src dir/util.h')
-                with open('units.json', 'w', encoding='utf-8') as f:
-                    json.dump({'bmi_class': 'default', 'target': "'t'",
-                               'header_units': {real: 'hu/util.h.0.gcm'}}, f)
+                self._p1689_units_manifest({real: 'hu/util.h.0.gcm'})
                 with open('a.ddi', 'w', encoding='utf-8') as f:
                     json.dump({'rules': [{
                         'primary-output': 'a.o',
@@ -2729,7 +2068,7 @@ Thread model: posix'''), '21.9.0')
                 args = ['--dyndep', 'out.dd', '--provmap', 'pm.json',
                         '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
                         '--dep-provmap', 'dep-pm.json',
-                        '--mapper-suffix', '.mapper.json', '--mapper-format', 'json',
+                        '--mapper-suffix', '.mapper.json',
                         '--header-unit-manifest', 'units.json', 'a.ddi']
                 self.assertEqual(run_p1689(args), 0)
                 with open('a.o.mapper.json', encoding='utf-8') as f:
@@ -2742,8 +2081,7 @@ Thread model: posix'''), '21.9.0')
                 self.assertEqual(run_p1689(args[:-1] + ['--hashed-table-dir', 'tables', 'a.ddi']), 0)
                 digest = hashlib.sha1(b'a.o').hexdigest()[:16]
                 self.assertTrue(os.path.isfile(f'tables/{digest}.json'))
-                with open('units.json', 'w', encoding='utf-8') as f:
-                    json.dump({'header_units': {}}, f)
+                self._p1689_units_manifest({})
                 with self.assertRaisesRegex(MesonException, 'not declared'):
                     run_p1689(args)
             finally:
@@ -2771,6 +2109,64 @@ Thread model: posix'''), '21.9.0')
         (flag,) = old.get_module_program_mapper_args(cmd[:1] + ['/opt/m.py'], 'c1', 'm/u?.json')
         self.assertEqual(flag, '-fmodule-mapper=|/usr/bin/python3 /opt/m.py '
                                '--bmi-class c1 --units m/u?.json?')
+
+    def test_gcc_program_mapper_command(self):
+        # Which command line starts the mapper server. GCC 16 quotes, so the
+        # absolute command running Meson always works; so does any GCC when
+        # that command holds nothing it would split. Before 16, a spaced
+        # command is replaced by a bare 'meson' only when PATH finds this very
+        # Meson -- the script or executable after any interpreter, compared
+        # by real path -- and is a setup error otherwise.
+        def gcc(version):
+            c = GnuCPPCompiler.__new__(GnuCPPCompiler)
+            c.version = version
+            return c
+
+        tail = ['--internal', 'gccmapper']
+        spaced = ['/opt/sp ace/bin/meson']
+        uninstalled = ['/usr/bin/python3', '/opt/sp ace/meson/meson.py']
+        as_module = ['/opt/py thon/python3', '-m', 'mesonbuild.mesonmain']
+        never = mock.Mock(side_effect=AssertionError('PATH must not be searched'))
+        for cmd in (spaced, uninstalled, as_module):
+            self.assertEqual(gcc('16.1.0').program_mapper_command(cmd, never), cmd + tail)
+        plain = ['/usr/bin/python3', '/opt/meson/meson.py']
+        self.assertEqual(gcc('14.3.1').program_mapper_command(plain, never), plain + tail)
+
+        with tempfile.TemporaryDirectory() as d:
+            launcher = os.path.join(d, 'sp ace', 'meson')
+            os.makedirs(os.path.dirname(launcher))
+            with open(launcher, 'w', encoding='utf-8'):
+                pass
+            link = os.path.join(d, 'meson')
+            try:
+                os.symlink(launcher, link)
+            except (OSError, NotImplementedError):
+                link = launcher
+            other = os.path.join(d, 'other-meson')
+            with open(other, 'w', encoding='utf-8'):
+                pass
+            for version in ('14.3.1', '15.3.0'):
+                old = gcc(version)
+                # PATH finds this Meson, directly or through a link.
+                for found in (launcher, link):
+                    self.assertEqual(old.program_mapper_command([launcher], lambda _: found),
+                                     ['meson'] + tail)
+                self.assertEqual(old.program_mapper_command(['/usr/bin/python3', launcher],
+                                                            lambda _: launcher),
+                                 ['meson'] + tail)
+                # PATH finds another Meson, or none; and an interpreter-run
+                # package names no launcher to compare.
+                for cmd, found in (([launcher], other), ([launcher], None),
+                                   (as_module, launcher)):
+                    with self.assertRaises(MesonException) as cm:
+                        old.program_mapper_command(cmd, lambda _: found)
+                    self.assertEqual(
+                        str(cm.exception),
+                        f"GCC {version} cannot start Meson's C++ module mapper: its "
+                        f"command line holds {cmd[0]!r}, and before GCC 16 that command "
+                        'line is split at every space, with no quoting. Use GCC 16 or '
+                        'later, install Meson and Python at paths without spaces, or put '
+                        'this Meson on PATH as "meson".')
 
     def test_gccmapper_lex(self):
         # The request tokenizer: words split on spaces and tabs, quoted
@@ -2903,28 +2299,6 @@ Thread model: posix'''), '21.9.0')
                 self.assertEqual(sorted(os.listdir('.')), ['src dir', 't.json', 'units.json'])
             finally:
                 os.chdir(olddir)
-
-    def test_depaccumulate_default_cmi_path(self):
-        # GCC's default header-unit CMI naming under the cache root: '.' and
-        # '..' path components become ',' and ',,'; an absolute resolved path
-        # is appended as-is under the cache root. A Windows drive letter's
-        # colon is mangled the same way, to a hyphen.
-        from mesonbuild.utils.core import default_cmi_path
-        cases = {
-            './util.h': 'gcm.cache/,/util.h.gcm',
-            './../srcx/hdr.h': 'gcm.cache/,/,,/srcx/hdr.h.gcm',
-            '../srcx/hdr.h': 'gcm.cache/,,/srcx/hdr.h.gcm',
-            '/usr/include/c++/16/vector': 'gcm.cache/usr/include/c++/16/vector.gcm',
-            'C:/Users/x/vector': 'gcm.cache/C-/Users/x/vector.gcm',
-            # Backslashes are kept verbatim (GCC does not split on them): a
-            # backslash-fused component stays one component, only a leading
-            # drive colon still mangling. These are GCC's own default paths.
-            '.\\util.h': 'gcm.cache/.\\util.h.gcm',
-            './..\\srcx\\inc/hdr.h': 'gcm.cache/,/..\\srcx\\inc/hdr.h.gcm',
-            'C:\\Users\\x\\vector': 'gcm.cache/C-\\Users\\x\\vector.gcm',
-        }
-        for name, want in cases.items():
-            self.assertEqual(default_cmi_path(name, 'gcm.cache', '.gcm'), want, name)
 
     def test_depaccumulate_is_header_unit(self):
         from mesonbuild.scripts.depaccumulate import _is_header_unit

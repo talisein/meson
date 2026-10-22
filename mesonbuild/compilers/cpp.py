@@ -870,14 +870,13 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # carried by the dyndep instead. BMI generation is unaffected. Every
         # arg here is unused: GCC carries no cache dir on the command line, so
         # there is no output pair to drop for emit_output; every BMI a compile
-        # resolves, in any class or a target-private directory, is named by the
-        # per-TU module mapper instead (get_module_mapper_args), whose contents
-        # the collator resolves (--private-bmi-dir/--private-interface-object at
-        # the collator, in lockstep with this target's own privacy), which the
-        # backend adds to compile edges only -- a scan resolves no named
-        # modules, and header units stay in the default-named cache the
-        # mapper-less scan already finds. GCC has no ccache-defeat pair to
-        # suppress either, so existing_args is unused.
+        # resolves, in any class or a target-private directory, is named by
+        # Meson's mapper program instead (get_module_program_mapper_args),
+        # answering from a per-TU table the collator writes
+        # (--private-bmi-dir/--private-interface-object at the collator, in
+        # lockstep with this target's own privacy). A scan asks it only for
+        # named modules' names and for header units, by real path. GCC has no
+        # ccache-defeat pair to suppress either, so existing_args is unused.
         return [self._named_modules_flag(), '-Mno-modules']
 
     # What GCC 16's mapper-command splitter (libiberty's buildargv) treats as
