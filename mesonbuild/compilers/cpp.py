@@ -913,11 +913,22 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         if launcher is not None and found is not None \
                 and os.path.realpath(found) == os.path.realpath(launcher):
             return ['meson', '--internal', 'gccmapper']
+        head = (f'GCC {self.version} cannot start Meson\'s C++ module mapper: its command '
+                f'line holds {bad[0]!r}, and before GCC 16 that command line is split at '
+                'every space, with no quoting.')
+        if launcher is None:
+            raise MesonException(
+                f'{head} Meson runs as a Python module here, so no "meson" on PATH '
+                'can stand in for it. Use GCC 16 or later, install Python at a path '
+                'without spaces, or run Meson through its "meson" launcher on PATH.')
+        if found is not None:
+            raise MesonException(
+                f'{head} The "meson" on PATH, {found!r}, is not this Meson '
+                f'({launcher!r}). Use GCC 16 or later, install Meson and Python at '
+                'paths without spaces, or put this Meson first on PATH as "meson".')
         raise MesonException(
-            f'GCC {self.version} cannot start Meson\'s C++ module mapper: its command '
-            f'line holds {bad[0]!r}, and before GCC 16 that command line is split at '
-            'every space, with no quoting. Use GCC 16 or later, install Meson and '
-            'Python at paths without spaces, or put this Meson on PATH as "meson".')
+            f'{head} Use GCC 16 or later, install Meson and Python at paths without '
+            'spaces, or put this Meson on PATH as "meson".')
 
     def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
                                        units: str, table: T.Optional[str] = None) -> T.List[str]:

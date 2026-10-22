@@ -228,8 +228,9 @@ kwargs:
       spelling of a declared file reaches its unit: `import "../header.h";`
       from a subdirectory finds the unit declared as `'header.h'`. MSVC matches
       a unit by the literal import spelling, so use one include-path spelling
-      from every importer there. Importing a header that is declared nowhere
-      is an error, on GCC at the importer's dependency scan.
+      from every importer there. Importing a header the importing target did
+      not declare is an error, even where another target declares it; on GCC
+      it fails at the importer's dependency scan, naming the target.
 
       **Ordering:** the units are built before all of the target's scans and
       compiles, but they are *not* ordered relative to each other, so a header

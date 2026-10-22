@@ -656,8 +656,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_header_unit_configure_file(self):
         # A header written by configure_file is on disk before any of the build
         # is decided, so it is a header unit like any other (cl names a unit by
-        # its /headerName: import spelling, not a resolved path). The unit's .ifc is pre-built to the class ifc cache and
-        # its importer resolves it through a /headerUnit:quote mapping.
+        # its /headerName: import spelling, not a resolved path). The unit's
+        # .ifc is pre-built to the class ifc cache and its importer resolves it
+        # through a /headerUnit:quote mapping.
         self.build_and_check_modules('198 unresolvable header unit',
                                      extra_args=['-Dmode=configure'],
                                      setup_not_contains=['Cannot resolve'],

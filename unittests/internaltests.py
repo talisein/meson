@@ -1162,9 +1162,10 @@ Thread model: posix'''), '21.9.0')
     def test_include_arg_parsers_consume_inventory(self):
         # The include-arg parser consumes the compiler inventory: it recognizes
         # -I, -isystem, -iquote, -idirafter and -cxx-isystem in both their
-        # joined and separated spellings, leaving every other token alone. Resolution walks GCC's actual search order
-        # and skips -idirafter, whose directories are searched past the
-        # standard ones a command-line walk cannot see.
+        # joined and separated spellings, leaving every other token alone.
+        # Resolution walks GCC's actual search order and skips -idirafter,
+        # whose directories are searched past the standard ones a command-line
+        # walk cannot see.
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         cpp = mock.MagicMock()
@@ -2090,18 +2091,27 @@ Thread model: posix'''), '21.9.0')
                                                             lambda _: launcher),
                                  ['meson'] + tail)
                 # PATH finds another Meson, or none; and an interpreter-run
-                # package names no launcher to compare.
-                for cmd, found in (([launcher], other), ([launcher], None),
-                                   (as_module, launcher)):
+                # package names no launcher to compare. Each says which.
+                def head(cmd):
+                    return (f"GCC {version} cannot start Meson's C++ module mapper: its "
+                            f"command line holds {cmd[0]!r}, and before GCC 16 that "
+                            'command line is split at every space, with no quoting.')
+                for cmd, found, tail_text in (
+                        ([launcher], other,
+                         f' The "meson" on PATH, {other!r}, is not this Meson ({launcher!r}). '
+                         'Use GCC 16 or later, install Meson and Python at paths without '
+                         'spaces, or put this Meson first on PATH as "meson".'),
+                        ([launcher], None,
+                         ' Use GCC 16 or later, install Meson and Python at paths without '
+                         'spaces, or put this Meson on PATH as "meson".'),
+                        (as_module, launcher,
+                         ' Meson runs as a Python module here, so no "meson" on PATH can '
+                         'stand in for it. Use GCC 16 or later, install Python at a path '
+                         'without spaces, or run Meson through its "meson" launcher on '
+                         'PATH.')):
                     with self.assertRaises(MesonException) as cm:
                         old.program_mapper_command(cmd, lambda _: found)
-                    self.assertEqual(
-                        str(cm.exception),
-                        f"GCC {version} cannot start Meson's C++ module mapper: its "
-                        f"command line holds {cmd[0]!r}, and before GCC 16 that command "
-                        'line is split at every space, with no quoting. Use GCC 16 or '
-                        'later, install Meson and Python at paths without spaces, or put '
-                        'this Meson on PATH as "meson".')
+                    self.assertEqual(str(cm.exception), head(cmd) + tail_text)
 
     def test_gccmapper_lex(self):
         # The request tokenizer: words split on spaces and tabs, quoted

@@ -1530,26 +1530,26 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The C++ compiler also assembles, so a .S lands on a C++ compile edge
         # in a module-enabled target -- but nothing scans it and the collate
         # declares no per-TU module outputs for it. Its edge must claim none:
-        # on GCC a -fmodule-mapper dep on a mapper the collate never writes is
-        # a dangling input ninja refuses to load ("missing and no known rule to
-        # make it"). The module itself still resolves across the link.
+        # on GCC a dep on a mapper table the collate never writes is a dangling
+        # input ninja refuses to load ("missing and no known rule to make it").
+        # The module itself still resolves across the link.
         self.build_and_check_modules(
             '194 module target with assembly',
             bmis=['modlib'],
-            ninja_not_contains=['asmpart.S.o.mapper', 'asmpart.S.o.ddi'])
+            ninja_not_contains=['asmpart.S.o.mapper.json', 'asmpart.S.o.ddi'])
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_preprocess_module_interface(self):
         # compiler.preprocess() of a module interface: preprocessing (-E)
         # neither writes a BMI nor imports one, and a preprocess-only target
         # gets no collate edge, so no part of the module pipeline may reach its
-        # compile -- a mapper dep (GCC) or a declared BMI output and harvest
-        # edge (Clang) would name a file nothing produces. The same source
-        # compiled normally, in the library next door, is untouched.
+        # compile -- a mapper-table dep (GCC) or a declared BMI output and
+        # harvest edge (Clang) would name a file nothing produces. The same
+        # source compiled normally, in the library next door, is untouched.
         self.build_and_check_modules(
             '195 preprocess module interface',
             bmis=['modlib'],
-            ninja_not_contains=['modlib.cppm.ii.mapper', 'modlib.cppm.ii.ddi'])
+            ninja_not_contains=['modlib.cppm.ii.mapper.json', 'modlib.cppm.ii.ddi'])
         self.assertTrue(os.path.isfile(os.path.join(
             self.builddir, 'preprocessor_0.p', 'modlib.cppm.ii')))
 
@@ -2154,8 +2154,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The same guard on a single-class build, whose compiles ask the mapper
         # server too. Editing pkg:impl must dirty its own TU, the primary
         # interface that imports it, and the exe that imports the primary --
-        # but not pkg:part, whose table the collate rewrites byte-identically. Without restat + copy-if-different every
-        # TU of the target would recompile.
+        # but not pkg:part, whose table the collate rewrites byte-identically.
+        # Without restat + copy-if-different every TU of the target would
+        # recompile.
         testdir = os.path.join(self.unit_test_dir, '139 gcc cpp modules')
         srcdir = self.copy_srcdir(testdir)
         self.init(srcdir)

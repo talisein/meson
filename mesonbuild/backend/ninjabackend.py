@@ -662,9 +662,11 @@ class NinjaBackend(backends.Backend):
         # the compiler builds units per class -> the edge output (the real BMI on
         # every compiler). The identity is the header's real path, so two targets
         # spelling one unit alike but resolving it to different files earn
-        # distinct BMIs; a unit with no identity to resolve -- a system header, or
-        # a user one off the -I path -- falls back to its spelling, where that
-        # spelling is the only axis a same-name collision could split on anyway.
+        # distinct BMIs. GCC resolves every unit, system ones included, by
+        # asking the compiler where the walk cannot tell; on cl and clang a unit
+        # with no identity to resolve -- a system header, or a user one off the
+        # -I path -- falls back to its spelling, where that spelling is the only
+        # axis a same-name collision could split on anyway.
         # Plus per-target caches of those outputs (ordered before the target's
         # scans/compiles) and of the flags MSVC and clang compiles need to name
         # each unit's BMI.
@@ -2203,12 +2205,6 @@ class NinjaBackend(backends.Backend):
         return self._gcc_mapper_commands[key]
 
     @staticmethod
-    def _gcc_program_mapper(compiler: Compiler) -> bool:
-        """Whether `compiler`'s module edges spawn Meson's mapper server: every
-        GCC on the P1689 path does."""
-        return compiler.cpp_module_family() == 'gcc'
-
-    @staticmethod
     def _gcc_bmi_class_tag(class_subdir: T.Optional[str]) -> str:
         # The BMI class a mapper server answers for, as the class subdir; a
         # single-class build has none and gets a stable name of its own.
@@ -2229,16 +2225,12 @@ class NinjaBackend(backends.Backend):
             tid = hashlib.sha1(tid.encode('utf-8')).hexdigest()[:16]
         return f'meson-private/gcc-header-units/{tid}@{bmi_class_tag}.json'
 
-    def _gcc_program_generated_headers(self, compiler: Compiler,
-                                       owner: build.BuildTarget) -> T.Optional[T.FrozenSet[str]]:
+    def _gcc_generated_headers(self, owner: build.BuildTarget) -> T.FrozenSet[str]:
         """The headers `owner`'s generators will write, for resolving its
-        declared units -- only where GCC asks a mapper program. That needs a
-        unit's file, not the name GCC will give it, so a header that does not
-        exist yet can still be one: setup knows where it will be. A mapper
-        file needs the name, which only an existing header can tell.
+        declared GCC header units. The mapper server needs only a unit's file,
+        so a header that does not exist yet can still be one: setup knows
+        where it will be.
         """
-        if not self._gcc_program_mapper(compiler):
-            return None
         return frozenset(os.path.normpath(p) for p in self._target_generated_output_paths(owner))
 
     @staticmethod
@@ -2441,7 +2433,7 @@ class NinjaBackend(backends.Backend):
         Warned once per unit: every target importing it fails the same way.
         """
         compiler = target.compilers['cpp']
-        generated = self._gcc_program_generated_headers(compiler, target)
+        generated = self._gcc_generated_headers(target)
         for hu in target.cpp_header_units:
             mode, spelling = self._parse_header_unit(hu)
             if self._header_unit_file(compiler, args, mode, spelling, generated) is not None:
@@ -4726,7 +4718,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         manifest = self._gcc_units_manifest(compiler, owner, tag)
         suffix = compiler.get_module_bmi_suffix()
         build_dir = self.environment.get_build_dir()
-        generated = self._gcc_program_generated_headers(compiler, owner)
+        generated = self._gcc_generated_headers(owner)
         outputs: T.List[str] = []
         bmis: T.List[T.Tuple[str, str]] = []
         for hu in header_units:
@@ -5512,7 +5504,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             hu_consumer = self._target_header_unit_consumer_args.get(target.get_id(), [])
             if hu_consumer:
                 compile_commands = commands + hu_consumer
-            if self._gcc_program_mapper(compiler):
+            if compiler.cpp_module_family() == 'gcc':
                 # The collate writes the TU's table; the server answers the
                 # compile from it.
                 tag = self._gcc_target_bmi_class_tag(target, compiler)

@@ -301,7 +301,6 @@ def requires_cpp_module_caps(*tokens: str,
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
 
-
 class CppModulesTestMixin:
 
     """Shared driver for C++ module tests; mix into a BasePlatformTests
@@ -834,11 +833,11 @@ class CppModulesTestMixin:
 
     def gcc_table_unit_paths(self, target: str) -> T.Set[str]:
         """Every header-unit real path `target`'s tables map."""
-        rel = None
-        for pat in (f'{target}.p', f'{target}.*.p'):
-            for m in glob.glob(os.path.join(self.builddir, pat)):
-                rel = os.path.relpath(m, self.builddir).replace('\\', '/') + '/'
-        self.assertIsNotNone(rel, f'no private dir for {target}')
+        matches = [m for pat in (f'{target}.p', f'{target}.*.p')
+                   for m in glob.glob(os.path.join(self.builddir, pat))]
+        self.assertEqual(len(matches), 1,
+                         f'expected one private dir for {target}, got {matches}')
+        rel = os.path.relpath(matches[0], self.builddir).replace('\\', '/') + '/'
         paths: T.Set[str] = set()
         for out, table in self.gcc_program_tables().items():
             if out.startswith(rel):

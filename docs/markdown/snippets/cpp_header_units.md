@@ -16,8 +16,7 @@ A header-unit BMI must exist before the sources that import it are scanned and
 compiled, so the declaration is the key: Meson pre-builds each unit's BMI from
 the declared list. On GCC consumers find the BMI by asking a module mapper
 program Meson provides, so no BMI path reaches a command line; MSVC has no such
-lookup for header
-units, so Meson passes each consumer an explicit
+lookup for header units, so Meson passes each consumer an explicit
 `/headerUnit:<spelling>=<bmi>` mapping (the only place a header-unit BMI path
 appears — never a named-module one). MSVC needs `cpp_std=c++20` or later.
 
@@ -47,8 +46,9 @@ Current limitations:
   - *GCC* finds a unit by the real path of whatever spelling an import
     resolves through, so `import "../hdr.h";` from a subdirectory reaches the
     unit declared as `'hdr.h'`, and declaring a second spelling of one file
-    costs nothing: one file, one BMI per flag class. A header declared nowhere
-    is an error at the importer's dependency scan, naming the target to add it
+    costs nothing: one file, one BMI per flag class. Importing a header the
+    importing target did not declare is an error at its dependency scan, even
+    where another target declares it; the message names the target to add it
     to.
   - *Clang* matches a declared unit from any spelling of the same file.
   - *MSVC* matches a unit by the *literal* import spelling it scans, so
