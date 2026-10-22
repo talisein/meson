@@ -1694,7 +1694,8 @@ class NinjaBackend(backends.Backend):
         return os.path.join(self.get_target_private_dir(target), 'provided-modules.json')
 
     def get_private_modules_file_for(self, target: build.BuildTarget) -> str:
-        # A bare JSON list of the private module names target provides --
+        # A JSON record of the private module names target provides (plus
+        # whether they are private by construction, for the diagnostic) --
         # names only, never paths, so a consumer can recognize a private
         # module (for the diagnostic in depaccumulate.run_p1689) but never
         # resolve one.

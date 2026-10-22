@@ -1668,6 +1668,24 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.private_bmi_dirs()), 2)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_private_executable_module_borrowed_import(self):
+        # Borrowing a private executable's module object does not make its
+        # module importable. The refusal must give the real reason -- the
+        # executable is unlinkable -- not claim the module is listed in a
+        # cpp_private_module_interfaces the executable never declared.
+        testdir = os.path.join(self.unit_test_dir, '185 private executable modules')
+        self.init(testdir, extra_args=['-Dmode=borrow'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn(
+            'requires module "tests", which target \'test1\' provides privately '
+            '(that target is an executable built without export_dynamic, so '
+            'nothing can link it and every module it provides is private). A '
+            'private module can only be imported inside the target that provides it.',
+            cm.exception.stdout)
+        self.assertNotIn('cpp_private_module_interfaces', cm.exception.stdout)
+
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_private_executable_imports_dependency(self):
         # An executable's own private module and a linked library's public
         # module must both resolve in the same target -- the primary

@@ -447,6 +447,17 @@ def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
         os.unlink(tmp)
 
 
+def _read_private_map(path: str) -> T.Tuple[T.List[str], bool]:
+    """A target's private-modules.json: its private module names, and whether
+    they are private by construction (--all-provides-private, an executable
+    nothing can link) rather than declared in cpp_private_module_interfaces.
+    A consumer's diagnostic needs the reason, and only the provider's own
+    collate knows it."""
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    return data['names'], data['by_construction']
+
+
 def run_p1689(argv: T.List[str]) -> int:
     """Collate P1689 scans into a dyndep + a provided-module map.
 
@@ -515,9 +526,11 @@ def run_p1689(argv: T.List[str]) -> int:
                              'are private by construction). Overrides --private-interface-object.')
     parser.add_argument('--private-map', default=None, nargs=2,
                         metavar=('PATH', 'DISPLAY'),
-                        help="Output a JSON list of this target's own private module names "
+                        help="Output this target's own private module names as JSON "
                              '(names only, never paths, so a consumer can recognize one but '
-                             'never resolve it), plus how to name this target in a diagnostic. '
+                             'never resolve it, plus whether they are private by '
+                             'construction under --all-provides-private), and how to name '
+                             'this target in a diagnostic. '
                              'Omitted for a BMI-only variant\'s collate, '
                              'which never has private provides of its own.')
     parser.add_argument('--dep-private-map', action='append', default=[], nargs=3,
@@ -628,19 +641,19 @@ def run_p1689(argv: T.List[str]) -> int:
     # most one owner per name can ever end up in this dict, so the singular
     # attribution the diagnostic below gives is structurally guaranteed, not
     # merely likely.
-    private_elsewhere: T.Dict[str, T.Tuple[str, str]] = {}
+    private_elsewhere: T.Dict[str, T.Tuple[str, str, bool]] = {}
     for path, tid, display in args.dep_private_maps:
-        with open(path, encoding='utf-8') as f:
-            for name in json.load(f):
-                owner = private_elsewhere.get(name)
-                if owner is not None and owner[0] != tid:
-                    raise MesonException(
-                        f'Module "{name}" is privately provided by more than one target '
-                        f'reaching this link ({owner[1]} and {display}); both would emit '
-                        'the same linkage symbol for its exported entities, which is '
-                        'undefined behavior even though each target only claims the name '
-                        'privately. Rename one of the two modules.')
-                private_elsewhere[name] = (tid, display)
+        dep_private_names, by_construction = _read_private_map(path)
+        for name in dep_private_names:
+            owner = private_elsewhere.get(name)
+            if owner is not None and owner[0] != tid:
+                raise MesonException(
+                    f'Module "{name}" is privately provided by more than one target '
+                    f'reaching this link ({owner[1]} and {display}); both would emit '
+                    'the same linkage symbol for its exported entities, which is '
+                    'undefined behavior even though each target only claims the name '
+                    'privately. Rename one of the two modules.')
+            private_elsewhere[name] = (tid, display, by_construction)
 
     # How to name this target itself in a diagnostic (a BMI-only variant's
     # collate passes no --private-map and has no private provides of its own).
@@ -654,8 +667,7 @@ def run_p1689(argv: T.List[str]) -> int:
     own_private_names: T.Optional[T.Tuple[T.Set[str], str]] = None
     if args.own_private_map is not None:
         own_path, own_provider_display = args.own_private_map
-        with open(own_path, encoding='utf-8') as f:
-            own_private_names = (set(json.load(f)), own_provider_display)
+        own_private_names = (set(_read_private_map(own_path)[0]), own_provider_display)
 
     rules: T.List[Rule] = []
     for ddi in args.ddis:
@@ -888,12 +900,16 @@ def run_p1689(argv: T.List[str]) -> int:
                             f'the import into an implementation unit, or make "{name}" '
                             'public.')
                     if name in private_elsewhere:
+                        _, owner, by_construction = private_elsewhere[name]
+                        why = ('that target is an executable built without '
+                               'export_dynamic, so nothing can link it and every '
+                               'module it provides is private' if by_construction else
+                               "it is listed in that target's "
+                               'cpp_private_module_interfaces')
                         raise MesonException(
                             f'{obj} requires module "{name}", which target '
-                            f'{private_elsewhere[name][1]} provides privately (it is '
-                            "listed in that target's cpp_private_module_interfaces). "
-                            'A private module can only be imported inside the target '
-                            'that provides it.')
+                            f'{owner} provides privately ({why}). A private module '
+                            'can only be imported inside the target that provides it.')
                     if name in {'std', 'std.compat'}:
                         hint = " (add dependency('std') to this target)"
                     else:
@@ -925,7 +941,8 @@ def run_p1689(argv: T.List[str]) -> int:
         json.dump(provided, pm)
     if args.private_map is not None:
         with open(args.private_map[0], 'w', encoding='utf-8') as pm:
-            json.dump(sorted(private_names), pm)
+            json.dump({'names': sorted(private_names),
+                       'by_construction': args.all_provides_private}, pm)
 
     # Claim the provided names only after publishing the map, so a concurrent
     # collate that loses the claim race always finds a live claimant. A
