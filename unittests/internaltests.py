@@ -2711,6 +2711,7 @@ Thread model: posix'''), '21.9.0')
         # by real path from the manifest -- whatever spelling the scan
         # reported. A unit missing from the manifest is an error.
         from mesonbuild.scripts.depaccumulate import run_p1689
+        from mesonbuild.utils.core import header_unit_key
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
             os.chdir(d)
@@ -2718,7 +2719,7 @@ Thread model: posix'''), '21.9.0')
                 os.makedirs('src dir/sub')
                 with open('src dir/util.h', 'w', encoding='utf-8'):
                     pass
-                real = os.path.realpath('src dir/util.h')
+                real = header_unit_key('src dir/util.h')
                 with open('units.json', 'w', encoding='utf-8') as f:
                     json.dump({'bmi_class': 'default', 'target': "'t'",
                                'header_units': {real: 'hu/util.h.0.gcm'}}, f)

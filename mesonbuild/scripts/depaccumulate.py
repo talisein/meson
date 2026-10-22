@@ -17,7 +17,8 @@ import textwrap
 import typing as T
 
 from .. import mlog
-from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, MesonException, default_cmi_path, has_space, module_to_filename
+from ..utils.core import (CPP_MODULE_INTERFACE_SUFFIXES, MesonException, default_cmi_path, has_space,
+                          header_unit_key, module_to_filename)
 
 if T.TYPE_CHECKING:
     from .depscan import Description, Require, Rule
@@ -885,7 +886,7 @@ def run_p1689(argv: T.List[str]) -> int:
                         # Relative to the build directory, the collate's own
                         # working directory, like every name GCC reports.
                         name = req['logical-name']
-                        real = os.path.realpath(name)
+                        real = header_unit_key(name)
                         bmi = manifest_units.get(real)
                         if bmi is None:
                             raise MesonException(

@@ -36,7 +36,7 @@ from ..mesonlib import (
 )
 from ..mesonlib import as_posix, get_compiler_for_source, has_path_sep, is_parent_path, lookbehind, path_has_root
 from ..options import OptionKey
-from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, default_cmi_path
+from ..utils.core import CPP_MODULE_INTERFACE_SUFFIXES, default_cmi_path, header_unit_key
 from .backends import CleanTrees
 from ..build import GeneratedList, InvalidArguments
 
@@ -5995,7 +5995,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             name = self._header_unit_gcc_name(compiler, args, mode, spelling)
             if name is None:
                 continue
-            real = os.path.realpath(os.path.join(build_dir, name))
+            real = header_unit_key(os.path.join(build_dir, name))
             key = f'{mode}:{real}:{tag}'
             output = self._header_units.get(key)
             if output is None:
