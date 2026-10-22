@@ -212,10 +212,14 @@ def header_unit_key(path: str) -> str:
     """How a GCC module mapper program identifies a header unit: the real
     path of whatever name the compiler reached the header by, so every
     spelling of one file -- through any include directory, '..' or a link --
-    is one unit. Case-folded where the filesystem is (normcase), as the
-    compiler may report a path in a different case than setup resolved it.
+    is one unit. On Windows realpath also returns the on-disk case, so a
+    header reached in another case is the same unit there. It is not
+    case-folded by platform: that would merge two files a case-sensitive
+    directory keeps apart. Where a case-insensitive filesystem is reached in
+    two cases on POSIX, the two keys differ and the second import is reported
+    as undeclared rather than silently merged.
     Setup, the collator and the server must all key units this way."""
-    return os.path.normcase(os.path.realpath(path))
+    return os.path.realpath(path)
 
 
 def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
