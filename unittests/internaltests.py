@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import operator
@@ -2739,6 +2740,12 @@ Thread model: posix'''), '21.9.0')
                     self.assertEqual(json.load(f), {
                         'modules': {'A': 'gcm.cache/A.gcm', 'B': 'gcm.cache/B.gcm'},
                         'header_units': {real: 'hu/util.h.0.gcm'}})
+                # Where the mapper command line cannot be quoted, the table
+                # goes to a space-free digest of the object path instead.
+                os.mkdir('tables')
+                self.assertEqual(run_p1689(args[:-1] + ['--hashed-table-dir', 'tables', 'a.ddi']), 0)
+                digest = hashlib.sha1(b'a.o').hexdigest()[:16]
+                self.assertTrue(os.path.isfile(f'tables/{digest}.json'))
                 with open('units.json', 'w', encoding='utf-8') as f:
                     json.dump({'header_units': {}}, f)
                 with self.assertRaisesRegex(MesonException, 'not declared'):

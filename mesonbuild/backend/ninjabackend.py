@@ -92,6 +92,11 @@ else:
     execute_wrapper = []
     rmfile_prefix = ['rm', '-f', '{}', '&&']
 
+# Where a GCC that cannot quote its mapper-program command line finds each TU's
+# table: a space-free digest of the object path, which the collator derives the
+# same way (depaccumulate --hashed-table-dir).
+GCC_HASHED_TABLE_DIR = 'meson-private/gcc-module-tables'
+
 GCC_RSP_UNSAFE_PAT = re.compile(r'[^\w@%+=:,./-]', re.ASCII)
 
 def gcc_rsp_quote(s: str) -> str:
@@ -1765,7 +1770,7 @@ class NinjaBackend(backends.Backend):
                 tag = self._gcc_target_bmi_class_tag(target, compiler)
             else:
                 tag = self._gcc_bmi_class_tag(class_tag)
-            scan_units = self._gcc_units_manifest(target, tag)
+            scan_units = self._gcc_units_manifest(compiler, target, tag)
             commands = list(commands) + self._gcc_program_mapper_args(compiler, tag, scan_units)
         elif family == 'gcc' and target.cpp_header_units:
             # A GCC scan carries no mapper, so it reaches a header unit only at
@@ -1955,9 +1960,12 @@ class NinjaBackend(backends.Backend):
             # each scan (get_ddi_file_for appends '.ddi'). They are written
             # copy-if-different, so restat keeps an unchanged mapper from
             # recompiling its TU when a sibling module changes.
-            suffix = '.mapper.json' if self._gcc_program_mapper(cpp) else '.mapper'
-            elem.implicit_outfilenames.extend(
-                d[:-len('.ddi')] + suffix for d in sorted(ddis))
+            if self._gcc_program_mapper(cpp):
+                elem.implicit_outfilenames.extend(
+                    self._gcc_module_table(cpp, d[:-len('.ddi')]) for d in sorted(ddis))
+            else:
+                elem.implicit_outfilenames.extend(
+                    d[:-len('.ddi')] + '.mapper' for d in sorted(ddis))
             elem.add_item('restat', '1')
         if dep_provmaps:
             elem.add_dep(dep_provmaps)
@@ -2053,7 +2061,7 @@ class NinjaBackend(backends.Backend):
             harvests=harvests, interface_sources=interface_sources,
             header_unit_bmis=header_unit_bmis, header_units=target.cpp_header_units,
             units_manifest=self._gcc_units_manifest(
-                target, self._gcc_target_bmi_class_tag(target, cpp))
+                cpp, target, self._gcc_target_bmi_class_tag(target, cpp))
             if self._gcc_program_mapper(cpp) else None)
 
     def _collate_depargs(self, cpp: Compiler, head: T.List[str], *,
@@ -2088,6 +2096,8 @@ class NinjaBackend(backends.Backend):
             assert units_manifest is not None
             depargs += ['--mapper-suffix', '.mapper.json', '--mapper-format', 'json',
                         '--header-unit-manifest', units_manifest]
+            if not cpp.program_mapper_quotes():
+                depargs += ['--hashed-table-dir', GCC_HASHED_TABLE_DIR]
         elif family == 'gcc':
             # A GCC collate writes the per-TU module mappers (--mapper-suffix,
             # in lockstep with the compile edges' get_module_mapper_args paths)
@@ -2215,7 +2225,7 @@ class NinjaBackend(backends.Backend):
             vid, None)
         program_mapper = self._gcc_program_mapper(cpp)
         variant_tag = self._gcc_bmi_class_tag(info.subdir)
-        variant_units = self._gcc_units_manifest(provider, variant_tag)
+        variant_units = self._gcc_units_manifest(cpp, provider, variant_tag)
         if program_mapper:
             self._write_gcc_units_manifest(variant_units, variant_tag, provider, hu_bmis)
         # The variant rule names its own explicit-file BMI output, so it asks
@@ -2264,8 +2274,8 @@ class NinjaBackend(backends.Backend):
                 # The variant's collate writes this table; the server sends
                 # the export to $out and the imports to the class cache.
                 elem.add_item('MAPPERFLAG', self._gcc_program_mapper_args(
-                    cpp, variant_tag, variant_units, vpcm + '.mapper.json'))
-                elem.add_dep(vpcm + '.mapper.json')
+                    cpp, variant_tag, variant_units, self._gcc_module_table(cpp, vpcm)))
+                elem.add_dep(self._gcc_module_table(cpp, vpcm))
             elif family == 'gcc':
                 # The variant's collate writes this mapper; it sends the
                 # export to $out and the imports to the class cache.
@@ -2956,10 +2966,26 @@ class NinjaBackend(backends.Backend):
             target.for_machine, compiler, self._bmi_class_key_of(target)))
 
     @staticmethod
-    def _gcc_units_manifest(owner: build.BuildTarget, bmi_class_tag: str) -> str:
+    def _gcc_units_manifest(compiler: Compiler, owner: build.BuildTarget, bmi_class_tag: str) -> str:
         # One manifest per (target, BMI class): a target's own class, or a
-        # BMI-only variant's.
-        return f'meson-private/gcc-header-units/{owner.get_id()}@{bmi_class_tag}.json'
+        # BMI-only variant's. Named by a digest of the target id where the
+        # compiler cannot quote the mapper command line, as an id can hold a
+        # space.
+        tid = owner.get_id()
+        if not compiler.program_mapper_quotes():
+            tid = hashlib.sha1(tid.encode('utf-8')).hexdigest()[:16]
+        return f'meson-private/gcc-header-units/{tid}@{bmi_class_tag}.json'
+
+    @staticmethod
+    def _gcc_module_table(compiler: Compiler, obj: str) -> str:
+        """Where the collate writes the mapper program's table for the TU
+        compiling to `obj`: next to the object, or, where the compiler cannot
+        quote the mapper command line, at a space-free digest of the object
+        path (an object path can hold a space). The collator derives the same
+        path from the same object path (--hashed-table-dir)."""
+        if compiler.program_mapper_quotes():
+            return obj + '.mapper.json'
+        return f'{GCC_HASHED_TABLE_DIR}/{hashlib.sha1(obj.encode("utf-8")).hexdigest()[:16]}.json'
 
     def _gcc_program_mapper_args(self, compiler: Compiler, bmi_class_tag: str,
                                  units: str, table: T.Optional[str] = None) -> T.List[str]:
@@ -5569,7 +5595,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # Every module edge of the target asks the mapper server, which
             # reads this whether or not the target declares any units.
             tag = self._gcc_target_bmi_class_tag(target, compiler)
-            self._write_gcc_units_manifest(self._gcc_units_manifest(target, tag), tag, target, bmis)
+            self._write_gcc_units_manifest(self._gcc_units_manifest(compiler, target, tag), tag, target, bmis)
         return outputs
 
     def _provision_class_header_units(self, compiler: Compiler, target: build.BuildTarget,
@@ -5957,7 +5983,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         Returns (unit outputs, (real path, BMI) pairs).
         """
         tag = self._gcc_bmi_class_tag(class_subdir)
-        manifest = self._gcc_units_manifest(owner, tag)
+        manifest = self._gcc_units_manifest(compiler, owner, tag)
         suffix = compiler.get_module_bmi_suffix()
         build_dir = self.environment.get_build_dir()
         outputs: T.List[str] = []
@@ -6864,8 +6890,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # compile from it.
                 tag = self._gcc_target_bmi_class_tag(target, compiler)
                 compile_commands = compile_commands + self._gcc_program_mapper_args(
-                    compiler, tag, self._gcc_units_manifest(target, tag), rel_obj + '.mapper.json')
-                element.add_dep(rel_obj + '.mapper.json')
+                    compiler, tag, self._gcc_units_manifest(compiler, target, tag),
+                    self._gcc_module_table(compiler, rel_obj))
+                element.add_dep(self._gcc_module_table(compiler, rel_obj))
             else:
                 mapper_args = compiler.get_module_mapper_args(rel_obj + '.mapper')
                 if mapper_args:

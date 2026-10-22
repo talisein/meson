@@ -1704,6 +1704,11 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return []
 
+    def program_mapper_quotes(self) -> bool:
+        """Whether any word at all survives this compiler's split of a
+        mapper-program command line."""
+        return True
+
     def program_mapper_unquotable(self, words: T.List[str]) -> T.List[str]:
         """The words of a mapper-program command line this compiler could not
         pass through intact: it splits the command line itself, and not every

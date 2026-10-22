@@ -8,6 +8,7 @@ See: https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2022/p1689r5.html
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -585,6 +586,11 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--header-unit-manifest', default=None,
                         help='With --mapper-format json, the (target, BMI class) manifest '
                              'of declared header units by real path.')
+    parser.add_argument('--hashed-table-dir', default=None,
+                        help='With --mapper-format json, write each table in this '
+                             'directory, named by a digest of its object path, instead of '
+                             'at <primary-output> + suffix: a mapper program command line '
+                             'that cannot be quoted cannot name a path holding a space.')
     parser.add_argument('--default-cmi-root', default=None,
                         help='The unkeyed shared cache dir (e.g. gcm.cache) header-unit '
                              'imports resolve in; mappers reproduce the compiler\'s '
@@ -969,7 +975,11 @@ def run_p1689(argv: T.List[str]) -> int:
             ins = formatter(reqs)
             dd.write(f'build {quote(obj)} {out}: dyndep {ins}\n\n')
             if args.mapper_suffix is not None and args.mapper_format == 'json':
-                _write_if_different(obj + args.mapper_suffix, json.dumps(
+                table = obj + args.mapper_suffix
+                if args.hashed_table_dir is not None:
+                    digest = hashlib.sha1(obj.encode('utf-8')).hexdigest()[:16]
+                    table = f'{args.hashed_table_dir}/{digest}.json'
+                _write_if_different(table, json.dumps(
                     {'modules': table_modules, 'header_units': table_units},
                     indent=1, sort_keys=True) + '\n')
             elif args.mapper_suffix is not None:

@@ -894,13 +894,16 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     # special, the same set the backend escapes in GCC response files.
     _MAPPER_UNSAFE = re.compile(r'[^\w@%+=:,./-]', re.ASCII)
 
+    def program_mapper_quotes(self) -> bool:
+        return version_compare(self.version, '>=16')
+
     def program_mapper_unquotable(self, words: T.List[str]) -> T.List[str]:
         # GCC before 16 splits a '|program' mapper's command line at every
         # space and has no quoting or escape form at all, so a word holding a
         # space (or a quote, which would arrive literally) cannot be passed.
         # A '?' can be: GCC cuts the option at its *last* '?', and the command
         # line always ends in one.
-        if version_compare(self.version, '>=16'):
+        if self.program_mapper_quotes():
             return []
         return [w for w in words if not w or any(c in w for c in ' \t\n\'"\\')]
 
@@ -919,7 +922,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
                 f'GCC {self.version} cannot pass {bad[0]!r} to its module mapper '
                 'program: before GCC 16 the mapper command line is split at every '
                 'space, with no quoting. Unset MESON_GCC_MAPPER to use mapper files.')
-        if version_compare(self.version, '>=16'):
+        if self.program_mapper_quotes():
             line = ' '.join(self._MAPPER_UNSAFE.sub(lambda m: '\\' + m.group(), w) if w else "''"
                             for w in words)
         else:

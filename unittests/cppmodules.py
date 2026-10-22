@@ -713,12 +713,14 @@ class CppModulesTestMixin:
                          f'{" or ".join(patterns)}: expected one private dir, got {matches}')
         tdir = matches[0]
         if self.gcc_program_mapper():
-            for entry in sorted(os.listdir(tdir)):
-                if entry.endswith('.mapper.json'):
-                    with open(os.path.join(tdir, entry), encoding='utf-8') as f:
-                        units = json.load(f)['header_units']
-                    bmis.update(b for real, b in units.items()
-                                if basename in os.path.basename(real))
+            rel = os.path.relpath(tdir, self.builddir).replace('\\', '/') + '/'
+            for out, table in self.gcc_program_tables().items():
+                if not out.startswith(rel):
+                    continue
+                with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
+                    units = json.load(f)['header_units']
+                bmis.update(b for real, b in units.items()
+                            if basename in os.path.basename(real))
             return bmis
         for entry in sorted(os.listdir(tdir)):
             if not entry.endswith('.mapper'):
@@ -882,6 +884,29 @@ class CppModulesTestMixin:
                 self.assertTrue(os.path.isfile(mapper), f'missing mapper file {mapper}')
         self.assertGreater(compile_edges, 0, 'no module compile edges found')
 
+    @staticmethod
+    def _program_mapper_flag(text: str) -> str:
+        # The mapper flag is one shell-quoted word in ARGS; undo ninja's '$ '
+        # escape so its own words read plainly.
+        return text.replace('$ ', ' ')
+
+    def gcc_program_tables(self) -> T.Dict[str, str]:
+        """Compile output -> the mapper program table it answers from, as the
+        compile edges in build.ninja name them."""
+        tables: T.Dict[str, str] = {}
+        out = rule = ''
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build '):
+                    head, _, tail = line.partition(': ')
+                    out = head[len('build '):].split(' ')[0]
+                    rule = tail.split(' ')[0]
+                elif rule.startswith('cpp_COMPILER') and line.strip().startswith('ARGS ='):
+                    m = re.search(r'--table (\S+?)\?', self._program_mapper_flag(line))
+                    if m:
+                        tables[out] = m.group(1)
+        return tables
+
     def _check_gcc_program_mappers(self, lines: T.List[str]) -> None:
         """check_gcc_module_mappers for a build asking a mapper program: every
         scan, header-unit and compile edge spawns it, the compile alone with
@@ -891,8 +916,7 @@ class CppModulesTestMixin:
         counts = {'scan': 0, 'unit': 0, 'compile': 0}
 
         def program_args(text: str, kind: str) -> str:
-            # Undo ninja's '$ ' escape; the flag is one shell-quoted word.
-            text = text.replace('$ ', ' ')
+            text = self._program_mapper_flag(text)
             self.assertIn('-fmodule-mapper=|', text, f'{kind} edge for {out} must ask the mapper program')
             units = re.search(r'--units (\S+?)(?:\?| --table)', text)
             self.assertIsNotNone(units, f'{kind} edge for {out} names no units manifest')
@@ -916,12 +940,15 @@ class CppModulesTestMixin:
                 program_args(s, 'header-unit')
             elif rule.startswith('cpp_COMPILER') and s.startswith('ARGS ='):
                 counts['compile'] += 1
-                text = program_args(s, 'compile')
-                self.assertIn(f'--table {out}.mapper.json'.replace('\\', '/'),
-                              text.replace('\\', '/'),
-                              f'compile edge for {out} must answer from its own table')
-                self.assertTrue(os.path.isfile(os.path.join(self.builddir, out + '.mapper.json')),
-                                f'missing table for {out}')
+                # The table sits next to the object, or at a space-free digest
+                # of its path where GCC cannot quote the mapper command line.
+                table = re.search(r'--table (\S+?)\?', program_args(s, 'compile'))
+                self.assertIsNotNone(table, f'compile edge for {out} must answer from its own table')
+                if self.host_cpp_compiler().program_mapper_quotes():
+                    self.assertEqual(table.group(1).replace('\\', '/'),
+                                     f'{out}.mapper.json'.replace('\\', '/'))
+                self.assertTrue(os.path.isfile(os.path.join(self.builddir, table.group(1))),
+                                f'missing table {table.group(1)} for {out}')
         self.assertGreater(counts['compile'], 0, 'no module compile edges found')
 
     # --- Spaced-path header-unit test fabrication -------------------------
