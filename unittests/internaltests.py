@@ -2694,6 +2694,138 @@ Thread model: posix'''), '21.9.0')
             finally:
                 os.chdir(olddir)
 
+    def test_gccmapper_lex(self):
+        # The request tokenizer: words split on spaces and tabs, quoted
+        # stretches join the word they touch, and every escape the protocol
+        # defines decodes -- \_ included, an old spelling of a space.
+        from mesonbuild.scripts.gccmapper import lex, MalformedLine
+        self.assertEqual(lex(b'MODULE-IMPORT m 1'), ['MODULE-IMPORT', 'm', '1'])
+        self.assertEqual(lex(b"HELLO 1 GCC ''"), ['HELLO', '1', 'GCC', ''])
+        self.assertEqual(lex(b"MODULE-EXPORT './src dir/util.h'"),
+                         ['MODULE-EXPORT', './src dir/util.h'])
+        self.assertEqual(lex(b"  a\t\tb  "), ['a', 'b'])
+        self.assertEqual(lex(b"x'y z'w"), ['xy zw'])
+        self.assertEqual(lex(rb"'a\'b\\c\nd\te\_f'"), ["a'b\\c\nd\te f"])
+        # One or two lower-case hex digits; a third digit is literal.
+        self.assertEqual(lex(rb"'\01\7f\1g\0a1'"), ['\x01\x7f\x01g\x0a1'])
+        # GCC sends non-ASCII bytes raw inside quotes; undecodable ones
+        # round-trip through surrogateescape.
+        self.assertEqual(lex("'/é/h'".encode()), ['/é/h'])
+        self.assertEqual(lex(b"'/\xff/h'"), ['/\udcff/h'])
+        for bad in (b"'unterminated", rb"'\'", b"'bad\x01'", rb"'\zz'", b'a\x01'):
+            with self.assertRaises(MalformedLine, msg=bad):
+                lex(bad)
+
+    def test_gccmapper_quote_round_trip(self):
+        # Every reply word is either bare or quoted so that lex() -- the same
+        # grammar GCC's reader implements -- gives back exactly the input.
+        # Bytes above 0x7e are hex-escaped, never raw: older readers reject a
+        # raw one even inside quotes.
+        from mesonbuild.scripts.gccmapper import lex, quote
+        self.assertEqual(quote('gcm.cache/m.gcm'), b'gcm.cache/m.gcm')
+        self.assertEqual(quote(''), b"''")
+        self.assertEqual(quote('bmi dir/u.gcm'), b"'bmi dir/u.gcm'")
+        self.assertEqual(quote("it's"), rb"'it\'s'")
+        self.assertEqual(quote('/é'), rb"'/\c3\a9'")
+        for word in ('', 'plain', 'a b', "q'uote", 'back\\slash', 'nl\nand\ttab',
+                     ';', ' ;', '\x01\x1f\x7f', '/é/ü', '/\udcff/x', 'a?b', '"dq"',
+                     "\\'", 'trail\\'):
+            self.assertEqual(lex(quote(word)), [word], msg=repr(word))
+            self.assertTrue(all(c < 0x7f for c in quote(word)), msg=repr(word))
+        # Several words on one line stay apart.
+        line = b' '.join(quote(w) for w in ('PATHNAME', 'x y', ''))
+        self.assertEqual(lex(line), ['PATHNAME', 'x y', ''])
+
+    def test_gccmapper_batches(self):
+        # Every line of a batch but the last ends in ' ;'. A ';' inside a
+        # quoted word never ends a line that way.
+        from mesonbuild.scripts.gccmapper import split_batches
+        lines = [b'HELLO 1 GCC \'\' ;\n', b'MODULE-REPO\n',
+                 b'MODULE-IMPORT m\n',
+                 b"INCLUDE-TRANSLATE 'a ;' ;\n", b'INCLUDE-TRANSLATE b\n']
+        self.assertEqual(list(split_batches(lines)),
+                         [[b"HELLO 1 GCC ''", b'MODULE-REPO'],
+                          [b'MODULE-IMPORT m'],
+                          [b"INCLUDE-TRANSLATE 'a ;'", b'INCLUDE-TRANSLATE b']])
+        # A batch cut short by EOF is still answered.
+        self.assertEqual(list(split_batches([b'MODULE-REPO ;\n'])), [[b'MODULE-REPO']])
+
+    def test_gccmapper_answers(self):
+        # The whole request/reply cycle through serve(), against a units
+        # manifest and a TU table. Header units match by real path, so every
+        # spelling of one file reaches its one BMI; a scan (no table) answers
+        # a NameOnly named module by its default name; anything else unknown
+        # is an ERROR naming the fix.
+        from mesonbuild.scripts.gccmapper import Mapper, lex, serve
+        from mesonbuild.utils.core import header_unit_key
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                os.makedirs('src dir/sub')
+                for h in ('util.h', 'plain.h'):
+                    with open(os.path.join('src dir', h), 'w', encoding='utf-8'):
+                        pass
+                real = header_unit_key('src dir/util.h')
+                bmi = 'meson-private/header-units/util.h.0123456789abcdef.gcm'
+                with open('units.json', 'w', encoding='utf-8') as f:
+                    json.dump({'bmi_class': 'c1', 'target': "'prog'",
+                               'header_units': {real: bmi}}, f)
+                with open('t.json', 'w', encoding='utf-8') as f:
+                    json.dump({'modules': {'m': 'gcm.cache/c1/m.gcm',
+                                           'm:p': 'gcm.cache/c1/m-p.gcm'},
+                               'header_units': {real: bmi}}, f)
+
+                def talk(table: T.Optional[str], requests: T.List[bytes]) -> T.List[T.List[str]]:
+                    out = io.BytesIO()
+                    serve(Mapper('c1', 'units.json', table), io.BytesIO(b''.join(requests)), out)
+                    replies = out.getvalue().split(b'\n')
+                    self.assertEqual(replies[-1], b'')
+                    return [lex(r[:-2] if r.endswith(b' ;') else r) for r in replies[:-1]]
+
+                scan = talk(None, [
+                    b"HELLO 1 GCC '' ;\n", b'MODULE-REPO\n',
+                    b'MODULE-EXPORT m 1\n',
+                    b'MODULE-IMPORT m:p 1 ;\n', b"MODULE-IMPORT './src dir/util.h'\n",
+                    b"MODULE-IMPORT './src dir/sub/../util.h'\n",
+                    b"INCLUDE-TRANSLATE './src dir/util.h' ;\n",
+                    b"INCLUDE-TRANSLATE './src dir/plain.h' ;\n",
+                    b'INCLUDE-TRANSLATE /usr/include/stdc-predef.h\n',
+                    b"MODULE-IMPORT './src dir/plain.h'\n",
+                    b'MODULE-IMPORT m\n',
+                    b'BOGUS x\n', b"MODULE-IMPORT 'unterminated\n"])
+                self.assertEqual(scan[:10], [
+                    ['HELLO', '1', 'meson'], ['PATHNAME', ''],
+                    ['PATHNAME', 'gcm.cache/m.gcm'],
+                    ['PATHNAME', 'gcm.cache/m-p.gcm'], ['PATHNAME', bmi],
+                    ['PATHNAME', bmi],
+                    ['PATHNAME', bmi], ['BOOL', 'FALSE'], ['BOOL', 'FALSE'],
+                    ['ERROR', "header unit ./src dir/plain.h is not declared in the "
+                              "cpp_header_units of target 'prog' (BMI class c1); "
+                              'add it there to import it']])
+                # A named module read (not NameOnly) has nothing to answer from.
+                self.assertEqual(scan[10][0], 'ERROR')
+                self.assertEqual(scan[11][0], 'ERROR')
+                self.assertIn('BOGUS', scan[11][1])
+                self.assertEqual(scan[12][0], 'ERROR')
+                self.assertIn('malformed', scan[12][1])
+
+                compile_ = talk('t.json', [
+                    b'MODULE-EXPORT m:p\n', b'MODULE-IMPORT m\n',
+                    b"MODULE-IMPORT './src dir/util.h'\n",
+                    b"INCLUDE-TRANSLATE './src dir/sub/../util.h'\n",
+                    b"INCLUDE-TRANSLATE './src dir/plain.h'\n",
+                    b'MODULE-IMPORT other\n', b'MODULE-COMPILED m:p\n'])
+                self.assertEqual(compile_[:5], [
+                    ['PATHNAME', 'gcm.cache/c1/m-p.gcm'], ['PATHNAME', 'gcm.cache/c1/m.gcm'],
+                    ['PATHNAME', bmi], ['PATHNAME', bmi], ['BOOL', 'FALSE']])
+                self.assertEqual(compile_[5][0], 'ERROR')
+                self.assertEqual(compile_[6], ['OK'])
+                # The server creates nothing.
+                self.assertEqual(sorted(os.listdir('.')), ['src dir', 't.json', 'units.json'])
+            finally:
+                os.chdir(olddir)
+
     def test_depaccumulate_default_cmi_path(self):
         # GCC's default header-unit CMI naming under the cache root: '.' and
         # '..' path components become ',' and ',,'; an absolute resolved path

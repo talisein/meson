@@ -208,6 +208,16 @@ def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 
 
+def header_unit_key(path: str) -> str:
+    """How a GCC module mapper program identifies a header unit: the real
+    path of whatever name the compiler reached the header by, so every
+    spelling of one file -- through any include directory, '..' or a link --
+    is one unit. Case-folded where the filesystem is (normcase), as the
+    compiler may report a path in a different case than setup resolved it.
+    Setup, the collator and the server must all key units this way."""
+    return os.path.normcase(os.path.realpath(path))
+
+
 def default_cmi_path(logical_name: str, cache_dir: str, suffix: str) -> str:
     """The CMI path GCC's default (mapper-less) mapping gives a header unit.
 
