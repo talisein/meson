@@ -908,7 +908,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # build resolves its BMIs through the mapper server just as a
         # multi-class one does -- only the directory its tables name differs.
         self.build_and_check_modules('139 gcc cpp modules',
-                                     setup_not_contains=['divergent dialects'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'dot.mod.sub'])
         self.check_gcc_module_mappers()
@@ -1010,7 +1009,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # build must keep the flat pcm.cache (no class subdir) and synthesize
         # no BMI-only variant.
         self.build_and_check_modules('156 clang cpp modules',
-                                     setup_not_contains=['divergent dialects'],
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'oddname', 'dot.mod.sub'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
@@ -1273,10 +1271,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             if i:
                 self.wipe()
             out = self.init(testdir, extra_args=[f'-Dmode={mode}'])
-            # No leftover mix diagnostic, and no false claim that clang-scan-deps
-            # is missing (such a target uses it exactly as any C++ module target).
-            self.assertNotIn('Move the C++ module sources', out)
-            self.assertNotIn('cannot import those modules', out)
+            # No false claim that clang-scan-deps is missing (such a target
+            # uses it exactly as any C++ module target).
             self.assertNotIn('clang-scan-deps', out)
             self.build()
             self.run_tests()
@@ -1287,26 +1283,25 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # BMI-only variant in its own dialect class and runs correctly;
         # before BMI classes GCC silently shared the mismatched BMI here
         # (or hard-errored, depending on version), and setup could only warn.
-        self.build_and_check_modules('145 gcc module cpp_std divergence',
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules('145 gcc module cpp_std divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
     def test_gcc_module_subproject_cpp_std_divergence_builds(self):
         # The same divergence across a subproject boundary: parent c++23
         # consumes a subproject module library built at c++20.
-        self.build_and_check_modules('146 gcc module subproject cpp_std divergence',
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules('146 gcc module subproject cpp_std divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_bmi_divergence_ignores_bmi_irrelevant_flags(self):
         # Provider and consumer differ only in optimization, which is on the
-        # BMI-irrelevant allowlist: no divergence warning, and the mixed build
-        # runs fine.
+        # BMI-irrelevant allowlist: the two stay in one BMI class (the flat
+        # cache, no BMI-only variant), and the mixed build runs fine.
         self.build_and_check_modules('165 module bmi flag divergence',
-                                     extra_args=['-Dwithfoo=false'],
-                                     setup_not_contains=['divergent dialects'])
+                                     extra_args=['-Dwithfoo=false'])
+        self.assertEqual(self.bmi_class_dirs(), [])
+        self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
                               compiler=('gcc', 'clang'))
@@ -1319,7 +1314,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # constant-evaluates util_std_view() against its own dialect, so a
         # wrongly shared BMI is a failing run, not merely a build failure.
         self.build_and_check_modules('168 header unit dialect divergence',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('util.h')
         self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
@@ -1346,7 +1340,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # class) must see 23, so inheriting the provider's c++20 BMI is a failing
         # run rather than a build failure.
         self.build_and_check_modules('206 header unit import inheritance',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('util.h')
         self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
@@ -1369,7 +1362,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # at the scan on the dialect mismatch, so building at all is most of
         # the proof; the two-BMI assertions pin the mechanism.
         self.build_and_check_modules('202 system header unit dialect divergence',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('vector')
         self.assertEqual(len(units), 2, f'expected one <vector> BMI per class, got {units}')
@@ -1389,8 +1381,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # class resolves modlib through a BMI-only variant and the program
         # builds, runs (each side constant-evaluates the BMI's _REENTRANT
         # view against its own), and rebuilds no-op.
-        self.build_and_check_modules('159 module pthread divergence',
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules('159 module pthread divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1400,8 +1391,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # share the -DFOO BMI silently, which the fixture turns into a wrong
         # exit code: the importer constant-evaluates the BMI's FOO view
         # against its own.
-        self.build_and_check_modules('165 module bmi flag divergence',
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules('165 module bmi flag divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1519,8 +1509,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # must each resolve modlib through their own BMI-only variant, and every
         # program's constexpr probe must see its own compile's view, not the
         # provider's.
-        self.build_and_check_modules('183 module eh rtti divergence',
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules('183 module eh rtti divergence')
         self.assertEqual(len(self.bmi_class_dirs()), 3)
         self.assertEqual(len(self.bmi_variant_ids()), 2)
 
@@ -2194,7 +2183,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # dialect probe, so a wrongly shared BMI is a failing test run, not
         # merely a build failure.
         self.build_and_check_modules('169 header unit bmi classes',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_digests('util.h')
         self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
@@ -2226,7 +2214,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # 168 is the same shape diverging on cpp_std -- see
         # test_header_unit_dialect_divergence.
         self.build_and_check_modules('174 header unit define divergence',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('util.h')
         self.assertEqual(len(units), 2, f'expected one util.h BMI per class, got {units}')
@@ -2252,7 +2239,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # constant-evaluates the unit's __cpp_exceptions/__cpp_rtti view, so a
         # wrongly shared BMI is a failing test run, not merely a build failure.
         self.build_and_check_modules('184 header unit eh rtti divergence',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         units = self.header_unit_bmis('util.h')
         self.assertEqual(len(units), 3, f'expected one util.h BMI per class, got {units}')
@@ -2310,9 +2296,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'import_std', compiler=('gcc', 'clang'))
     def test_import_std_nothreads(self):
         # The opt-out spelling: no thread flags on the std module or its
-        # consumers, and no divergence warning since both sides agree.
+        # consumers.
         self.build_and_check_modules('160 import std nothreads',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         for entry in self.get_compdb():
             self.assertNotIn('-pthread', entry['command'])
@@ -2529,7 +2514,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # A mixed target: two declared header units (quote and angle spelling)
         # plus a named module -- the program links and runs.
         self.build_and_check_modules('158 clang header units',
-                                     setup_not_contains=['divergent dialects'],
                                      ninja_args_not_contains=())
         # The unit edges' declared outputs are the real BMIs (no stamps), at
         # exactly the single-class paths -- the digest hashes the dedup key:

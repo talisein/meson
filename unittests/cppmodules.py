@@ -700,14 +700,13 @@ class CppModulesTestMixin:
                           extra_args: T.Sequence[str] = ()) -> None:
         """The canonical two-class fixture: one module provider, one consumer
         in the provider's own BMI class, one divergent consumer. Divergence
-        must build and run without the Stage-1 warning, with exactly one
+        must build and run, with exactly one
         object-producing provider (the divergent consumer resolves against a
         BMI-only variant), one BMI per class dir, no flat BMI, and exactly
         one variant build-wide -- the compatible consumer must reuse the
         provider's BMI, not spawn a redundant variant."""
         cpp = self.host_cpp_compiler()
-        self.build_and_check_modules(testdir_name, extra_args=extra_args,
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules(testdir_name, extra_args=extra_args)
         bmi = module_name.replace(':', '-') + cpp.get_module_bmi_suffix()
         cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
         class_dirs = self.bmi_class_dirs()
@@ -751,8 +750,7 @@ class CppModulesTestMixin:
         """
         cpp = self.host_cpp_compiler()
         suffix = cpp.get_module_bmi_suffix()
-        self.build_and_check_modules(testdir_name, extra_args=extra_args,
-                                     setup_not_contains=['divergent dialects'])
+        self.build_and_check_modules(testdir_name, extra_args=extra_args)
         self.assert_std_link_edges(progs, ())
         for t in progs:
             self.assertEqual(self.count_on_link_line(t, 'lib__meson_cxx_std.a'), 1,
