@@ -1687,14 +1687,6 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
 
-    def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
-        """Flags making a compile edge resolve C++ modules through the given
-        per-TU mapper file (a collate output enumerating the TU's provides
-        and direct imports). [] for compilers that resolve BMIs by directory
-        search and need no mapper.
-        """
-        return []
-
     def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
                                        units: str, table: T.Optional[str] = None) -> T.List[str]:
         """Flags making an edge resolve C++ modules through a mapper *program*
@@ -1714,6 +1706,11 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         pass through intact: it splits the command line itself, and not every
         compiler can quote."""
         return []
+
+    def program_mapper_command(self, meson_command: T.List[str]) -> T.List[str]:
+        """The command line that starts Meson's module mapper server for this
+        compiler, given the command running Meson now."""
+        return [*meson_command, '--internal', 'gccmapper']
 
     def get_module_scanner_exelist(self) -> T.List[str]:
         # Only for compilers whose P1689 scanner is a separate tool (Clang's

@@ -683,22 +683,10 @@ class CppModulesTestMixin:
                                  os.path.join(self.builddir, canonical_bmi)) for out in outs),
             f'none of {outs} is the canonical BMI {canonical_bmi}')
 
-    def gcc_program_mapper(self) -> bool:
-        """Whether this build directory resolves GCC modules through the mapper
-        program (MESON_GCC_MAPPER=program at its first configure) rather than
-        mapper files."""
-        try:
-            with open(os.path.join(self.builddir, 'meson-private', 'gcc-module-mapper'),
-                      encoding='utf-8') as f:
-                return f.read().strip() == 'program'
-        except FileNotFoundError:
-            return False
-
     def header_unit_bmis_of(self, target: str, basename: str) -> T.Set[str]:
         """The header-unit BMIs `target`'s own compiles resolve for `basename`.
-        Read from its per-TU module mappers (or a mapper program's per-TU
-        tables) on GCC, where no unit BMI path reaches a command line; from the
-        compile edge's flags elsewhere."""
+        Read from its per-TU mapper tables on GCC, where no unit BMI path
+        reaches a command line; from the compile edge's flags elsewhere."""
         if self.host_cpp_compiler().cpp_module_family() != 'gcc':
             return self.header_unit_digests(basename, edges=f'{target}.p/')
         bmis: T.Set[str] = set()
@@ -712,24 +700,14 @@ class CppModulesTestMixin:
         self.assertEqual(len(matches), 1,
                          f'{" or ".join(patterns)}: expected one private dir, got {matches}')
         tdir = matches[0]
-        if self.gcc_program_mapper():
-            rel = os.path.relpath(tdir, self.builddir).replace('\\', '/') + '/'
-            for out, table in self.gcc_program_tables().items():
-                if not out.startswith(rel):
-                    continue
-                with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
-                    units = json.load(f)['header_units']
-                bmis.update(b for real, b in units.items()
-                            if basename in os.path.basename(real))
-            return bmis
-        for entry in sorted(os.listdir(tdir)):
-            if not entry.endswith('.mapper'):
+        rel = os.path.relpath(tdir, self.builddir).replace('\\', '/') + '/'
+        for out, table in self.gcc_program_tables().items():
+            if not out.startswith(rel):
                 continue
-            with open(os.path.join(tdir, entry), encoding='utf-8') as f:
-                for line in f:
-                    _, _, bmi = line.strip().partition(' ')
-                    if bmi and basename in os.path.basename(bmi):
-                        bmis.add(bmi.replace('\\', '/'))
+            with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
+                units = json.load(f)['header_units']
+            bmis.update(b for real, b in units.items()
+                        if basename in os.path.basename(real))
         return bmis
 
     def bmi_class_dirs(self) -> T.List[str]:
@@ -835,91 +813,13 @@ class CppModulesTestMixin:
         self.assert_variants_emit_no_objects()
 
     def check_gcc_module_mappers(self) -> None:
-        """GCC builds resolve modules through mappers, whatever their class
-        topology: every module compile edge names its own object's mapper (a
-        static path whose scan-derived contents the collate writes), every
-        header-unit edge names one written at setup, the mapper files exist on
-        disk -- and scan edges carry no mapper at all.
-
-        That last one is load-bearing. A mapper file switches off GCC's default
-        naming outright, named modules included, and their names come from the
-        very scan the mapper would serve: a scan carrying one dies on the first
-        `import some_module;`. So a scan resolves a unit only at a default-named
-        path, and each class reaches its own by scanning through its class root."""
+        """GCC builds resolve modules through Meson's mapper program, whatever
+        their class topology: every scan, header-unit and compile edge spawns
+        it, the compile alone with its own per-TU table (which the collate
+        writes), and every manifest and table it names exists. A scan names no
+        table: it runs before the collate that writes one."""
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             lines = f.read().splitlines()
-        if self.gcc_program_mapper():
-            self._check_gcc_program_mappers(lines)
-            return
-        rule = out = ''
-        compile_edges = 0
-        unit_edges = 0
-        for line in lines:
-            if line.startswith('build '):
-                head, _, tail = line.partition(': ')
-                out = head[len('build '):].split(' ')[0]
-                rule = tail.split(' ')[0]
-                continue
-            s = line.strip()
-            if 'MODULE_SCAN' in rule and s.startswith(('ARGS =', 'HUMAPPER =')):
-                self.assertNotIn('-fmodule-mapper', s,
-                                 f'scan edge for {out} must not carry a mapper')
-            elif 'HEADER_UNIT' in rule and s.startswith('HUMAPPER ='):
-                unit_edges += 1
-                # Windows quotes the whole arg ('"-fmodule-mapper=path"'), so the
-                # closing quote lands in the partitioned tail; POSIX does not.
-                mapper = s.partition('-fmodule-mapper=')[2].strip().rstrip('"')
-                self.assertTrue(mapper, f'header-unit edge for {out} must carry a mapper')
-                self.assertTrue(os.path.isfile(os.path.join(self.builddir, mapper)),
-                                f'missing header-unit mapper file {mapper}')
-            elif rule.startswith('cpp_COMPILER') and s.startswith('ARGS ='):
-                compile_edges += 1
-                # The mapper path is spelled OS-natively in ARGS (backslashes on
-                # Windows) while the build-target 'out' uses forward slashes;
-                # compare separator-insensitively.
-                self.assertIn(f'-fmodule-mapper={out}.mapper'.replace('\\', '/'),
-                              s.replace('\\', '/'),
-                              f'compile edge for {out} must resolve through its mapper')
-                mapper = os.path.join(self.builddir, out + '.mapper')
-                self.assertTrue(os.path.isfile(mapper), f'missing mapper file {mapper}')
-        self.assertGreater(compile_edges, 0, 'no module compile edges found')
-
-    @staticmethod
-    def _program_mapper_flag(text: str) -> str:
-        # The mapper flag is one shell-quoted word in ARGS; undo ninja's '$ '
-        # escape so its own words read plainly.
-        return text.replace('$ ', ' ')
-
-    @staticmethod
-    def _program_mapper_word(text: str, option: str) -> T.Optional[str]:
-        """The value of `option` (--units, --table) in a mapper flag, with the
-        backslash escapes GCC's command-line splitter removes undone: a
-        Windows path arrives with every backslash doubled."""
-        m = re.search(re.escape(option) + r' ((?:\\.|[^\s\\?])+)', text)
-        return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
-
-    def gcc_program_tables(self) -> T.Dict[str, str]:
-        """Compile output -> the mapper program table it answers from, as the
-        compile edges in build.ninja name them."""
-        tables: T.Dict[str, str] = {}
-        out = rule = ''
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.startswith('build '):
-                    head, _, tail = line.partition(': ')
-                    out = head[len('build '):].split(' ')[0]
-                    rule = tail.split(' ')[0]
-                elif rule.startswith('cpp_COMPILER') and line.strip().startswith('ARGS ='):
-                    table = self._program_mapper_word(self._program_mapper_flag(line), '--table')
-                    if table is not None:
-                        tables[out] = table
-        return tables
-
-    def _check_gcc_program_mappers(self, lines: T.List[str]) -> None:
-        """check_gcc_module_mappers for a build asking a mapper program: every
-        scan, header-unit and compile edge spawns it, the compile alone with
-        its own per-TU table (which the collate writes), and every manifest it
-        names exists."""
         rule = out = ''
         counts = {'scan': 0, 'unit': 0, 'compile': 0}
 
@@ -958,6 +858,37 @@ class CppModulesTestMixin:
                 self.assertTrue(os.path.isfile(os.path.join(self.builddir, table)),
                                 f'missing table {table} for {out}')
         self.assertGreater(counts['compile'], 0, 'no module compile edges found')
+
+    @staticmethod
+    def _program_mapper_flag(text: str) -> str:
+        # The mapper flag is one shell-quoted word in ARGS; undo ninja's '$ '
+        # escape so its own words read plainly.
+        return text.replace('$ ', ' ')
+
+    @staticmethod
+    def _program_mapper_word(text: str, option: str) -> T.Optional[str]:
+        """The value of `option` (--units, --table) in a mapper flag, with the
+        backslash escapes GCC's command-line splitter removes undone: a
+        Windows path arrives with every backslash doubled."""
+        m = re.search(re.escape(option) + r' ((?:\\.|[^\s\\?])+)', text)
+        return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
+
+    def gcc_program_tables(self) -> T.Dict[str, str]:
+        """Compile output -> the mapper program table it answers from, as the
+        compile edges in build.ninja name them."""
+        tables: T.Dict[str, str] = {}
+        out = rule = ''
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build '):
+                    head, _, tail = line.partition(': ')
+                    out = head[len('build '):].split(' ')[0]
+                    rule = tail.split(' ')[0]
+                elif rule.startswith('cpp_COMPILER') and line.strip().startswith('ARGS ='):
+                    table = self._program_mapper_word(self._program_mapper_flag(line), '--table')
+                    if table is not None:
+                        tables[out] = table
+        return tables
 
     # --- Spaced-path header-unit test fabrication -------------------------
     #

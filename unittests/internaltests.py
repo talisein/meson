@@ -479,7 +479,6 @@ Thread model: posix'''), '21.9.0')
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         # Mapper files: this pins the static collate flags.
-        be._gcc_mapper_mode = 'file'
         be.build_to_src = '..'
         cpp = mock.MagicMock()
         cpp.get_module_bmi_suffix.return_value = '.gcm'
@@ -1120,7 +1119,6 @@ Thread model: posix'''), '21.9.0')
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         # Mapper files: these pin the static mapper's naming.
-        be._gcc_mapper_mode = 'file'
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = 'gcc'
 
@@ -1172,7 +1170,6 @@ Thread model: posix'''), '21.9.0')
         from mesonbuild.backend.ninjabackend import NinjaBackend
         be = NinjaBackend.__new__(NinjaBackend)
         # Mapper files: these pin the static mapper's naming.
-        be._gcc_mapper_mode = 'file'
         cpp = mock.MagicMock()
         cpp.cpp_module_family.return_value = 'gcc'
 
@@ -1673,7 +1670,6 @@ Thread model: posix'''), '21.9.0')
         def outputs_for(cid, suffix, builddir):
             be = NinjaBackend.__new__(NinjaBackend)
             # Mapper files: these pin the static mapper's naming.
-            be._gcc_mapper_mode = 'file'
             be.build_to_src = '..'
             be.all_outputs = set()
             be._bmi_classes = {}
@@ -1754,7 +1750,6 @@ Thread model: posix'''), '21.9.0')
         def outputs_for(cid, suffix, builddir):
             be = NinjaBackend.__new__(NinjaBackend)
             # Mapper files: these pin the static mapper's naming.
-            be._gcc_mapper_mode = 'file'
             be.build_to_src = '..'
             be.all_outputs = set()
             be._bmi_classes = {}

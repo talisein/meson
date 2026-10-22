@@ -2632,37 +2632,21 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertIn('Building C++ header unit util.h', cm.exception.output)
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
-    def test_gcc_header_unit_generated_at_build_time_errors(self):
+    def test_gcc_header_unit_generated_at_build_time(self):
         # A header a custom_target writes during the build, declared as a header
-        # unit. GCC names a unit by the path its header resolves to, and derives
-        # both the importer's mapper key and the default CMI path from that name,
-        # so a header that does not exist while Meson is deciding what to build
-        # cannot be given a unit at all. Setup must say so: the alternative is an
-        # edge whose declared BMI GCC never writes (having no mapper, it writes
-        # its own default path instead), leaving that edge and everything ordered
-        # behind it dirty on every ninja run, forever.
-        #
-        # A GCC asking a mapper program needs only the unit's file, which setup
-        # knows from the generator's output: there the unit builds behind its
-        # generator, its importer runs, and the build settles to a no-op.
-        testdir = os.path.join(self.unit_test_dir, '198 unresolvable header unit')
-        if os.environ.get('MESON_GCC_MAPPER') == 'program':
-            self.build_and_check_modules('198 unresolvable header unit',
-                                         setup_not_contains=['Cannot resolve'])
-            with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-                unit_edges = [line for line in f
-                              if line.startswith('build ') and 'HEADER_UNIT' in line]
-            self.assertEqual(len(unit_edges), 1, unit_edges)
-            self.assertIn('generated.h.', unit_edges[0])
-            self.assertTrue(unit_edges[0].rstrip().endswith('|| generated.h'),
-                            f'the unit must order behind its generator: {unit_edges[0]}')
-            return
-        with self.assertRaises(subprocess.CalledProcessError) as cm:
-            self.init(testdir)
-        self.assertIn("Cannot resolve the C++ header unit 'generated.h'", cm.exception.output)
-        self.assertIn('custom_target', cm.exception.output)
-        # Distinct from the two other header-unit diagnostics.
-        self.assertNotIn('cannot name a header unit', cm.exception.output)
+        # unit. The mapper server finds a unit by its file, which setup knows
+        # from the generator's output even before the header exists: the unit
+        # builds behind its generator, its importer runs, and the build
+        # settles to a no-op.
+        self.build_and_check_modules('198 unresolvable header unit',
+                                     setup_not_contains=['Cannot resolve'])
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            unit_edges = [line for line in f
+                          if line.startswith('build ') and 'HEADER_UNIT' in line]
+        self.assertEqual(len(unit_edges), 1, unit_edges)
+        self.assertIn('generated.h.', unit_edges[0])
+        self.assertTrue(unit_edges[0].rstrip().endswith('|| generated.h'),
+                        f'the unit must order behind its generator: {unit_edges[0]}')
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_header_unit_unresolvable_system_warns(self):

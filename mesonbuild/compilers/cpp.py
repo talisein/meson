@@ -880,16 +880,6 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # suppress either, so existing_args is unused.
         return [self._named_modules_flag(), '-Mno-modules']
 
-    def get_module_mapper_args(self, mapper_path: str) -> T.List[str]:
-        # The only way to steer GCC's BMI lookup: gcm.cache is resolved
-        # relative to the working directory, and there is no search-path
-        # flag. The mapper file must enumerate the TU's provides and direct
-        # imports (a mapping file disables the default module->CMI naming
-        # and has no wildcard form), so its contents are scan-derived and
-        # written by the collate; only this static path is on the command
-        # line.
-        return [f'-fmodule-mapper={mapper_path}']
-
     # What GCC 16's mapper-command splitter (libiberty's buildargv) treats as
     # special, the same set the backend escapes in GCC response files.
     _MAPPER_UNSAFE = re.compile(r'[^\w@%+=:,./-]', re.ASCII)
@@ -907,6 +897,29 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
             return []
         return [w for w in words if not w or any(c in w for c in ' \t\n\'"\\')]
 
+    def program_mapper_command(self, meson_command: T.List[str],
+                               which: T.Callable[[str], T.Optional[str]] = shutil.which) -> T.List[str]:
+        # The absolute command running Meson now, whenever this GCC can pass
+        # it. Otherwise a bare 'meson', if PATH already finds this very Meson
+        # (the script or executable after any interpreter; 'python -m
+        # mesonbuild.mesonmain' names none): GCC looks it up when it spawns
+        # the server, so this assumes the build runs with the PATH that
+        # configured it. Otherwise nothing can start the server.
+        command = [*meson_command, '--internal', 'gccmapper']
+        bad = self.program_mapper_unquotable(command)
+        if not bad:
+            return command
+        launcher = None if meson_command[-2:-1] == ['-m'] else meson_command[-1]
+        found = which('meson')
+        if launcher is not None and found is not None \
+                and os.path.realpath(found) == os.path.realpath(launcher):
+            return ['meson', '--internal', 'gccmapper']
+        raise MesonException(
+            f'GCC {self.version} cannot start Meson\'s C++ module mapper: its command '
+            f'line holds {bad[0]!r}, and before GCC 16 that command line is split at '
+            'every space, with no quoting. Use GCC 16 or later, install Meson and '
+            'Python at paths without spaces, or put this Meson on PATH as "meson".')
+
     def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
                                        units: str, table: T.Optional[str] = None) -> T.List[str]:
         # GCC spawns '|<command line>' as its module mapper and asks it for
@@ -921,7 +934,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
             raise MesonException(
                 f'GCC {self.version} cannot pass {bad[0]!r} to its module mapper '
                 'program: before GCC 16 the mapper command line is split at every '
-                'space, with no quoting. Unset MESON_GCC_MAPPER to use mapper files.')
+                'space, with no quoting.')
         if self.program_mapper_quotes():
             line = ' '.join(self._MAPPER_UNSAFE.sub(lambda m: '\\' + m.group(), w) if w else "''"
                             for w in words)
