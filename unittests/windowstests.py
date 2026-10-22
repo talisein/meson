@@ -281,10 +281,10 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # Ninja-only module pipeline is not involved: MSBuild's own machinery
         # scans the .ixx, produces the BMI, and orders the importer. The
         # framework may itself be pinned to a non-ninja backend for a whole run
-        # (e.g. --backend=vs); this test drives its own vs2022 backend, so it
-        # only makes sense under the Ninja backend, like test_genvslite.
+        # (e.g. --backend=vs); this test drives its own vs backend, so it only
+        # makes sense under the Ninja backend, like test_genvslite.
         if self.backend is not Backend.ninja:
-            raise SkipTest('Test drives its own vs2022 backend; run it under the Ninja backend.')
+            raise SkipTest('Test drives its own vs backend; run it under the Ninja backend.')
         testdir = os.path.join(self.unit_test_dir, '213 cpp modules native vs')
         env = get_fake_env(testdir, self.builddir, self.prefix)
         cc = detect_c_compiler(env, MachineChoice.HOST)
@@ -295,8 +295,10 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             raise SkipTest('msbuild.exe not found')
 
         # The suffix-inferred module target must not be refused on the vs
-        # backend (setup would raise otherwise).
-        self.init(testdir, extra_args=['--backend=vs2022', '-Dcpp_std=vc++latest'])
+        # backend (setup would raise otherwise). The backend is detected from
+        # the loaded environment, not named: msbuild can only build with the
+        # platform toolset of a Visual Studio that is installed.
+        self.init(testdir, extra_args=['--backend=vs', '-Dcpp_std=vc++latest'])
 
         # Build the generated solution through msbuild. See test_genvslite for
         # why VSINSTALLDIR must be removed from the child environment.
