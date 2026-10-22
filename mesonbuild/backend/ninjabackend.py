@@ -2976,6 +2976,18 @@ class NinjaBackend(backends.Backend):
             tid = hashlib.sha1(tid.encode('utf-8')).hexdigest()[:16]
         return f'meson-private/gcc-header-units/{tid}@{bmi_class_tag}.json'
 
+    def _gcc_program_generated_headers(self, compiler: Compiler,
+                                       owner: build.BuildTarget) -> T.Optional[T.FrozenSet[str]]:
+        """The headers `owner`'s generators will write, for resolving its
+        declared units -- only where GCC asks a mapper program. That needs a
+        unit's file, not the name GCC will give it, so a header that does not
+        exist yet can still be one: setup knows where it will be. A mapper
+        file needs the name, which only an existing header can tell.
+        """
+        if not self._gcc_program_mapper(compiler):
+            return None
+        return frozenset(os.path.normpath(p) for p in self._target_generated_output_paths(owner))
+
     @staticmethod
     def _gcc_module_table(compiler: Compiler, obj: str) -> str:
         """Where the collate writes the mapper program's table for the TU
@@ -3112,7 +3124,8 @@ class NinjaBackend(backends.Backend):
 
     def _header_unit_mapper_key(self, compiler: Compiler,
                                 args: T.Union['CompilerArgs', T.List[str]],
-                                spelling: str) -> T.Optional[str]:
+                                spelling: str,
+                                generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
         """The path a GCC module mapper would have to name a header unit by:
         the header as resolved on the include path, which is what an importer
         looks the unit up as. None when the spelling resolves nowhere on this
@@ -3125,6 +3138,11 @@ class NinjaBackend(backends.Backend):
         spelled. A directory searched only after the compiler's standard ones
         (-idirafter) is skipped -- a hit there could be shadowed by a standard
         directory this walk cannot see, so it is left to the probe fallback.
+
+        `generated` (normalized build-relative paths) counts files the build
+        will write as already there, at their place in the search order:
+        a header generated into an include directory is found where the
+        compiler will find it once it exists.
         """
         if any(c.isspace() for c in spelling):
             # A File-spelled unit already carries its path.
@@ -3135,13 +3153,15 @@ class NinjaBackend(backends.Backend):
                   if kind == 'inc' and d is not None and rank is not None]
         ranked.sort(key=lambda rd: rd[0])
         for _rank, d in ranked:
-            if os.path.isfile(os.path.join(build_dir, d, spelling)):
+            if os.path.isfile(os.path.join(build_dir, d, spelling)) or \
+                    (generated and os.path.normpath(os.path.join(d, spelling)) in generated):
                 return os.path.join(d, spelling)
         return None
 
     def _header_unit_gcc_name(self, compiler: Compiler,
                               args: T.Union['CompilerArgs', T.List[str]],
-                              mode: str, spelling: str) -> T.Optional[str]:
+                              mode: str, spelling: str,
+                              generated: T.Optional[T.AbstractSet[str]] = None) -> T.Optional[str]:
         """The name GCC gives a header unit: the key an importer looks it up by,
         and the stem of the CMI path it writes by default.
 
@@ -3161,8 +3181,10 @@ class NinjaBackend(backends.Backend):
         proves GCC named the unit by a path holding whitespace. A winning alias
         probes back space-free and the textual key stands unchanged; an
         unaliased name never probes.
+
+        `generated` reaches the include walk (_header_unit_mapper_key) only.
         """
-        key = self._header_unit_mapper_key(compiler, args, spelling) if mode == 'user' else None
+        key = self._header_unit_mapper_key(compiler, args, spelling, generated) if mode == 'user' else None
         if key is None:
             # Off the -I path: a system header, or a quote-form spelling falling
             # through to the compiler's own search path.
@@ -3435,9 +3457,10 @@ class NinjaBackend(backends.Backend):
         # A mapper program is asked over a protocol that quotes whitespace, so
         # only a header resolving nowhere is a problem there.
         quotes = self._gcc_program_mapper(compiler)
+        generated = self._gcc_program_generated_headers(compiler, target)
         for hu in target.cpp_header_units:
             mode, spelling = self._header_unit_spelling(hu, compiler)
-            key = self._header_unit_gcc_name(compiler, args, mode, spelling)
+            key = self._header_unit_gcc_name(compiler, args, mode, spelling, generated)
             if key is not None and (quotes or not self._has_space(key)):
                 continue
             if key is None and mode == 'user':
@@ -5708,9 +5731,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
 
         A HEADER_UNIT edge reads the header off disk at run time but names no
         input, so a build-time-generated header must be wired in as an
-        order-only dep or the edge can run before its generator does. Only cl
-        and clang reach here for such a unit: GCC cannot name a header that
-        resolves nowhere at setup and drops it before any edge is emitted.
+        order-only dep or the edge can run before its generator does. GCC
+        reaches here for such a unit only when it asks a mapper program; with
+        mapper files it cannot name a header that does not exist at setup.
         """
         if owner is None:
             return []
@@ -5986,13 +6009,15 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         manifest = self._gcc_units_manifest(compiler, owner, tag)
         suffix = compiler.get_module_bmi_suffix()
         build_dir = self.environment.get_build_dir()
+        generated = self._gcc_program_generated_headers(compiler, owner)
         outputs: T.List[str] = []
         bmis: T.List[T.Tuple[str, str]] = []
         for hu in header_units:
             mode, spelling = self._parse_header_unit(hu)
-            # Where the header resolves, which a probe answers for a system
-            # unit; check_header_unit_names has reported one resolving nowhere.
-            name = self._header_unit_gcc_name(compiler, args, mode, spelling)
+            # Where the header resolves -- or will, once the owner's generators
+            # have run -- which a probe answers for a system unit;
+            # check_header_unit_names has reported one resolving nowhere.
+            name = self._header_unit_gcc_name(compiler, args, mode, spelling, generated)
             if name is None:
                 continue
             real = header_unit_key(os.path.join(build_dir, name))

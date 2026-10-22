@@ -8,13 +8,17 @@ project('unresolvable header unit', 'cpp', default_options: ['cpp_std=c++20'])
 mode = get_option('mode')
 
 if mode == 'generated'
-  # The header exists only once the build has run. Setup must say so: nothing
-  # about this target can work, and an edge for the unit would declare a BMI
-  # nothing writes.
+  # The header exists only once the build has run. With GCC module mapper
+  # files setup must say so: a mapper file needs the name GCC will give the
+  # unit, which only an existing header can tell, and an edge for the unit
+  # would declare a BMI nothing writes. A GCC asking a mapper program needs
+  # only the unit's file, which setup knows from the generator's output, so
+  # there the unit builds behind its generator and the program runs.
   genh = custom_target('generated.h',
     output: 'generated.h',
     command: [find_program('python3'), files('gen.py'), '@OUTPUT@'])
-  executable('prog', 'genmain.cpp', genh, cpp_header_units: ['generated.h'])
+  prog = executable('prog', 'genmain.cpp', genh, cpp_header_units: ['generated.h'])
+  test('prog', prog)
 elif mode == 'system-missing'
   # An angle-bracketed spelling that resolves nowhere. Only a probe of the
   # compiler can answer for such a unit, and a probe comes back empty for

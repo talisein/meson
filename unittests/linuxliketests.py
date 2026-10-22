@@ -2641,7 +2641,22 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # edge whose declared BMI GCC never writes (having no mapper, it writes
         # its own default path instead), leaving that edge and everything ordered
         # behind it dirty on every ninja run, forever.
+        #
+        # A GCC asking a mapper program needs only the unit's file, which setup
+        # knows from the generator's output: there the unit builds behind its
+        # generator, its importer runs, and the build settles to a no-op.
         testdir = os.path.join(self.unit_test_dir, '198 unresolvable header unit')
+        if os.environ.get('MESON_GCC_MAPPER') == 'program':
+            self.build_and_check_modules('198 unresolvable header unit',
+                                         setup_not_contains=['Cannot resolve'])
+            with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+                unit_edges = [line for line in f
+                              if line.startswith('build ') and 'HEADER_UNIT' in line]
+            self.assertEqual(len(unit_edges), 1, unit_edges)
+            self.assertIn('generated.h.', unit_edges[0])
+            self.assertTrue(unit_edges[0].rstrip().endswith('|| generated.h'),
+                            f'the unit must order behind its generator: {unit_edges[0]}')
+            return
         with self.assertRaises(subprocess.CalledProcessError) as cm:
             self.init(testdir)
         self.assertIn("Cannot resolve the C++ header unit 'generated.h'", cm.exception.output)
