@@ -136,12 +136,9 @@ def _source_key(path: str) -> str:
     Two spellings of one file must key alike or the interface check below
     rejects a source that is declared.
 
-    Resolution belongs here and nowhere else: this key only ever answers "are
-    these the same file", and is never emitted. Every path that reaches a
-    mapper key, a dyndep, or a command line stays exactly as spelled -- the
-    module-mapper aliases are symlinked directories whose whole purpose is to
-    offer a space-free route to a spaced path, and resolving those spellings
-    would undo them.
+    This key only ever answers "are these the same file", and is never
+    emitted: every path that reaches a dyndep or a command line stays exactly
+    as spelled.
     """
     return os.path.normcase(os.path.realpath(path))
 
@@ -149,15 +146,10 @@ def _source_key(path: str) -> str:
 def _write_if_different(path: str, content: str) -> None:
     """Write only when the content changed, preserving mtime otherwise.
 
-    Mapper files are implicit inputs of compile edges; an unconditional
+    Mapper tables are implicit inputs of compile edges; an unconditional
     rewrite would recompile every object in the target whenever any module
-    in it changes.
-
-    newline='' keeps the newlines exactly as written: GCC's module-mapper
-    parser reads a mapper key up to the newline and does not strip a carriage
-    return, so a CRLF (which text mode would emit on Windows) breaks the lookup
-    with "failed reading mapper". Reading the same way makes a mapper left over
-    from an earlier CRLF-writing Meson compare unequal, so it is rewritten.
+    in it changes. newline='' writes and compares the bytes as built, on
+    every platform.
     """
     try:
         with open(path, encoding='utf-8', newline='') as f:

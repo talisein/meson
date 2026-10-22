@@ -942,13 +942,12 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         return [f'-fmodule-mapper=|{line}?']
 
     def supports_bmi_classes(self) -> bool:
-        # Divergent classes work through the per-TU module mapper. Only
+        # Divergent classes work through Meson's module mapper program. Only
         # consulted on the P1689 path (GCC >= 14); -fmodule-mapper is far
-        # older than that. The mapper names a header unit's CMI too, so a unit
-        # can stand at a per-class path with each consumer sent to its own
-        # class's, and no BMI path on any command line: the backend computes
-        # what GCC calls a unit (the header as resolved on the include path) to
-        # write those lines.
+        # older than that. The mapper names a header unit's CMI too, by the
+        # header's real path, so a unit can stand at a per-class path with
+        # each consumer sent to its own class's, and no BMI path on any
+        # command line.
         return True
 
     def supports_pch_with_cpp_modules(self) -> bool:

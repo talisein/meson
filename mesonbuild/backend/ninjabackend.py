@@ -4355,12 +4355,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                                           '$SPELLING', '-o', '$out']
             self.add_rule(NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE'))
             return
-        # GCC takes a header unit's CMI path from its mapper, so $HUMAPPER -- one
-        # setup-written line naming the resolved header and this edge's $out --
-        # is what lets the edge declare the real .gcm. It is empty for a unit no
-        # mapper key can name (whitespace in the path), which falls back to
-        # default naming; $out is that same path, so the output appears either
-        # way. -fmodule-only skips the object; $HULANG is c++-{user,system}-header.
+        # GCC takes a header unit's CMI path from its mapper, so $HUMAPPER -- the
+        # flag that has it ask Meson's mapper server, which finds the header's
+        # real path in the declarer's units manifest at this edge's $out -- is
+        # what lets the edge declare the real .gcm. -fmodule-only skips the
+        # object; $HULANG is c++-{user,system}-header.
         modargs = NinjaCommandArg.list(compiler.get_module_compile_args(), Quoting.none)
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
         args = ['$ARGS'] + modargs + ['$HUMAPPER'] + depargs + \

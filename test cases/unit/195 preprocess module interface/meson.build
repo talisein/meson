@@ -10,7 +10,7 @@ test('prog', prog)
 
 # The same source, preprocessed. A preprocess-only target neither writes a BMI
 # nor imports one and gets no collate edge, so no part of the module pipeline
-# may reach its compile: a per-TU module mapper, a scan or a BMI declared here
+# may reach its compile: a per-TU mapper table, a scan or a BMI declared here
 # would name outputs nothing produces.
 pp = cxx.preprocess('modlib.cppm', output: '@PLAINNAME@.ii')
 

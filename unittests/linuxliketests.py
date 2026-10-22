@@ -2031,8 +2031,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
     def test_gcc_bmi_classes(self):
         # The shared two-class fixture under GCC, where the class cache
-        # rides the per-TU module mapper; also assert the mapper shape --
-        # compile edges name their own object's mapper, scans none.
+        # rides Meson's module mapper; also assert the mapper shape --
+        # compile edges name their own object's table, scans none.
         self.check_bmi_classes('166 bmi classes', module_name='modlib',
                                provider_lib='libmodlib.a',
                                consumers=('prog23', 'prog20'),
@@ -2220,8 +2220,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # BMI is a failing test run, not merely a build failure.
         #
         # Each main imports a named module as well as the unit, which is what
-        # pins the scan edges staying mapper-less: a mapper on a scan would leave
-        # `import modlib;` unresolvable.
+        # pins the scans asking the mapper server for names only: a scan that
+        # needed modlib's BMI would leave `import modlib;` unresolvable.
         #
         # 168 is the same shape diverging on cpp_std -- see
         # test_header_unit_dialect_divergence.

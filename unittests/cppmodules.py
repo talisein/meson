@@ -44,7 +44,7 @@ Token vocabulary (the API for the C++ module test series):
     each class its own cache subdirectory and synthesizes BMI-only variants
     of shared module providers (``Compiler.supports_bmi_classes()``, plus
     the ``bmionly`` probe). Clang, MSVC from cl 19.32, and GCC (from 14,
-    the P1689 floor; the class cache rides the per-TU module mapper there).
+    the P1689 floor; the class cache rides Meson's module mapper there).
 ``ixx_as_cpp``
     The driver compiles a ``.ixx`` source as C++ from its extension alone, with
     no language flag -- what a target that opts a ``.ixx`` out of module
@@ -602,9 +602,7 @@ class CppModulesTestMixin:
 
     def header_unit_bmis(self, basename: str) -> T.Set[str]:
         """Every header-unit BMI the build declares for `basename`, from the
-        outputs of the header-unit rule. Unlike header_unit_digests this sees
-        GCC's too, whose per-class BMIs stand at the compiler's default-named
-        paths under the shared cache rather than under meson-private/header-units."""
+        outputs of the header-unit rule, on every compiler."""
         outputs: T.Set[str] = set()
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:

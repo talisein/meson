@@ -1,19 +1,15 @@
 project('unresolvable header unit', 'cpp', default_options: ['cpp_std=c++20'])
 
-# A declared header unit whose header GCC cannot resolve while Meson is deciding
-# what to build. GCC names a header unit by the path it resolves to -- the key an
-# importer's module mapper looks it up by, and the path the BMI is written to --
-# so a name is what the whole scheme is a function of, and a unit without one
-# cannot be built at all.
+# A declared header unit whose header is not on disk while Meson is deciding
+# what to build. GCC's mapper server finds a unit by its header's real path, so
+# setup must know which file a unit is: a generated one it knows from the
+# generator's outputs, but one that resolves nowhere cannot be built at all.
 mode = get_option('mode')
 
 if mode == 'generated'
-  # The header exists only once the build has run. With GCC module mapper
-  # files setup must say so: a mapper file needs the name GCC will give the
-  # unit, which only an existing header can tell, and an edge for the unit
-  # would declare a BMI nothing writes. A GCC asking a mapper program needs
-  # only the unit's file, which setup knows from the generator's output, so
-  # there the unit builds behind its generator and the program runs.
+  # The header exists only once the build has run. Setup knows the unit's
+  # file from the generator's output, so the unit builds behind its generator
+  # and the program runs.
   genh = custom_target('generated.h',
     output: 'generated.h',
     command: [find_program('python3'), files('gen.py'), '@OUTPUT@'])

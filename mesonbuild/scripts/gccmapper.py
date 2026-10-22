@@ -227,7 +227,7 @@ class Mapper:
 
     def translate(self, name: str) -> bool:
         # An #include becomes an import exactly when the header has a BMI
-        # here, as with a mapper file naming it.
+        # here.
         if self.table is not None:
             return self.realpath(name) in self.table.get('header_units', {})
         return self.realpath(name) in self.units.get('header_units', {})

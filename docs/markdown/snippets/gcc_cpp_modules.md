@@ -4,10 +4,11 @@ Meson can now build C++20 named modules (and module partitions,
 internal implementation partitions included) with GCC on the Ninja
 backend. Sources are scanned with GCC's P1689 dependency scanner and
 ordered through Ninja `dyndep`; compiled module interfaces live in a single shared
-`gcm.cache` at the build root, resolved through a per-translation-unit module
-mapper (GCC has no module search-path flag). No `-fmodule-file=` mappings or
-module names appear on any compile command line — a compile carries only its
-mapper file's static path.
+`gcm.cache` at the build root. GCC has no module search-path flag, so it finds
+them by asking a module mapper program Meson provides: GCC starts
+`meson --internal gccmapper`, which answers from a per-translation-unit table
+the dependency collation writes. No `-fmodule-file=` mappings or module names
+appear on any compile command line.
 
 Module interfaces produced at build time by a `generator()` or `custom_target`
 are supported: the scan runs after the source is generated, and the module name
@@ -104,12 +105,17 @@ Named modules need GCC >= 14 (the first release with the P1689 scanner);
 divergent module-affecting flags (a different `cpp_std`, extra defines,
 `-pthread` from `dependency('threads')`, ...) build correctly, as on Clang and
 MSVC: each flag class gets its own subdirectory of `gcm.cache`, named in the
-compiles' mappers, and Meson recompiles a shared provider's interfaces per
-class as BMIs only, so every consumer still links the provider's objects
+compiles' mapper tables, and Meson recompiles a shared provider's interfaces
+per class as BMIs only, so every consumer still links the provider's objects
 exactly once. A single-class build keeps every BMI in the flat `gcm.cache`.
-Header units are built per flag class too, renamed through per-class
-directory aliases on the dependency scan; see the header-unit notes for the
-mechanism and its degraded path.
+Header units are built per flag class too.
+
+GCC 14 and 15 split the mapper program's command line at spaces and cannot
+quote it. Where the command running Meson holds a space, quote or backslash (a
+Python or Meson installed under such a path), Meson starts the mapper as a bare
+`meson` if that same Meson is on `PATH`, which the build must then also see;
+otherwise setup fails for that compiler's module targets. Use GCC 16, install
+Meson and Python at paths without spaces, or put Meson on `PATH`.
 
 Module targets may exist on both machines of a cross build: a static library
 built `native: true` and one built for the host can each provide modules, and

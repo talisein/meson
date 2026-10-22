@@ -19,7 +19,7 @@ build_mod = static_library('buildmod', 'mod.cppm', native: true)
 build_prog = executable('buildprog', 'main.cpp', native: true, link_with: build_mod)
 test('buildprog', build_prog)
 
-# A header unit declared on each machine. Per-machine alias roots must name the
+# A header unit declared on each machine. Per-machine BMI classes must keep the
 # two machines' unit BMIs apart, the same way divergent flag classes do.
 host_hu = executable('hosthu', 'usehu.cpp', cpp_header_units: ['head.hpp'])
 test('hosthu', host_hu)

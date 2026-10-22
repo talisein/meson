@@ -212,30 +212,24 @@ kwargs:
       (`import "pkg/header.h";`) and `'<pkg/header.h>'` is a system header unit
       (`import <pkg/header.h>;`). Meson pre-builds each unit's BMI from this
       list, because a header unit's BMI must exist before the sources that
-      import it are scanned and compiled. On GCC consumers resolve the BMI
-      through a module mapper, so no BMI path reaches a command line; on MSVC
-      and Clang Meson passes each consumer an explicit mapping to it
-      (`/headerUnit` and `-fmodule-file` respectively).
+      import it are scanned and compiled. On GCC consumers find the BMI by
+      asking a module mapper program Meson provides (GCC starts
+      `meson --internal gccmapper` itself), so no BMI path reaches a command
+      line; on MSVC and Clang Meson passes each consumer an explicit mapping to
+      it (`/headerUnit` and `-fmodule-file` respectively).
 
       A unit's BMI freezes the module-affecting flags it was built with, so
       targets that declare the same header unit with divergent flags each get a
       BMI of it, one per flag equivalence class, on every supported compiler.
-      GCC also freezes the *dialect* (`cpp_std`, `cpp_eh`, `cpp_rtti`) and
-      enforces it while scanning, before a per-class BMI could be selected, so
-      each class's scan resolves the header through its own directory alias
-      instead. Only where the build tree cannot make that alias do
-      dialect-divergent targets fall back to sharing one BMI, with a warning at
-      configure time and a failure at the scan.
 
-      Every header unit a source imports must be listed (the declaration does
-      not propagate through dependencies, so a consumer that imports the same
-      header must declare it too), and it must be listed **as that source spells
-      it**: a compiler keys a unit by the text the import resolved through, so
-      `import "../header.h";` from a subdirectory is a spelling of its own.
-      Declaring several spellings of one file is free -- they share its BMI
-      rather than each building one. An *undeclared* spelling is an error on GCC
-      and cannot be healed, because finding it would take the scan that the
-      missing BMI is what breaks; Clang matches any spelling of a declared unit.
+      Every header unit a source imports must be declared on its target (the
+      declaration does not propagate through dependencies, so a consumer that
+      imports the same header must declare it too). On GCC and Clang any
+      spelling of a declared file reaches its unit: `import "../header.h";`
+      from a subdirectory finds the unit declared as `'header.h'`. MSVC matches
+      a unit by the literal import spelling, so use one include-path spelling
+      from every importer there. Importing a header that is declared nowhere
+      is an error, on GCC at the importer's dependency scan.
 
       **Ordering:** the units are built before all of the target's scans and
       compiles, but they are *not* ordered relative to each other, so a header
@@ -243,12 +237,17 @@ kwargs:
       header units that only `#include` their prerequisites, which are absorbed
       textually). Implies module handling for the target.
 
-      On GCC a declared header unit must exist at setup time, since GCC names a
-      unit by the path its header resolves to and Meson has to work that out
-      while configuring: a header written *during* the build (a `custom_target`
-      or `generator` output) cannot be a header unit there and is reported at
-      configure time, while a `configure_file` output can, existing by the time
-      configuration ends.
+      On GCC and Clang a declared header may also be one the target writes
+      during the build (a `custom_target` or `generator` output on its include
+      path): its unit is built after the header is generated.
+
+      GCC before 16 splits the mapper program's command line at spaces and
+      cannot quote it. Where the command running Meson holds a space, quote or
+      backslash (a Python or Meson installed under such a path), Meson starts
+      the mapper as a bare `meson` if that same Meson is on `PATH`, which the
+      build must then also see; otherwise setup fails for that compiler's
+      module targets. Use GCC 16 or later, install Meson and Python at paths
+      without spaces, or put Meson on `PATH`.
 
       Currently supported with GCC (>= 14), MSVC (>= VS 2022 17.2, cl 19.32)
       and Clang (needs a P1689-capable `clang-scan-deps`, the same requirement

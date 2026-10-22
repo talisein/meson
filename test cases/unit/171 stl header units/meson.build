@@ -8,9 +8,8 @@ prog = executable('prog', 'main.cpp', link_with: modlib,
 test('prog', prog)
 
 # A define-divergent second consumer makes the build multi-class, so prog's
-# TUs resolve modules per class while the header unit stays wherever the
-# compiler keeps units -- on GCC the flat shared cache, reached through an
-# absolute-path mapper line.
+# TUs resolve modules and the header unit per class -- on GCC the unit keyed by
+# its absolute real path.
 progfoo = executable('progfoo', 'foomain.cpp', link_with: modlib,
                      cpp_args: ['-DFOO'])
 test('progfoo', progfoo)
