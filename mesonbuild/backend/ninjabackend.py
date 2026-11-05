@@ -615,6 +615,17 @@ class BmiVariant:
     dyndep: str
 
 
+@dataclass(frozen=True)
+class ModuleProvider:
+    """A linked target whose public modules a consumer (or a BMI-only
+    variant) in one BMI class resolves imports from: the provided-modules map
+    the collate reads for it, and the directory holding its BMIs in that BMI
+    class."""
+    target: build.BuildTarget
+    provmap: str
+    bmi_dir: str
+
+
 class NinjaBackend(backends.Backend):
 
     def __init__(self, build: T.Optional[build.Build]):
@@ -690,6 +701,9 @@ class NinjaBackend(backends.Backend):
         # provider's own compile generation.
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
         self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
+        # The module providers a (target id, BMI class key) resolves imports
+        # from; see _module_providers.
+        self._module_providers_memo: T.Dict[T.Tuple[str, T.Tuple[str, ...]], T.List[ModuleProvider]] = {}
         self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
         # Normalized declared-source paths per (target id, module kwarg). The
         # _is_declared_* predicates ask once per compiled source, so without
@@ -1786,7 +1800,7 @@ class NinjaBackend(backends.Backend):
             # this target has its own private dir: that dir's search path still
             # needs the shared class cache for its dependencies' public modules.
             os.makedirs(os.path.join(self.environment.get_build_dir(),
-                                     self._module_shared_bmi_dir_for(target)),
+                                     self._module_bmi_dir(target, self._bmi_class_key_of(target))),
                         exist_ok=True)
 
         ddis: T.List[str] = []
@@ -1794,20 +1808,14 @@ class NinjaBackend(backends.Backend):
             if lang == 'cpp':
                 ddis.append(self.get_ddi_file_for(source2object[src]))
 
-        dep_provmaps: T.List[str] = []
-        dep_private_maps: T.List[T.Tuple[str, str, str]] = []
-        for t in self.get_all_linked_targets(target):
-            if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
-                    and t.provides_cpp_modules():
-                dep_provmaps.append(self._module_provmap_for(target, t))
-                # Unlike the provmap, never routed through a BMI-class
-                # variant: a private module is never recompiled into a
-                # variant (_get_or_create_bmi_variant excludes it), and a
-                # name-only list has no per-class content, so a consumer
-                # always reads the provider's own private-modules.json.
-                dep_private_maps.append(self.private_map_ref_for(t))
-        dep_provmaps.sort()
-        dep_private_maps.sort()
+        providers = self._module_providers(target, self._bmi_class_key_of(target))
+        dep_provmaps = [p.provmap for p in providers]
+        # Unlike the provmap, never routed through a BMI-class variant: a
+        # private module is never recompiled into a variant
+        # (_get_or_create_bmi_variant excludes it), and a name-only list has
+        # no per-class content, so a consumer always reads the provider's own
+        # private-modules.json.
+        dep_private_maps = sorted(self.private_map_ref_for(p.target) for p in providers)
 
         dyndep_file = self.get_dep_scan_file_for(target, 'cpp')[1]
         provmap_file = self.get_provided_modules_file_for(target)
@@ -1817,7 +1825,7 @@ class NinjaBackend(backends.Backend):
         # in DEPARGS instead (_module_collate_depargs), never here.
         self._add_module_collate_edge(
             cpp, [dyndep_file, provmap_file, private_map_file], ddis,
-            dyndep_file, provmap_file, self._module_shared_bmi_dir_for(target),
+            dyndep_file, provmap_file, self._module_bmi_dir(target, self._bmi_class_key_of(target)),
             self._module_collate_depargs(target, cpp, dep_provmaps, dep_private_maps),
             target.name, dep_provmaps, dep_private_maps)
 
@@ -1979,17 +1987,13 @@ class NinjaBackend(backends.Backend):
                 depargs += ['--header-unit', f'{mode}:{spelling}']
         return depargs
 
-    def _module_provmap_for(self, consumer: build.BuildTarget,
-                            provider: build.BuildTarget) -> str:
-        """The provided-modules map `consumer` resolves `provider`'s modules
-        from: the provider's own when their BMI classes agree, else a
-        BMI-only variant in the consumer's class. Every compiler on the
-        P1689 path supports classes.
-        """
-        return self._provmap_for_class(provider, self._bmi_class_key_of(consumer))
-
     def _provmap_for_class(self, provider: build.BuildTarget,
                            class_key: T.Tuple[str, ...]) -> str:
+        """The provided-modules map a consumer in the BMI class `class_key`
+        resolves `provider`'s modules from: the provider's own when the BMI
+        classes agree, else a BMI-only variant's. Every compiler on the P1689
+        path supports BMI classes.
+        """
         if self._bmi_class_key_of(provider) == class_key:
             return self.get_provided_modules_file_for(provider)
         return self._get_or_create_bmi_variant(provider, class_key).provmap
@@ -2034,7 +2038,7 @@ class NinjaBackend(backends.Backend):
         self._bmi_variants[memo_key] = variant
         build_dir = self.environment.get_build_dir()
         os.makedirs(os.path.join(build_dir, private_dir), exist_ok=True)
-        os.makedirs(os.path.join(build_dir, cpp.get_module_cache_dir(info.subdir)), exist_ok=True)
+        os.makedirs(os.path.join(build_dir, self._module_bmi_dir(provider, class_key)), exist_ok=True)
 
         # The provider's BMI-irrelevant flags (its includes, warnings, ...)
         # plus the class's BMI-relevant flags; later flags win, so the class
@@ -2105,7 +2109,7 @@ class NinjaBackend(backends.Backend):
             elem.add_item('dyndep', variant.dyndep)
             elem.add_orderdep(variant.dyndep)
             self.add_build(elem)
-            self.generate_cpp_module_harvest(provider, cpp, vpcm, cpp.get_module_cache_dir(info.subdir))
+            self.generate_cpp_module_harvest(provider, cpp, vpcm, self._module_bmi_dir(provider, class_key))
 
         # The variant's own imports must resolve in its class too: a linked
         # provider in the same class keeps its original provmap, a divergent
@@ -2113,17 +2117,11 @@ class NinjaBackend(backends.Backend):
         # private names are never routed through a variant of their own
         # (private-modules.json is names-only and class-independent, always
         # a dependency's own file -- the same asymmetry the normal collate's
-        # dep_private_maps relies on), so this mirrors that loop directly
-        # rather than going through _provmap_for_class for the private side.
-        dep_provmaps: T.List[str] = []
-        dep_private_maps: T.List[T.Tuple[str, str, str]] = []
-        for t in self.get_all_linked_targets(provider):
-            if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
-                    and t.provides_cpp_modules():
-                dep_provmaps.append(self._provmap_for_class(t, class_key))
-                dep_private_maps.append(self.private_map_ref_for(t))
-        dep_provmaps = sorted(set(dep_provmaps))
-        dep_private_maps = sorted(set(dep_private_maps))
+        # dep_private_maps relies on), so the private side reads each
+        # provider's own file rather than anything class-routed.
+        providers = self._module_providers(provider, class_key)
+        dep_provmaps = [p.provmap for p in providers]
+        dep_private_maps = sorted({self.private_map_ref_for(p.target) for p in providers})
         # The provider's own private-modules.json: a recompiled public
         # interface may legally import the provider's own private module
         # (same target, same unkeyed-by-class private dir). Always exists --
@@ -2145,7 +2143,7 @@ class NinjaBackend(backends.Backend):
             units_manifest=variant_units)
         self._add_module_collate_edge(
             cpp, [variant.dyndep, variant.provmap], ddis,
-            variant.dyndep, variant.provmap, cpp.get_module_cache_dir(info.subdir),
+            variant.dyndep, variant.provmap, self._module_bmi_dir(provider, class_key),
             depargs, vid, dep_provmaps, dep_private_maps,
             extra_deps=[own_private_map])
         self._uses_dyndeps = True
@@ -2532,13 +2530,45 @@ class NinjaBackend(backends.Backend):
         info = self._bmi_classes.get((target.for_machine, self._bmi_class_key_of(target)))
         return info.subdir if info else None
 
-    def _module_shared_bmi_dir_for(self, target: build.BuildTarget) -> str:
-        """The class-cache directory a target's dependencies' public modules are
-        found in -- also this target's own BMI directory, unless it is a
-        module-providing executable (see _module_private_bmi_dir_for).
+    def _module_bmi_dir(self, provider: build.BuildTarget,
+                        class_key: T.Tuple[str, ...]) -> str:
+        """The directory `provider`'s public BMIs live in for the BMI class
+        `class_key`: its own BMI class, or a BMI-only variant's. The collate
+        that names a public BMI and the harvest edge that publishes one both
+        take the path from here."""
+        cpp = provider.compilers['cpp']
+        subdir = None
+        if cpp.supports_bmi_classes():
+            info = self._bmi_classes.get((provider.for_machine, class_key))
+            subdir = info.subdir if info else None
+        return cpp.get_module_cache_dir(subdir)
+
+    def _module_providers(self, target: build.BuildTarget,
+                          class_key: T.Tuple[str, ...]) -> T.List[ModuleProvider]:
+        """The module-providing targets `target` links (transitively, through
+        get_all_linked_targets), as seen from the BMI class `class_key`: each
+        provider's own provided-modules map and BMI directory where the BMI
+        classes agree, else (created on first use) a BMI-only variant's.
+        Sorted by provmap path, the order the collate's --dep-provmap list
+        takes.
+
+        Memoized per (target id, BMI class key): the link walk is repeated
+        for every consumer of a provider, and the variant it may create must
+        be created once.
         """
-        cpp = target.compilers['cpp']
-        return cpp.get_module_cache_dir(self._bmi_class_subdir_for(target))
+        memo_key = (target.get_id(), class_key)
+        existing = self._module_providers_memo.get(memo_key)
+        if existing is not None:
+            return existing
+        providers: T.Dict[str, ModuleProvider] = {}
+        for t in self.get_all_linked_targets(target):
+            if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
+                    and t.provides_cpp_modules():
+                provmap = self._provmap_for_class(t, class_key)
+                providers[provmap] = ModuleProvider(t, provmap, self._module_bmi_dir(t, class_key))
+        result = [providers[p] for p in sorted(providers)]
+        self._module_providers_memo[memo_key] = result
+        return result
 
     def _module_private_bmi_dir_for(self, target: build.BuildTarget) -> T.Optional[str]:
         """A directory outside the shared cache for the modules of
@@ -5575,7 +5605,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             private_dir = self._module_private_bmi_dir_for(target)
             harvest_dir = private_dir if (private_dir is not None
                                           and self._is_private_module_source(target, src)) \
-                else self._module_shared_bmi_dir_for(target)
+                else self._module_bmi_dir(target, self._bmi_class_key_of(target))
             self.generate_cpp_module_harvest(target, compiler, rel_obj, harvest_dir)
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)

@@ -1749,14 +1749,11 @@ Thread model: posix'''), '21.9.0')
             self.assertIn('not marked a module interface', str(cm.exception))
 
     def test_depaccumulate_p1689_private_bmi_dir(self):
-        # --bmi-dir always names the shared class-cache directory, for both
-        # this target's own public provides and anything reached through a
-        # linked dependency. A module-providing executable's own module is
+        # --bmi-dir names where this target's own public provides live; a
+        # linked dependency's module resolves wherever that dependency's map
+        # says its BMI is. A module-providing executable's own module is
         # private (--all-provides-private): it resolves at --private-bmi-dir
-        # instead, but a linked dependency's public module still resolves at
-        # --bmi-dir. Without --all-provides-private/--private-bmi-dir every
-        # name resolves at --bmi-dir, the old single-directory behaviour
-        # (every pre-Stage-8 caller never passes them).
+        # instead, and a linked dependency's module is unaffected.
         from mesonbuild.scripts.depaccumulate import run_p1689
 
         def collate(extra: T.List[str]) -> int:
@@ -1778,24 +1775,25 @@ Thread model: posix'''), '21.9.0')
                                           'requires': [{'logical-name': 'tests'},
                                                        {'logical-name': 'libmod'}]}]}, f)
                 with open('dep-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({'libmod': 'shared/libmod.gcm'}, f)
+                    json.dump({'libmod': {'dep': 'dep/libmod.gcm', 'bmi': 'dep/libmod.gcm'}}, f)
 
-                # Without --all-provides-private/--private-bmi-dir: both
-                # names resolve at --bmi-dir, as before.
+                # Without --all-provides-private/--private-bmi-dir: the
+                # own-provided name resolves at --bmi-dir; the dependency's at
+                # the BMI its own map names, never under this --bmi-dir.
                 self.assertEqual(collate([]), 0)
                 with open('main1.cpp.o.mapper.json', encoding='utf-8') as f:
                     self.assertEqual(json.load(f)['modules'],
                                      {'tests': 'shared/tests.gcm',
-                                      'libmod': 'shared/libmod.gcm'})
+                                      'libmod': 'dep/libmod.gcm'})
 
                 # With --all-provides-private and --private-bmi-dir: the
-                # own-provided name resolves at --private-bmi-dir, but the
-                # dependency-provided name still resolves at --bmi-dir.
+                # own-provided name resolves at --private-bmi-dir, and the
+                # dependency-provided name is unaffected.
                 self.assertEqual(collate(['--all-provides-private', '--private-bmi-dir', 'private']), 0)
                 with open('main1.cpp.o.mapper.json', encoding='utf-8') as f:
                     self.assertEqual(json.load(f)['modules'],
                                      {'tests': 'private/tests.gcm',
-                                      'libmod': 'shared/libmod.gcm'})
+                                      'libmod': 'dep/libmod.gcm'})
             finally:
                 os.chdir(olddir)
 
@@ -1880,7 +1878,8 @@ Thread model: posix'''), '21.9.0')
                 with open('plain.cpp.o.ddi', 'w', encoding='utf-8') as f:
                     json.dump({'rules': [{'primary-output': 'plain.cpp.o'}]}, f)
                 with open('dep-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({'B': 'gcm.cache/deadbeefcafe/B.gcm'}, f)
+                    json.dump({'B': {'dep': 'gcm.cache/deadbeefcafe/B.gcm',
+                                     'bmi': 'gcm.cache/deadbeefcafe/B.gcm'}}, f)
 
                 self.assertEqual(collate([]), 0)
                 for obj in ('a.cppm.o', 'main.cpp.o', 'plain.cpp.o'):
@@ -1902,8 +1901,8 @@ Thread model: posix'''), '21.9.0')
     def test_depaccumulate_p1689_mapper_stamp_mode(self):
         # A BMI-only variant collate (--stamp-suffix) must map a TU's export
         # to the edge's declared output (the primary-output the harvest then
-        # publishes), while requires still map to the readable class-cache
-        # BMI -- the provmap value there is an ordering stamp, not a BMI.
+        # publishes), while requires still map to the readable BMI the dep's
+        # map names -- its ordering handle there is a stamp, not a BMI.
         from mesonbuild.scripts.depaccumulate import run_p1689
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
@@ -1918,7 +1917,8 @@ Thread model: posix'''), '21.9.0')
                                       'source-path': '../src/a.cppm'}],
                         'requires': [{'logical-name': 'B'}]}]}, f)
                 with open('dep-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({'B': 'other.p/b.cppm.o.gcm.stamp'}, f)
+                    json.dump({'B': {'dep': 'other.p/b.cppm.o.gcm.stamp',
+                                     'bmi': 'gcm.cache/deadbeefcafe/B.gcm'}}, f)
                 self.assertEqual(run_p1689(
                     ['--dyndep', 'out.dd', '--provmap', 'pm.json',
                      '--bmi-dir', 'gcm.cache/deadbeefcafe', '--bmi-suffix', '.gcm',
@@ -1937,6 +1937,45 @@ Thread model: posix'''), '21.9.0')
                 # declared (the variant edge declares it statically).
                 self.assertIn('other.p/b.cppm.o.gcm.stamp', dd)
                 self.assertNotIn('deadbeefcafe/A.gcm', dd)
+            finally:
+                os.chdir(olddir)
+
+    def test_depaccumulate_p1689_provmap_names_bmi(self):
+        # A published provmap names each public provide's ordering handle and
+        # its BMI. A consumer's GCC table takes a dependency's BMI from there,
+        # so a map in the old handle-only shape still orders a build that
+        # writes no tables, but a table needing its BMI is a clear error
+        # rather than a guess at the path.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                self._p1689_units_manifest({})
+                with open('a.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'a.o',
+                                          'provides': [{'logical-name': 'A'}]}]}, f)
+                self.assertEqual(run_p1689(['--dyndep', 'a.dd', '--provmap', 'a-pm.json',
+                                            '--bmi-dir', 'a-bmis', '--bmi-suffix', '.gcm',
+                                            'a.o.ddi']), 0)
+                with open('a-pm.json', encoding='utf-8') as f:
+                    self.assertEqual(json.load(f),
+                                     {'A': {'dep': 'a-bmis/A.gcm', 'bmi': 'a-bmis/A.gcm'}})
+
+                with open('main.o.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'main.o',
+                                          'requires': [{'logical-name': 'A'}]}]}, f)
+                with open('old-pm.json', 'w', encoding='utf-8') as f:
+                    json.dump({'A': 'a-bmis/A.gcm'}, f)
+                consume = ['--dyndep', 'main.dd', '--provmap', 'main-pm.json',
+                           '--bmi-dir', 'main-bmis', '--bmi-suffix', '.gcm',
+                           '--dep-provmap', 'old-pm.json', 'main.o.ddi']
+                self.assertEqual(run_p1689(consume), 0)
+                with open('main.dd', encoding='utf-8') as f:
+                    self.assertIn('a-bmis/A.gcm', f.read())
+                tables = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'units.json']
+                with self.assertRaisesRegex(MesonException, 'written by an older Meson'):
+                    run_p1689(consume[:-1] + tables + ['main.o.ddi'])
             finally:
                 os.chdir(olddir)
 
@@ -2000,7 +2039,7 @@ Thread model: posix'''), '21.9.0')
                         'requires': [{'logical-name': 'B'},
                                      {'logical-name': './src dir/sub/../util.h'}]}]}, f)
                 with open('dep-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({'B': 'gcm.cache/B.gcm'}, f)
+                    json.dump({'B': {'dep': 'gcm.cache/B.gcm', 'bmi': 'gcm.cache/B.gcm'}}, f)
                 args = ['--dyndep', 'out.dd', '--provmap', 'pm.json',
                         '--bmi-dir', 'gcm.cache', '--bmi-suffix', '.gcm',
                         '--dep-provmap', 'dep-pm.json',

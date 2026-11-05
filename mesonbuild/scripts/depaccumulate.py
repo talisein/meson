@@ -458,9 +458,11 @@ def run_p1689(argv: T.List[str]) -> int:
     its dependency targets, emitting a Ninja dyndep that orders each object
     against the BMIs it requires/provides, plus this target's own map. The BMI
     directory and suffix (--bmi-dir/--bmi-suffix) come from the compiler so the
-    logical-name -> BMI mapping matches the compiler's own; --bmi-dir always
-    names the shared class-cache directory, whether a name is this target's
-    own public provide or reached through a linked dependency.
+    logical-name -> BMI mapping matches the compiler's own; --bmi-dir names
+    where this rule set's own public provides live. A module reached through
+    a linked dependency is named where that dependency's --provmap says its
+    BMI is: each published entry carries its ordering handle ("dep") and its
+    BMI path ("bmi").
 
     A provide whose object is named by --private-interface-object (or, for a
     module-providing executable where every module is private by
@@ -771,10 +773,19 @@ def run_p1689(argv: T.List[str]) -> int:
             'even though each target only claims the name privately. Rename one of the '
             'two modules.')
 
+    # name -> the BMI a linked dependency publishes it at, for the GCC
+    # tables: the provider's collate is the only one that knows where its
+    # BMIs live, so a consumer never derives the path from its own
+    # --bmi-dir. None for a map written in the old, handle-only shape.
+    dep_bmis: T.Dict[str, T.Optional[str]] = {}
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
-            imported: T.Dict[str, str] = json.load(f)
-        for name, modfile in imported.items():
+            imported: T.Dict[str, T.Union[str, T.Dict[str, str]]] = json.load(f)
+        for name, entry in imported.items():
+            if isinstance(entry, str):
+                modfile, dep_bmi = entry, None
+            else:
+                modfile, dep_bmi = entry['dep'], entry['bmi']
             # Two targets providing the same module name into one link is
             # IFNDR in GCC (the name is the linkage discriminator). A private
             # module never reaches here: it never enters a dependency's
@@ -786,6 +797,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     f'must be globally unique within a linked executable.')
             resolvable[name] = modfile
             provider_of[name] = pmfile
+            dep_bmis[name] = dep_bmi
 
     # A module dependency cycle must be reported here rather than left to
     # ninja. Cycles can only occur among modules provided within this target --
@@ -890,17 +902,26 @@ def run_p1689(argv: T.List[str]) -> int:
                     raise MesonException(
                         f'{obj} requires module "{name}", which is provided by no '
                         f'target in this build.{hint}')
-                # The compiler must be pointed at the class-cache BMI itself;
-                # `modfile` is the ordering handle, which under --stamp-suffix
-                # is a harvest stamp rather than a readable BMI. A name this
-                # target provides itself privately is named at
-                # --private-bmi-dir; everything else -- this target's own
-                # public provides, and anything reached through a linked
-                # dependency -- is named at --bmi-dir, the one shared
-                # class-cache directory every target in this class resolves
-                # public modules through.
-                req_dir = args.private_bmi_dir if name in private_names else args.bmi_dir
-                table_modules[name] = module_to_filename(name, req_dir, args.bmi_suffix)
+                # The compiler must be pointed at the BMI itself; `modfile` is
+                # the ordering handle, which under --stamp-suffix is a harvest
+                # stamp rather than a readable BMI. A name this target
+                # provides itself is named in its own directory
+                # (--private-bmi-dir for a private one, --bmi-dir otherwise);
+                # one reached through a linked dependency is named where that
+                # dependency's map says its BMI is.
+                if name in private_names:
+                    table_modules[name] = module_to_filename(name, args.private_bmi_dir, args.bmi_suffix)
+                elif name in provided:
+                    table_modules[name] = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
+                else:
+                    dep_bmi = dep_bmis[name]
+                    if dep_bmi is not None:
+                        table_modules[name] = dep_bmi
+                    elif args.mapper_suffix is not None:
+                        raise MesonException(
+                            f'{provider_of[name]} names no BMI path for module "{name}": '
+                            'it was written by an older Meson. Rebuild the target that '
+                            'provides it and build again.')
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
@@ -915,7 +936,12 @@ def run_p1689(argv: T.List[str]) -> int:
                     indent=1, sort_keys=True) + '\n')
 
     with open(args.provmap, 'w', encoding='utf-8') as pm:
-        json.dump(provided, pm)
+        # Each public provide's ordering handle (its BMI, or under
+        # --stamp-suffix its harvest stamp) and the BMI path itself, which a
+        # consumer's GCC table names.
+        json.dump({name: {'dep': modfile,
+                          'bmi': module_to_filename(name, args.bmi_dir, args.bmi_suffix)}
+                   for name, modfile in provided.items()}, pm)
     if args.private_map is not None:
         with open(args.private_map[0], 'w', encoding='utf-8') as pm:
             json.dump({'names': sorted(private_names),
