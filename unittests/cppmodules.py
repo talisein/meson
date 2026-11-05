@@ -770,7 +770,7 @@ class CppModulesTestMixin:
             elif 'HEADER_UNIT' in rule and s.startswith('HUMAPPER ='):
                 counts['unit'] += 1
                 program_args(s, 'header-unit')
-            elif rule.startswith('cpp_COMPILER') and s.startswith('ARGS ='):
+            elif rule.startswith('cpp_MODULE_COMPILER') and s.startswith('ARGS ='):
                 counts['compile'] += 1
                 # The table sits next to the object, or at a space-free digest
                 # of its path where GCC cannot quote the mapper command line.
@@ -808,7 +808,7 @@ class CppModulesTestMixin:
                     head, _, tail = line.partition(': ')
                     out = head[len('build '):].split(' ')[0]
                     rule = tail.split(' ')[0]
-                elif rule.startswith('cpp_COMPILER') and line.strip().startswith('ARGS ='):
+                elif rule.startswith('cpp_MODULE_COMPILER') and line.strip().startswith('ARGS ='):
                     table = self._program_mapper_word(self._program_mapper_flag(line), '--table')
                     if table is not None:
                         tables[out] = table

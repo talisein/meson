@@ -1063,6 +1063,44 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                     self.assertNotIn('-fno-modules', line)
         self.assertTrue(saw_module_args, 'no module compile args found in build.ninja')
 
+    @requires_cpp_module_caps('modules', 'module_interfaces', compiler=('gcc', 'clang'))
+    def test_module_edges_skip_detected_ccache(self):
+        # A ccache Meson detects stays on ordinary compiles but is left off
+        # every module edge: it cannot hash imported BMIs, nor restore a BMI
+        # on a hit. Module compiles still reach compile_commands.json through
+        # their own rule. Configure-only: the rule split is fully visible in
+        # build.ninja.
+        if shutil.which('ccache') is None:
+            raise SkipTest('ccache not found')
+        exelist = self.host_cpp_compiler().get_exelist(ccache=False)
+        testdir = os.path.join(self.unit_test_dir, '162 cpp module interfaces')
+        self.init(testdir, override_envvars={'CXX': ' '.join(['ccache', *exelist])})
+        commands: T.Dict[str, str] = {}
+        edge_rules: T.Set[str] = set()
+        rule = None
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('rule '):
+                    rule = line.split()[1]
+                elif rule is not None and line.startswith(' command = '):
+                    commands[rule] = line
+                    rule = None
+                elif line.startswith('build ') and '.o: ' in line:
+                    edge_rules.add(line.split(': ', 1)[1].split()[0])
+        # The ccache was detected (the fixture has no ordinary C++ compile, so
+        # no cpp_COMPILER rule is emitted to show it).
+        exe = self.introspect('--compilers')['host']['cpp']['exelist'][0]
+        self.assertEqual(os.path.basename(exe), 'ccache')
+        module_rules = [r for r in commands if r.startswith(('cpp_MODULE_', 'cpp_BMI_', 'cpp_HEADER_'))]
+        self.assertIn('cpp_MODULE_COMPILER', module_rules)
+        self.assertIn('cpp_MODULE_SCAN', module_rules)
+        for r in module_rules:
+            self.assertNotIn('ccache', commands[r], r)
+        self.assertEqual(edge_rules, {'cpp_MODULE_COMPILER'})
+        with open(os.path.join(self.builddir, 'compile_commands.json'), encoding='utf-8') as f:
+            files = {os.path.basename(e['file']) for e in json.load(f)}
+        self.assertLessEqual({'mod.cc', 'impl.cc', 'main.cpp'}, files)
+
     @requires_cpp_module_caps('modules', compiler='clang')
     def test_clang_cpp_modules_pch(self):
         # PCH and modules in one target. The .pch is a real input of scan and
@@ -1234,7 +1272,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             if not (line.startswith('build ') and '_COMPILER ' in line):
                 continue
             if 'depscan-cpp.dd' in line:
-                self.assertIn('cpp_COMPILER', line, 'a C++ edge binds the cpp dyndep')
+                self.assertIn('cpp_MODULE_COMPILER', line, 'a C++ edge binds the cpp dyndep')
                 self.assertNotIn('depscan-fortran.dd', line)
             if 'depscan-fortran.dd' in line:
                 self.assertIn('fortran_COMPILER', line, 'a Fortran edge binds the fortran dyndep')

@@ -927,6 +927,10 @@ class NinjaBackend(backends.Backend):
                           for ext in ['', '_RSP']]
                 rules += [f"{rule}{ext}" for rule in [self.compiler_to_pch_rule_name(compiler)]
                           for ext in ['', '_RSP']]
+                if compiler.get_language() == 'cpp':
+                    # Module compiles run on their own cache-less rule.
+                    rule = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_COMPILER')
+                    rules += [rule, f'{rule}_RSP']
                 # Add custom MIL link rules to get the files compiled by the TASKING compiler family to MIL files included in the database
                 if compiler.get_id() == 'tasking':
                     rule = self.get_compiler_rule_name('tasking_mil_compile', compiler.for_machine)
@@ -4135,20 +4139,40 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.generate_cython_compile_rules(compiler)
             return
         crstr = self.get_rule_suffix(compiler.for_machine)
-        options = self._rsp_options(compiler)
         restat = False
         if langname == 'fortran':
             self.generate_fortran_dep_hack(crstr)
             # gfortran does not update the modification time of *.mod files, therefore restat is needed.
             # See also: https://github.com/ninja-build/ninja/pull/2275
             restat = True
-        rule = self.compiler_to_rule_name(compiler)
+        self._add_compile_rule(langname, compiler, self.compiler_to_rule_name(compiler),
+                               compiler.get_exelist(), restat)
+
+    def generate_cpp_module_compile_rule(self, compiler: Compiler) -> None:
+        # The ordinary compile rule without the compiler cache Meson detected,
+        # for every compile in the module pipeline. A compiler cache cannot
+        # cache a module compile correctly: it does not hash the BMIs the TU
+        # imports (they are no header and appear in no preprocessed output), so
+        # it serves an object built against a stale module; and it does not
+        # know a BMI is an output, so a hit restores the object without the
+        # BMI. ccache refuses GCC's and Clang's module flags (unless the user
+        # opts into its "modules" sloppiness) but knows none of cl's, and so
+        # caches cl module compiles outright. A cache reached by PATH
+        # masquerade is out of Meson's hands; Clang's module args defeat that
+        # one separately. Registered lazily with the first module compile.
+        rule = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_COMPILER')
+        if self.ninja.has_rule(rule):
+            return
+        self._add_compile_rule('cpp', compiler, rule, compiler.get_exelist(ccache=False), False)
+
+    def _add_compile_rule(self, langname: str, compiler: Compiler, rule: str,
+                          command: T.List[str], restat: bool) -> None:
+        options = self._rsp_options(compiler)
         if langname == 'cuda':
             # for cuda, we manually escape target name ($out) as $CUDA_ESCAPED_TARGET because nvcc doesn't support `-MQ` flag
             depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$CUDA_ESCAPED_TARGET', '$DEPFILE'), Quoting.none)
         else:
             depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
-        command = compiler.get_exelist()
         args = ['$ARGS'] + depargs + NinjaCommandArg.list(compiler.get_output_args('$out'), Quoting.none) + compiler.get_compile_only_args() + ['$in']
         description = f'Compiling {compiler.get_display_language()} object $out'
         if compiler.get_depfile_format() == 'msvc':
@@ -4247,7 +4271,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'BMI_VARIANT')
         if self.ninja.has_rule(rulename):
             return
-        command = compiler.get_exelist()
+        # No compiler cache: see generate_cpp_module_compile_rule.
+        command = compiler.get_exelist(ccache=False)
         description = 'Precompiling C++ module BMI $out'
         family = compiler.cpp_module_family()
         if family == 'msvc':
@@ -4294,13 +4319,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = NinjaCommandArg.list(['-format=p1689',
                                          '-resource-dir-recipe=invoke-compiler',
                                          '-o', '$out', '--'], Quoting.none) + \
-                compiler.get_exelist() + \
+                compiler.get_exelist(ccache=False) + \
                 NinjaCommandArg.list(['$ARGS', '-c', '$in', '-o', '$OBJ',
                                       '-MD', '-MF', '$DEPFILE'], Quoting.none)
             rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
             self.add_rule(rule)
             return
-        command = compiler.get_exelist()
+        # No compiler cache, as on the module compile edges it feeds (see
+        # generate_cpp_module_compile_rule); ccache does not cache scans
+        # anyway, so it would only add a process per scan.
+        command = compiler.get_exelist(ccache=False)
         # $ARGS carries exactly the target's compile flags (same dialect/BMI
         # flags as the compile edge); the scan scaffolding references the
         # per-source outputs. No -c: scanning must not compile.
@@ -4322,7 +4350,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'HEADER_UNIT')
         if self.ninja.has_rule(rulename):
             return
-        command = compiler.get_exelist()
+        # No compiler cache: see generate_cpp_module_compile_rule.
+        command = compiler.get_exelist(ccache=False)
         description = 'Building C++ header unit $SPELLING'
         family = compiler.cpp_module_family()
         if family == 'msvc':
@@ -5428,6 +5457,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # instead of object files for .c files
         if compiler.get_id() == 'tasking' and compiler.get_object_suffix(target, src.fname) == 'mil':
             compiler_name = self.get_compiler_rule_name('tasking_mil_compile', compiler.for_machine)
+        elif is_module_edge:
+            self.generate_cpp_module_compile_rule(compiler)
+            compiler_name = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_COMPILER')
         else:
             compiler_name = self.compiler_to_rule_name(compiler)
         extra_deps = self.get_target_depend_files(target).copy()
