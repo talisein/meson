@@ -554,6 +554,10 @@ def run_p1689(argv: T.List[str]) -> int:
                              'generic "provided by no target" one. Its mere presence marks '
                              'the collate as a variant\'s, so no separate flag is needed to '
                              'say so. Never repeated -- a variant has exactly one provider.')
+    parser.add_argument('--owns-bmi-dir', action='store_true',
+                        help='--bmi-dir (and --private-bmi-dir) belong to this rule set alone: '
+                             'claim no module name build-wide, and remove any BMI in them '
+                             'this rule set no longer provides.')
     parser.add_argument('--stamp-suffix', default=None,
                         help='BMIs reach the shared cache via harvest edges (Clang\'s '
                              'own pipeline, and BMI-only variants on any compiler): '
@@ -947,6 +951,16 @@ def run_p1689(argv: T.List[str]) -> int:
             json.dump({'names': sorted(private_names),
                        'by_construction': args.all_provides_private}, pm)
 
+    if args.owns_bmi_dir:
+        # Nothing else writes these directories, so a BMI in one that this
+        # rule set no longer provides is stale, and must go: a compiler that
+        # finds modules by searching directories would otherwise find it
+        # first for a consumer that also links the module's new provider.
+        _prune_bmi_dir(args.bmi_dir, args.bmi_suffix, provided)
+        if args.private_bmi_dir is not None:
+            _prune_bmi_dir(args.private_bmi_dir, args.bmi_suffix, private_names)
+        return 0
+
     # Claim the provided names only after publishing the map, so a concurrent
     # collate that loses the claim race always finds a live claimant. A
     # private name is never claimed: its BMI lives in this target's own
@@ -958,6 +972,22 @@ def run_p1689(argv: T.List[str]) -> int:
             name, module_to_filename(name, args.bmi_dir, args.bmi_suffix), args.provmap)
 
     return 0
+
+
+def _prune_bmi_dir(bmi_dir: str, bmi_suffix: str, names: T.Iterable[str]) -> None:
+    """Remove every BMI directly in `bmi_dir` that is not one of `names`'.
+    Only files carrying the BMI suffix are touched, and never a subdirectory.
+    """
+    keep = {os.path.basename(module_to_filename(n, bmi_dir, bmi_suffix)) for n in names}
+    try:
+        entries = os.listdir(bmi_dir)
+    except FileNotFoundError:
+        return
+    for e in entries:
+        if e.endswith(bmi_suffix) and e not in keep:
+            path = os.path.join(bmi_dir, e)
+            if os.path.isfile(path):
+                os.unlink(path)
 
 
 def run_harvest(argv: T.List[str]) -> int:

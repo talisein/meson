@@ -566,7 +566,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # A single-class build keeps the flat ifc.cache (bmis= above asserted
         # the flat BMI paths) and plain compile edges: module-resolution args
         # ride /ifcSearchDir, so nothing pushes a compile into a response file.
-        self.assertEqual(self.bmi_class_dirs(), [])
+        self.assertEqual(self.bmi_class_dirs('modlib'), [])
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:
                 if line.startswith('build '):
@@ -726,7 +726,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_bmi_classes(self):
         # The canonical two-class fixture: subproject provider at c++20,
         # consumers at c++latest (variant) and c++20 (reuse).
-        self.check_bmi_classes('166 bmi classes', module_name='modlib',
+        self.check_bmi_classes('166 bmi classes', module_name='modlib', provider='modlib',
                                provider_lib='libmodlib.a',
                                consumers=('prog23.exe', 'prog20.exe'),
                                expected_targets=('modlib', 'prog20', 'prog23'),
@@ -850,12 +850,13 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                         'no pkg-impl.cpp edge carries /internalPartition')
         # Both classes hold the full partition set (the divergent variant
         # recompiled every unit, including the internal partition).
-        cpp = self.host_cpp_compiler()
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        suffix = cpp.get_module_bmi_suffix()
-        for d in self.bmi_class_dirs():
+        suffix = self.host_cpp_compiler().get_module_bmi_suffix()
+        root = self.bmi_root('pkg')
+        class_dirs = self.bmi_class_dirs('pkg')
+        self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
+        for d in class_dirs:
             for name in ('pkg', 'pkg-part', 'pkg-impl'):
-                path = os.path.join(cache, d, name + suffix)
+                path = os.path.join(root, d, name + suffix)
                 self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
     @requires_cpp_module_caps('modules', compiler='msvc')
@@ -977,7 +978,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # /MT and links the provider's runtime-neutral object, while prog_md
         # shares the provider's own /MD BMI. Same two-class contract as a
         # cpp_std split, driven by a runtime flag on real cl.
-        self.check_bmi_classes('176 msvc runtime bmi classes', module_name='modlib',
+        self.check_bmi_classes('176 msvc runtime bmi classes', module_name='modlib', provider='modlib',
                                provider_lib='libmodlib.a',
                                consumers=('prog_md.exe', 'prog_mt.exe'),
                                expected_targets=('modlib', 'prog_md', 'prog_mt'))
@@ -1380,7 +1381,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('192 export dynamic private modules',
                                      extra_args=['-Dmode=divergent',
                                                  '-Ddivergent_std=c++latest'])
-        self.assertEqual(len(self.bmi_class_dirs()), 2)
+        self.assertEqual(len(self.bmi_class_dirs('app')), 2)
         self.assertEqual(len(self.bmi_variant_ids()), 1)
         self.assertEqual(self.provided_modules('app'), {'pub'})
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:

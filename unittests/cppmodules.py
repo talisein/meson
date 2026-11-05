@@ -300,6 +300,12 @@ def requires_cpp_module_caps(*tokens: str,
 # carries an id of its own -- intel-llvm, armltdclang, emscripten.
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
+# The compiler families whose public BMIs live in per-target directories
+# (meson-private/<id>@bmi-public/<BMI class digest>/) rather than the shared
+# cache. Transitional, while the families move over one at a time; helpers
+# assert exactly one layout per family, never either.
+_PER_TARGET_BMI_FAMILIES = frozenset({'gcc'})
+
 
 class CppModulesTestMixin:
 
@@ -319,12 +325,57 @@ class CppModulesTestMixin:
         assert cpp is not None, 'gate the test with require(s)_cpp_module_caps first'
         return cpp
 
-    def bmi_path(self, module_name: str) -> str:
-        """Where the BMI of the given module lands in the shared per-build
-        cache; partition ':' maps to '-' as in the documented scheme."""
-        cpp = self.host_cpp_compiler()
-        return os.path.join(self.builddir, cpp.get_module_cache_dir(),
-                            module_name.replace(':', '-') + cpp.get_module_bmi_suffix())
+    def per_target_bmi_dirs(self) -> bool:
+        """Whether the detected compiler publishes public BMIs into each
+        providing target's own directory rather than the shared cache."""
+        return self.host_cpp_compiler().cpp_module_family() in _PER_TARGET_BMI_FAMILIES
+
+    def _bmi_file(self, module_name: str) -> str:
+        # Partition ':' maps to '-' as in the documented scheme.
+        return module_name.replace(':', '-') + self.host_cpp_compiler().get_module_bmi_suffix()
+
+    def public_bmi_roots(self, provider: T.Optional[str] = None) -> T.List[str]:
+        """The `<id>@bmi-public` directories of `provider` (a target name;
+        every providing target when None), sorted. A target id is its name
+        and type suffix, behind a subdir digest unless it is at the top
+        level."""
+        assert self.per_target_bmi_dirs()
+        priv = glob.escape(os.path.join(self.builddir, 'meson-private'))
+        name = '*' if provider is None else glob.escape(provider)
+        return sorted({*glob.glob(os.path.join(priv, f'{name}@*@bmi-public')),
+                       *glob.glob(os.path.join(priv, f'*@@{name}@*@bmi-public'))})
+
+    def _provider_root(self, provider: str) -> str:
+        roots = self.public_bmi_roots(provider)
+        self.assertEqual(len(roots), 1, f'expected one public BMI directory of {provider}, got {roots}')
+        return roots[0]
+
+    def bmi_path(self, module_name: str, target: T.Optional[str] = None) -> str:
+        """Where the BMI of the given module lands: the shared cache, or, for
+        a compiler with per-target BMI directories, the one BMI-class subdir
+        of its provider's public directory holding it. `target` names the
+        provider, and must when more than one target provides the name."""
+        if not self.per_target_bmi_dirs():
+            return os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir(),
+                                self._bmi_file(module_name))
+        roots = [self._provider_root(target)] if target is not None else self.public_bmi_roots()
+        matches = [m for r in roots for m in glob.glob(os.path.join(glob.escape(r), '*', self._bmi_file(module_name)))]
+        self.assertEqual(len(matches), 1,
+                         f'expected one public BMI of {module_name}, got {matches}'
+                         + ('' if target is not None else ' (pass target= to pick a provider)'))
+        return matches[0]
+
+    def public_bmi_matches(self, module_name: str) -> T.List[str]:
+        """Every public BMI of the given module anywhere in the build, in
+        either the shared cache (flat or a BMI-class subdir) or any target's
+        public directory; [] means no target publishes it."""
+        bmi = self._bmi_file(module_name)
+        if not self.per_target_bmi_dirs():
+            cache = glob.escape(os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir()))
+            return sorted(glob.glob(os.path.join(cache, bmi)) + glob.glob(os.path.join(cache, '*', bmi)))
+        return sorted(m for r in self.public_bmi_roots()
+                      for m in glob.glob(os.path.join(glob.escape(r), bmi))
+                      + glob.glob(os.path.join(glob.escape(r), '*', bmi)))
 
     def build_and_check_modules(self, testdir_name: str, *,
                                 srcdir: T.Optional[str] = None,
@@ -636,12 +687,30 @@ class CppModulesTestMixin:
                         if os.path.basename(real) == basename)
         return bmis
 
-    def bmi_class_dirs(self) -> T.List[str]:
-        """The BMI class subdirectories of the shared module cache, sorted."""
-        cpp = self.host_cpp_compiler()
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        return sorted(e for e in os.listdir(cache)
-                      if os.path.isdir(os.path.join(cache, e)))
+    def bmi_root(self, provider: str) -> str:
+        """The directory whose BMI-class subdirectories hold `provider`'s
+        public BMIs: its own public directory, or the shared cache for a
+        compiler without per-target BMI directories."""
+        if self.per_target_bmi_dirs():
+            return self._provider_root(provider)
+        return os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir())
+
+    def bmi_class_dirs(self, provider: str) -> T.List[str]:
+        """The BMI-class subdirectories `provider`'s public BMIs live in
+        (shared by every provider on a compiler without per-target BMI
+        directories), sorted. A per-target directory always has one, even in
+        a single-BMI-class build."""
+        root = self.bmi_root(provider)
+        return sorted(e for e in os.listdir(root)
+                      if os.path.isdir(os.path.join(root, e)))
+
+    def assert_no_flat_bmi(self, provider: str, module_name: str) -> None:
+        """A public BMI must never sit directly in the directory its
+        BMI-class subdirectories live in: per-target directories are always
+        keyed by BMI class, and the shared cache is in a multi-BMI-class
+        build."""
+        flat = os.path.join(self.bmi_root(provider), self._bmi_file(module_name))
+        self.assertFalse(os.path.exists(flat), f'flat BMI {flat} must not exist')
 
     def assert_variants_emit_no_objects(self) -> None:
         """A BMI-only variant must never produce an object file: consumers
@@ -655,7 +724,7 @@ class CppModulesTestMixin:
             self.assertEqual(objs, [], f'BMI variant dir {root} must not contain objects')
 
     def check_bmi_classes(self, testdir_name: str, *, module_name: str,
-                          provider_lib: str, consumers: T.Sequence[str],
+                          provider: str, provider_lib: str, consumers: T.Sequence[str],
                           expected_targets: T.Sequence[str],
                           extra_args: T.Sequence[str] = ()) -> None:
         """The canonical two-class fixture: one module provider, one consumer
@@ -665,22 +734,21 @@ class CppModulesTestMixin:
         BMI-only variant), one BMI per class dir, no flat BMI, and exactly
         one variant build-wide -- the compatible consumer must reuse the
         provider's BMI, not spawn a redundant variant."""
-        cpp = self.host_cpp_compiler()
         self.build_and_check_modules(testdir_name, extra_args=extra_args)
-        bmi = module_name.replace(':', '-') + cpp.get_module_bmi_suffix()
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        class_dirs = self.bmi_class_dirs()
+        bmi = self._bmi_file(module_name)
+        root = self.bmi_root(provider)
+        class_dirs = self.bmi_class_dirs(provider)
         self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
         for d in class_dirs:
-            self.assertTrue(os.path.isfile(os.path.join(cache, d, bmi)),
+            self.assertTrue(os.path.isfile(os.path.join(root, d, bmi)),
                             f'missing {bmi} in class dir {d}')
-            # The collator's module-name claim is keyed by the BMI path, so
-            # per-class dirs make claims per-class: both classes of one
-            # module coexist without the duplicate-provider error.
-            self.assertTrue(os.path.isfile(os.path.join(cache, d, bmi + '.owner')),
-                            f'missing per-class owner claim in {d}')
-        self.assertFalse(os.path.exists(os.path.join(cache, bmi)),
-                         'flat BMI must not exist in a multi-class build')
+            if not self.per_target_bmi_dirs():
+                # The collator's module-name claim is keyed by the BMI path,
+                # so per-class dirs make claims per-class: both classes of one
+                # module coexist without the duplicate-provider error.
+                self.assertTrue(os.path.isfile(os.path.join(root, d, bmi + '.owner')),
+                                f'missing per-class owner claim in {d}')
+        self.assert_no_flat_bmi(provider, module_name)
         targets = sorted(t['name'] for t in self.introspect('--targets'))
         self.assertEqual(targets, sorted(expected_targets),
                          'variants must not appear as targets')
@@ -717,8 +785,8 @@ class CppModulesTestMixin:
                              f'{t} must link the std library exactly once')
         std_targets = [t for t in self.introspect('--targets') if t['name'] == '__meson_cxx_std']
         self.assertEqual(len(std_targets), 1, 'exactly one std module target must exist')
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        class_dirs = self.bmi_class_dirs()
+        cache = self.bmi_root('__meson_cxx_std')
+        class_dirs = self.bmi_class_dirs('__meson_cxx_std')
         self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
         for d in class_dirs:
             self.assertTrue(os.path.isfile(os.path.join(cache, d, 'std' + suffix)),
@@ -735,6 +803,77 @@ class CppModulesTestMixin:
         self.assertEqual(len(self.bmi_variant_ids()), 1,
                          'expected exactly one BMI variant of the std target')
         self.assert_variants_emit_no_objects()
+
+    def resolved_bmi(self, consumer: str, module_name: str) -> str:
+        """The BMI (build-dir relative, '/'-separated) that `consumer`'s
+        compiles resolve `module_name` to. Every compile of the target that
+        imports it must agree."""
+        cpp = self.host_cpp_compiler()
+        assert cpp.cpp_module_family() == 'gcc', 'resolved from the GCC mapper tables'
+        found: T.Set[str] = set()
+        for out, table in self.gcc_program_tables().items():
+            if not out.startswith(f'{consumer}.p/'):
+                continue
+            with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
+                bmi = json.load(f)['modules'].get(module_name)
+            if bmi is not None:
+                found.add(bmi.replace('\\', '/'))
+        self.assertEqual(len(found), 1, f'{consumer} must resolve {module_name} to one BMI, got {found}')
+        return found.pop()
+
+    def assert_resolves_from(self, consumer: str, module_name: str, provider: str) -> None:
+        """`consumer` resolves `module_name` from `provider`'s own public BMIs."""
+        root = os.path.relpath(self.bmi_root(provider), self.builddir).replace('\\', '/')
+        bmi = self.resolved_bmi(consumer, module_name)
+        self.assertTrue(bmi.startswith(root + '/'), f'{consumer} resolves {module_name} to {bmi}, not under {root}')
+
+    def check_duplicate_module_names(self) -> None:
+        """Two unrelated targets in one BMI class each provide the module
+        "duplicate": both build, each consumer runs against the provider it
+        links, and each provider publishes its own BMI."""
+        self.build_and_check_modules('219 duplicate module names')
+        for provider, consumer in (('dup1', 'use1'), ('dup2', 'use2')):
+            self.assertTrue(os.path.isfile(self.bmi_path('duplicate', target=provider)))
+            self.assert_resolves_from(consumer, 'duplicate', provider)
+        self.assertEqual(len(self.public_bmi_matches('duplicate')), 2)
+
+    def check_duplicate_module_names_one_link(self) -> None:
+        """A single link reaching both providers of one name is still the
+        collate's within-link error."""
+        self.init(os.path.join(self.unit_test_dir, '219 duplicate module names'),
+                  extra_args=['-Dmode=linkboth'])
+        with self.assertRaises(subprocess.CalledProcessError) as cm:
+            self.build()
+        self.assertIn('provided by more than one target reaching this link', cm.exception.stdout)
+
+    def check_both_libraries_module_compiled_twice(self) -> None:
+        """both_libraries() whose halves cannot share objects compiles its
+        interface twice in one BMI class: two providers of one name, each
+        consumer linking one."""
+        self.build_and_check_modules('219 duplicate module names',
+                                     extra_args=['-Dmode=bothlibs', '-Db_staticpic=false'])
+        self.assertEqual(len(self.public_bmi_roots('dup')), 2)
+        self.assertEqual(len(self.public_bmi_matches('duplicate')), 2)
+
+    def check_import_std_reuse(self) -> None:
+        """Every consumer of dependency('std') in one BMI class resolves the
+        std target's one BMI; a divergent consumer gets the single variant."""
+        self.build_and_check_modules('220 import std reuse')
+        std = '__meson_cxx_std'
+        root = self.bmi_root(std)
+        class_dirs = self.bmi_class_dirs(std)
+        self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
+        for d in class_dirs:
+            self.assertTrue(os.path.isfile(os.path.join(root, d, self._bmi_file('std'))))
+        self.assertEqual(len(self.bmi_variant_ids()), 1, 'expected exactly one BMI variant of std')
+        progs = ('proga', 'progb', 'progc', 'progdiv')
+        for p in progs:
+            self.assertEqual(self.count_on_link_line(p, 'lib__meson_cxx_std.a'), 1,
+                             f'{p} must link the std library exactly once')
+            self.assert_resolves_from(p, 'std', std)
+        same = {self.resolved_bmi(p, 'std') for p in progs[:3]}
+        self.assertEqual(len(same), 1, f'same-class consumers must share one std BMI, got {same}')
+        self.assertNotIn(self.resolved_bmi('progdiv', 'std'), same)
 
     def check_gcc_module_mappers(self) -> None:
         """GCC builds resolve modules through Meson's mapper program, whatever

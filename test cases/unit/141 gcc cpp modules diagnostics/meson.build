@@ -18,11 +18,6 @@ elif mode == 'crosslink'
   # The executable and a library it links both provide the same module.
   lib = static_library('provlib', 'libprov.cppm')
   executable('p', 'main.cpp', 'exeprov.cppm', link_with: lib)
-elif mode == 'duptargets'
-  # Two unrelated targets each export the same module: their BMIs would
-  # collide in the shared module cache.
-  static_library('liba', 'dupa.cppm')
-  static_library('libb', 'dupb.cppm')
 elif mode == 'undeclared'
   # A source exports a module but is neither a module extension nor listed in
   # cpp_module_interfaces. Under Clang the collator must reject it; GCC infers

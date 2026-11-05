@@ -413,12 +413,14 @@ Thread model: posix'''), '21.9.0')
         deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
                 '--dep-provmap', 'dep/pm.json']
         table = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'm/u.json']
+        # GCC owns its per-target BMI directories, target and variant alike.
+        owns = ['--owns-bmi-dir']
         # GCC target: no harvest stamp, the table flags, no interface list.
         self.assertEqual(
             depargs('gcc', ['--private-map', 'p.json', 'd'],
                     harvests=False, interface_sources=[], header_units=[],
                     units_manifest='m/u.json'),
-            ['--private-map', 'p.json', 'd'] + deps + table)
+            ['--private-map', 'p.json', 'd'] + deps + owns + table)
         # GCC variant: always harvests, so the table block *and* the recompiled
         # interfaces, the interface list coming after the table block.
         self.assertEqual(
@@ -426,7 +428,7 @@ Thread model: posix'''), '21.9.0')
                     harvests=True, interface_sources=['x.cc'], header_units=[],
                     units_manifest='m/u.json'),
             ['--own-private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp'] + table + ['--interface-source', 'x.cc'])
+            + ['--stamp-suffix', '.gcm.stamp'] + owns + table + ['--interface-source', 'x.cc'])
         # A GCC that cannot quote its mapper command line keeps its tables at
         # digest-named paths.
         cpp.program_mapper_quotes.return_value = False
@@ -434,7 +436,7 @@ Thread model: posix'''), '21.9.0')
             depargs('gcc', ['--private-map', 'p.json', 'd'],
                     harvests=False, interface_sources=[], header_units=[],
                     units_manifest='m/u.json'),
-            ['--private-map', 'p.json', 'd'] + deps + table
+            ['--private-map', 'p.json', 'd'] + deps + owns + table
             + ['--hashed-table-dir', 'meson-private/gcc-module-tables'])
         # Clang: stamp plus the interface list, no mapper block.
         self.assertEqual(
@@ -1976,6 +1978,44 @@ Thread model: posix'''), '21.9.0')
                 tables = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'units.json']
                 with self.assertRaisesRegex(MesonException, 'written by an older Meson'):
                     run_p1689(consume[:-1] + tables + ['main.o.ddi'])
+            finally:
+                os.chdir(olddir)
+
+    def test_depaccumulate_p1689_owns_bmi_dir(self):
+        # With --owns-bmi-dir the collate claims no module name build-wide and
+        # prunes, from its own --bmi-dir and --private-bmi-dir, every BMI it
+        # no longer provides there -- leaving what it provides, files that are
+        # not BMIs, and subdirectories (other BMI classes) alone. Without the
+        # flag, a shared cache: nothing is pruned and the name is claimed.
+        from mesonbuild.scripts.depaccumulate import run_p1689
+        olddir = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                def touch(path: str) -> None:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, 'w', encoding='utf-8'):
+                        pass
+
+                for p in ('pub/A.gcm', 'pub/Old.gcm', 'pub/notes.txt', 'pub/other/X.gcm',
+                          'priv/P.gcm', 'priv/Gone.gcm'):
+                    touch(p)
+                with open('lib.ddi', 'w', encoding='utf-8') as f:
+                    json.dump({'rules': [{'primary-output': 'a.o', 'provides': [{'logical-name': 'A'}]},
+                                         {'primary-output': 'p.o', 'provides': [{'logical-name': 'P'}]}]}, f)
+                args = ['--dyndep', 'out.dd', '--provmap', 'pm.json',
+                        '--bmi-dir', 'pub', '--bmi-suffix', '.gcm',
+                        '--private-bmi-dir', 'priv', '--private-interface-object', 'p.o',
+                        '--private-map', 'priv.json', 'lib']
+                self.assertEqual(run_p1689(args + ['lib.ddi']), 0)
+                self.assertTrue(os.path.isfile('pub/Old.gcm'), 'a shared cache must never be pruned')
+                self.assertTrue(os.path.isfile('pub/A.gcm.owner'))
+                os.unlink('pub/A.gcm.owner')
+
+                self.assertEqual(run_p1689(args + ['--owns-bmi-dir', 'lib.ddi']), 0)
+                self.assertEqual(sorted(os.listdir('pub')), ['A.gcm', 'notes.txt', 'other'])
+                self.assertEqual(os.listdir('pub/other'), ['X.gcm'])
+                self.assertEqual(os.listdir('priv'), ['P.gcm'])
             finally:
                 os.chdir(olddir)
 

@@ -975,11 +975,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('163 cpp modules regex scanner',
                                      extra_args=[f'-Dmodules_flag={flag}'],
                                      noop_check=False)
-        # The P1689 collate is not engaged; GCC itself wrote the BMI into the
-        # shared cache in the build dir.
+        # The P1689 collate is not engaged; GCC itself wrote the BMI into its
+        # own default cache in the build dir, outside Meson's BMI directories.
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             self.assertNotIn('provided-modules.json', f.read())
-        self.assertTrue(os.path.isfile(self.bmi_path('flatmod')), 'missing BMI flatmod')
+        self.assertTrue(os.path.isfile(os.path.join(self.builddir, 'gcm.cache', 'flatmod.gcm')),
+                        'missing BMI flatmod')
+        self.assertEqual(self.public_bmi_matches('flatmod'), [])
 
     @requires_cpp_module_caps('regex_scanner', compiler='gcc')
     def test_gcc_cpp_modules_regex_scanner_diagnostics(self):
@@ -1142,30 +1144,25 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_gcc_modules_cross_machine(self):
         # Two machines, one build: a module library and its consumer, plus a
         # header unit, on each of the build and host machines -- with the SAME
-        # module name 'foo' on both, the case a single shared cache used to
-        # forbid. The per-machine class subdir keeps the two compilers' BMIs
-        # apart, so the build works and the host programs run under test()
+        # module name 'foo' on both. Each machine's provider is its own
+        # target, so its BMIs land in its own directory, in its own machine's
+        # BMI class; the build works and the host programs run under test()
         # (identity cross).
-        cpp = self.host_cpp_compiler()
-        suffix = cpp.get_module_bmi_suffix()
         crossfile = self._identity_cross_gcc()
         self.meson_cross_files = [crossfile.name]
-        # No claim error despite the shared module name: build_and_check_modules
-        # builds, runs every test, and checks the rebuild is a no-op.
+        # build_and_check_modules builds, runs every test, and checks the
+        # rebuild is a no-op.
         self.build_and_check_modules('148 gcc modules cross machine')
-        # The module lands in two distinct class subdirs (one per machine), each
-        # with its own owner claim, and never flat at the cache root.
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        class_dirs = self.bmi_class_dirs()
-        module_dirs = [d for d in class_dirs
-                       if os.path.isfile(os.path.join(cache, d, 'foo' + suffix))]
-        self.assertEqual(len(module_dirs), 2,
-                         f'module foo must land in two per-machine class dirs, got {module_dirs}')
-        for d in module_dirs:
-            self.assertTrue(os.path.isfile(os.path.join(cache, d, 'foo' + suffix + '.owner')),
-                            f'missing per-machine owner claim in {d}')
-        self.assertFalse(os.path.exists(os.path.join(cache, 'foo' + suffix)),
-                         'the same module name on two machines must not share a flat BMI')
+        # Each machine's provider publishes foo once, into its own machine's
+        # BMI-class subdir of its own directory.
+        for provider in ('hostmod', 'buildmod'):
+            self.assertEqual(len(self.bmi_class_dirs(provider)), 1,
+                             f'{provider} must publish into exactly one BMI class')
+            self.assertTrue(os.path.isfile(self.bmi_path('foo', target=provider)))
+            self.assert_no_flat_bmi(provider, 'foo')
+        self.assertNotEqual(self.bmi_class_dirs('hostmod'), self.bmi_class_dirs('buildmod'),
+                            'the two machines must not share a BMI class')
+        self.assertEqual(len(self.public_bmi_matches('foo')), 2)
         # The header unit earns a per-machine BMI too: two distinct unit BMIs,
         # one per machine's BMI class.
         unit_bmis = self.header_unit_bmis('head.hpp')
@@ -1306,11 +1303,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_bmi_divergence_ignores_bmi_irrelevant_flags(self):
         # Provider and consumer differ only in optimization, which is on the
-        # BMI-irrelevant allowlist: the two stay in one BMI class (the flat
-        # cache, no BMI-only variant), and the mixed build runs fine.
+        # BMI-irrelevant allowlist: the two stay in one BMI class (one BMI
+        # directory, no BMI-only variant), and the mixed build runs fine. A
+        # per-target directory is always keyed by BMI class; the shared cache
+        # is flat in a single-BMI-class build.
         self.build_and_check_modules('165 module bmi flag divergence',
                                      extra_args=['-Dwithfoo=false'])
-        self.assertEqual(self.bmi_class_dirs(), [])
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1 if self.per_target_bmi_dirs() else 0)
         self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
@@ -1423,12 +1422,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual([(p['logical-name'], p['is-interface']) for p in provides],
                          [('pkg:impl', False)])
         # Both classes hold the full partition set.
-        cpp = self.host_cpp_compiler()
-        cache = os.path.join(self.builddir, cpp.get_module_cache_dir())
-        suffix = cpp.get_module_bmi_suffix()
-        for d in self.bmi_class_dirs():
+        suffix = self.host_cpp_compiler().get_module_bmi_suffix()
+        root = self.bmi_root('pkg')
+        class_dirs = self.bmi_class_dirs('pkg')
+        self.assertEqual(len(class_dirs), 2, f'expected two BMI class dirs, got {class_dirs}')
+        for d in class_dirs:
             for name in ('pkg', 'pkg-part', 'pkg-impl'):
-                path = os.path.join(cache, d, name + suffix)
+                path = os.path.join(root, d, name + suffix)
                 self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1520,7 +1520,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # program's constexpr probe must see its own compile's view, not the
         # provider's.
         self.build_and_check_modules('183 module eh rtti divergence')
-        self.assertEqual(len(self.bmi_class_dirs()), 3)
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 3)
         self.assertEqual(len(self.bmi_variant_ids()), 2)
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
@@ -1609,11 +1609,11 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('187 cpp private module interfaces',
                                      bmis=['api', 'pub'])
         self.assertEqual(len(self.private_bmi_dirs()), 1)
-        # Neither private module ever reaches the shared cache: only the
-        # public ones (api, pub) may live there.
+        # Neither private module is ever published: only the public ones
+        # (api, pub) may have a public BMI.
         for name in ('detail', 'hidden', 'hidden-impl'):
-            self.assertFalse(os.path.isfile(self.bmi_path(name)),
-                             f'{name} must not be in the shared BMI cache')
+            self.assertEqual(self.public_bmi_matches(name), [],
+                             f'{name} must not have a public BMI')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_unlisted_partition(self):
@@ -1804,10 +1804,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      extra_args=['-Dmode=impl-unit-import'],
                                      build_not_contains=['reaches it from its interface'])
         # Private means private: the partition's BMI stays in the target's own
-        # private dir and never reaches the shared cache.
+        # private dir and is never published.
         self.assertEqual(len(self.private_bmi_dirs()), 1)
-        self.assertFalse(os.path.isfile(self.bmi_path('pkg:impl')),
-                         'a private partition must not be in the shared BMI cache')
+        self.assertEqual(self.public_bmi_matches('pkg:impl'), [],
+                         'a private partition must not have a public BMI')
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
     def test_cpp_private_module_reachability_clang_build_failure(self):
@@ -1834,9 +1834,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # more than one target in this build" check.
         self.build_and_check_modules('189 two libraries private module name collision')
         self.assertEqual(len(self.private_bmi_dirs()), 2)
-        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
-        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                         'a private module must never take a global name claim')
+        self.assertEqual(self.public_bmi_matches('detail'), [])
+        if not self.per_target_bmi_dirs():
+            self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
+                             'a private module must never take a global name claim')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_name_collision_in_one_link(self):
@@ -1865,9 +1866,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # whole-build-tree coexistence as two differently named providers.
         self.build_and_check_modules('193 same name targets private module collision')
         self.assertEqual(len(self.private_bmi_dirs()), 2)
-        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
-        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                         'a private module must never take a global name claim')
+        self.assertEqual(self.public_bmi_matches('detail'), [])
+        if not self.per_target_bmi_dirs():
+            self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
+                             'a private module must never take a global name claim')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_same_name_targets_in_one_link(self):
@@ -1979,8 +1981,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('192 export dynamic private modules', bmis=['pub'])
         self.assertEqual(self.provided_modules('app'), {'pub'})
         self.assertEqual(len(self.private_bmi_dirs()), 1)
-        self.assertFalse(os.path.isfile(self.bmi_path('priv')),
-                         'a private module must not reach the shared BMI cache')
+        self.assertEqual(self.public_bmi_matches('priv'), [],
+                         'a private module must not have a public BMI')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_export_dynamic_executable_private_module_import(self):
@@ -2006,7 +2008,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # one never crosses a class boundary (its BMI dir is unkeyed by class).
         self.build_and_check_modules('192 export dynamic private modules',
                                      extra_args=['-Dmode=divergent'])
-        self.assertEqual(len(self.bmi_class_dirs()), 2)
+        self.assertEqual(len(self.bmi_class_dirs('app')), 2)
         self.assertEqual(len(self.bmi_variant_ids()), 1)
         self.assertEqual(self.provided_modules('app'), {'pub'})
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
@@ -2022,7 +2024,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_clang_bmi_classes(self):
         # The canonical two-class fixture: subproject provider at c++20,
         # consumers at c++23 (variant) and c++20 (reuse).
-        self.check_bmi_classes('166 bmi classes', module_name='modlib',
+        self.check_bmi_classes('166 bmi classes', module_name='modlib', provider='modlib',
                                provider_lib='libmodlib.a',
                                consumers=('prog23', 'prog20'),
                                expected_targets=('modlib', 'prog20', 'prog23'))
@@ -2032,7 +2034,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # The shared two-class fixture under GCC, where the class cache
         # rides Meson's module mapper; also assert the mapper shape --
         # compile edges name their own object's table, scans none.
-        self.check_bmi_classes('166 bmi classes', module_name='modlib',
+        self.check_bmi_classes('166 bmi classes', module_name='modlib', provider='modlib',
                                provider_lib='libmodlib.a',
                                consumers=('prog23', 'prog20'),
                                expected_targets=('modlib', 'prog20', 'prog23'))
@@ -2370,7 +2372,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('171 stl header units',
                                      setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
-        self.assertEqual(len(self.bmi_class_dirs()), 2)
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 2)
         self.assert_gcc_table_units('prog', 'vector')
         (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
         self.assertTrue(os.path.isabs(real) and os.path.isfile(real), real)
@@ -2597,6 +2599,22 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                                      'Linking target prog'))
 
     @requires_cpp_module_caps('modules', compiler='gcc')
+    def test_duplicate_module_names(self):
+        self.check_duplicate_module_names()
+
+    @requires_cpp_module_caps('modules', compiler='gcc')
+    def test_duplicate_module_names_one_link(self):
+        self.check_duplicate_module_names_one_link()
+
+    @requires_cpp_module_caps('modules', compiler='gcc')
+    def test_both_libraries_module_compiled_twice(self):
+        self.check_both_libraries_module_compiled_twice()
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='gcc')
+    def test_import_std_reuse(self):
+        self.check_import_std_reuse()
+
+    @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_cpp_modules_diagnostics(self):
         testdir = os.path.join(self.unit_test_dir, '141 gcc cpp modules diagnostics')
         # Each mode configures cleanly but must fail the build in the collator
@@ -2606,7 +2624,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             'cycle': 'C++ module dependency cycle',
             'duplicate': 'provided by two sources in this target',
             'crosslink': 'provided by more than one target reaching this link',
-            'duptargets': 'exported by more than one target in this build',
             # In a two-class build the collate still rejects an unresolvable
             # import itself, before the compiler could report its own lookup
             # failure against a mapper that omits the module.
