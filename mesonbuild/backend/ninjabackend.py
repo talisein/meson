@@ -1788,8 +1788,6 @@ class NinjaBackend(backends.Backend):
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      self._module_shared_bmi_dir_for(target)),
                         exist_ok=True)
-        if family == 'clang':
-            self.warn_on_clang_modules_ccache(cpp)
 
         ddis: T.List[str] = []
         for src, lang in self.select_sources_to_scan(compiled_sources):
@@ -2059,11 +2057,8 @@ class NinjaBackend(backends.Backend):
         # The variant rule names its own explicit-file BMI output, so it asks
         # the compiler for module args without the directory-addressed output
         # pair (emit_output=False); the class cache stays searchable for the
-        # variant's own imports. existing_args lets the compiler drop a
-        # ccache-defeat pair the caller already carries (Clang), the same fold
-        # as the compile edge in generate_single_compile.
-        args += cpp.get_module_compile_args(info.subdir, emit_output=False,
-                                            existing_args=args)
+        # variant's own imports.
+        args += cpp.get_module_compile_args(info.subdir, emit_output=False)
         args += hu_args
 
         self.generate_bmi_variant_compile_rule(cpp)
@@ -2155,27 +2150,6 @@ class NinjaBackend(backends.Backend):
             extra_deps=[own_private_map])
         self._uses_dyndeps = True
         return variant
-
-    def warn_on_clang_modules_ccache(self, cpp: Compiler) -> None:
-        # Module compiles carry -fmodules -fno-modules so ccache falls back to
-        # the real compiler instead of serving stale objects (see
-        # ClangCPPCompiler.get_module_compile_args). Tell users why module TUs
-        # stop getting cache hits. Checks both a launcher in the command line
-        # and PATH masquerade (e.g. Fedora's /usr/lib64/ccache).
-        import shutil
-        exelist = cpp.get_exelist()
-        wrapped = exelist != cpp.get_exelist(ccache=False)
-        if not wrapped:
-            exe = shutil.which(exelist[0])
-            wrapped = exe is not None and \
-                os.path.basename(os.path.realpath(exe)).lower() in {'ccache', 'ccache.exe'}
-        if wrapped:
-            mlog.warning(
-                'ccache is wrapping the Clang compiler while C++ modules are in use. '
-                'ccache cannot cache module compiles correctly (it does not track the '
-                'contents of imported BMIs), so Meson makes it fall back to the real '
-                'compiler for them; module-enabled sources will not benefit from ccache.',
-                once=True, fatal=False)
 
     @staticmethod
     def _iter_include_args(inventory: T.Sequence[T.Tuple[str, T.Optional[int]]],
@@ -4155,11 +4129,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # imports (they are no header and appear in no preprocessed output), so
         # it serves an object built against a stale module; and it does not
         # know a BMI is an output, so a hit restores the object without the
-        # BMI. ccache refuses GCC's and Clang's module flags (unless the user
-        # opts into its "modules" sloppiness) but knows none of cl's, and so
-        # caches cl module compiles outright. A cache reached by PATH
-        # masquerade is out of Meson's hands; Clang's module args defeat that
-        # one separately. Registered lazily with the first module compile.
+        # BMI. Meson put the cache there, so Meson takes it off again. A cache
+        # reached some other way (a distro's PATH masquerade, say) is the
+        # user's to turn off, with CCACHE_DISABLE=1 or the compiler's real
+        # path; Feature-autodetection.md says so. Registered lazily with the
+        # first module compile.
         rule = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_COMPILER')
         if self.ninja.has_rule(rule):
             return
@@ -5349,15 +5323,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
             private_output = private_dir is not None and self._is_private_module_source(target, src)
-            # existing_args=commands lets the compiler drop its ccache-defeat
-            # pair when the user already turned on implicit Clang modules
-            # themselves (via cpp_args, add_project_arguments, ...; all those
-            # channels are in `commands` by now): the pair's trailing
-            # -fno-modules would silently cancel their flag, and their own
-            # -fmodules already makes ccache stand aside.
             modargs = compiler.get_module_compile_args(
-                self._bmi_class_subdir_for(target), private_dir, private_output,
-                existing_args=commands)
+                self._bmi_class_subdir_for(target), private_dir, private_output)
             module_family = compiler.cpp_module_family()
             commands += modargs
             # cl and clang need each module-interface unit flagged explicitly

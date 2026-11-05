@@ -83,8 +83,9 @@ machines, exactly as for GCC: each machine keeps its own `pcm.cache` entries,
 so a build-machine module target and a host-machine one never contend for a
 BMI, even under the same module name.
 
-ccache does not track BMI contents and would serve stale objects for module
-consumers, so Meson makes it fall back to the real compiler for module
-compiles (as it already does for GCC's `-fmodules`); module-enabled sources
-do not benefit from ccache. A warning at setup points this out when ccache
-wraps the compiler, whether as a launcher or through distro PATH masquerade.
+A compiler cache does not track BMI contents and would serve stale objects
+for module consumers, so Meson leaves a cache it detected off every module
+compile. A cache reached through a distribution's `PATH` masquerade (Fedora's
+`/usr/lib64/ccache`) is outside Meson's view: build module projects there with
+`CCACHE_DISABLE=1`, or configure with the compiler's real path. See
+[Feature autodetection](Feature-autodetection.md#c-modules).

@@ -1012,16 +1012,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'oddname', 'dot.mod.sub'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
-        # Module ARGS must carry the ccache-defeating -fmodules -fno-modules
-        # pair (inert to clang; makes ccache fall back instead of serving
-        # stale objects).
-        saw_ccache_pair = False
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.strip().startswith('ARGS =') and '-fprebuilt-module-path' in line:
-                    self.assertIn('-fmodules -fno-modules', line)
-                    saw_ccache_pair = True
-        self.assertTrue(saw_ccache_pair, 'no module compile carried the ccache-defeating pair')
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
     def test_clang_generated_module_sources(self):
@@ -1044,24 +1034,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('162 cpp module interfaces',
                                      bmis=['mymod', 'filemod'],
                                      ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
-
-    @requires_cpp_module_caps('modules', compiler='clang')
-    def test_clang_cpp_modules_user_fmodules(self):
-        # A user who enables implicit Clang modules (-fmodules, via any arg
-        # channel) must not have it silently cancelled by the trailing
-        # -fno-modules of the ccache-defeating pair; the pair is dropped and
-        # the user's -fmodules keeps ccache away on its own. Configure-only:
-        # the interaction is fully visible in build.ninja.
-        testdir = os.path.join(self.unit_test_dir, '156 clang cpp modules')
-        self.init(testdir, extra_args=['-Dcpp_args=-fmodules'])
-        saw_module_args = False
-        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-            for line in f:
-                if line.strip().startswith('ARGS =') and '-fprebuilt-module-path' in line:
-                    saw_module_args = True
-                    self.assertIn('-fmodules', line)
-                    self.assertNotIn('-fno-modules', line)
-        self.assertTrue(saw_module_args, 'no module compile args found in build.ninja')
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler=('gcc', 'clang'))
     def test_module_edges_skip_detected_ccache(self):

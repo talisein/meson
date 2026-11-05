@@ -480,8 +480,7 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
                                 private_output: bool = False,
-                                *, emit_output: bool = True,
-                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
+                                *, emit_output: bool = True) -> T.List[str]:
         # Imports resolve by name lookup in the shared cache (the target's
         # class subdir of it, when BMI classes are in play). Producers write
         # their BMI next to the object (-fmodule-output, added per interface
@@ -498,26 +497,9 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # to steer -- the harvest edge decides per-source, private or shared,
         # where a Clang interface's BMI is published (see the backend's Clang
         # harvest call site).
-        #
-        # -fmodules -fno-modules exists to defeat ccache. ccache does not
-        # track the contents of BMIs (they never appear in preprocessed
-        # output), so it serves stale objects when an imported module or
-        # header unit changes -- including via distro PATH masquerade such as
-        # Fedora's /usr/lib64/ccache. It refuses to cache anything compiled
-        # with -fmodules, which on GCC protects module builds as a side
-        # effect; this pair buys Clang the same refusal. The pair is a no-op
-        # to Clang itself: the driver cancels it before cc1. Do not pass
-        # -fmodules alone -- that enables the unrelated implicit
-        # Clang-header-modules feature. Omitted when the caller already passed
-        # -fmodules (existing_args): their flag must stay in effect, not be
-        # cancelled by the trailing -fno-modules, and it keeps ccache away on
-        # its own.
         paths = [private_dir] if private_dir is not None else []
         paths.append(self.get_module_cache_dir(class_subdir))
-        args = [f'-fprebuilt-module-path={p}' for p in paths]
-        if '-fmodules' not in existing_args:
-            args += ['-fmodules', '-fno-modules']
-        return args
+        return [f'-fprebuilt-module-path={p}' for p in paths]
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # A speculative list of Clang flags a BMI does not depend on, erring
@@ -860,8 +842,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
                                 private_output: bool = False,
-                                *, emit_output: bool = True,
-                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
+                                *, emit_output: bool = True) -> T.List[str]:
         # The modules flag enables named modules. -Mno-modules stops GCC from
         # writing its make-style module dependency rules (phony
         # '<name>.c++-module' targets and an order-only
@@ -875,8 +856,7 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # answering from a per-TU table the collator writes
         # (--private-bmi-dir/--private-interface-object at the collator, in
         # lockstep with this target's own privacy). A scan asks it only for
-        # named modules' names and for header units, by real path. GCC has no
-        # ccache-defeat pair to suppress either, so existing_args is unused.
+        # named modules' names and for header units, by real path.
         return [self._named_modules_flag(), '-Mno-modules']
 
     # What GCC 16's mapper-command splitter (libiberty's buildargv) treats as
@@ -1450,8 +1430,7 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
     def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
                                 private_dir: T.Optional[str] = None,
                                 private_output: bool = False,
-                                *, emit_output: bool = True,
-                                existing_args: T.Iterable[str] = ()) -> T.List[str]:
+                                *, emit_output: bool = True) -> T.List[str]:
         # Read and write BMIs by directory, shared by every compile. /interface
         # is per interface-unit and is added at the compile site, not here. The
         # trailing slash marks /ifcOutput as a directory; a forward slash avoids
@@ -1471,7 +1450,6 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # emit_output=False omits the /ifcOutput pair entirely: a BMI-variant
         # compile supplies its own explicit-file /ifcOutput in the build rule
         # and only needs the /ifcSearchDir entries to resolve its imports.
-        # existing_args is unused: cl has no ccache-defeat flag pair to drop.
         cache = self.get_module_cache_dir(class_subdir)
         if private_dir is not None:
             out = private_dir if private_output else cache

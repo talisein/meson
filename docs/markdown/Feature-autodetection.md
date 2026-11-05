@@ -20,6 +20,24 @@ compiler with environment variables `CC` and/or `CXX` when first
 running Meson (remember that once specified the compiler cannot be
 changed). Meson will then use the specified compiler without Ccache.
 
+### C++ modules
+
+A compiler cache cannot cache a C++ module compile correctly. It does
+not hash the compiled module interfaces (BMIs) a translation unit
+imports, so after an imported module changes it can hand back an object
+built against the old one; and it does not know a BMI is an output, so a
+cache hit can leave the BMI missing. Meson therefore never runs a cache
+it added itself on a module compile, scan or BMI build; the target's
+other compiles still use it.
+
+Meson cannot see a cache that is not on its own command line, such as
+a distribution that puts Ccache in front of the compiler through `PATH`
+(Fedora's `/usr/lib64/ccache`, for example: there `c++` and `clang++`
+are Ccache). Turn Ccache off for module projects there, by building with
+`CCACHE_DISABLE=1` in the environment, or by configuring with the
+compiler's real path (`CXX=/usr/bin/clang++`). A bare `CXX=clang++`
+still finds the masquerading one.
+
 [sccache](https://github.com/mozilla/sccache) is auto-detected the
 same way, and is preferred over Ccache when both are installed.
 

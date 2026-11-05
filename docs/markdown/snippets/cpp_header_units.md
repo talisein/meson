@@ -67,9 +67,10 @@ Current limitations:
   Python at paths without spaces, or put Meson on `PATH`. Source and build
   paths with spaces are fine on every GCC.
 - **ccache** does not track BMI contents and would serve stale objects for
-  Clang module and header-unit consumers, so Meson makes it fall back to the
-  real compiler for module compiles (as it already does for GCC's
-  `-fmodules`); module-enabled sources do not benefit from ccache.
+  module and header-unit consumers, so Meson leaves a cache it detected off
+  header-unit builds as on every other module compile. One reached through a
+  distribution's `PATH` masquerade must be turned off with `CCACHE_DISABLE=1`
+  (see [Feature autodetection](Feature-autodetection.md#c-modules)).
 - A unit's BMI freezes the module-affecting flags it was built with, so targets
   that declare the same header unit with divergent module-affecting flags get a
   BMI of it each, one per flag equivalence class, on every supported compiler.
