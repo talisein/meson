@@ -4264,10 +4264,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # GCC has no BMI output flag: the mapper server, answering from
             # the table the variant's collate writes, maps the module name to
             # $out, and -fmodule-only skips the object. The mapper flag rides
-            # the edge whole, quoted there. The pre-15 driver needs the
-            # language spelled out for module extensions, as on compile
-            # edges.
-            lang = ['-x', 'c++'] if mesonlib.version_compare(compiler.version, '<15') else []
+            # the edge whole, quoted there. The language is always spelled
+            # out, as on compile edges.
+            lang = ['-x', 'c++']
             args = ['$ARGS'] + depargs + ['$MAPPERFLAG'] + NinjaCommandArg.list(
                 ['-fmodule-only'] + lang + ['-c', '$in'], Quoting.none)
         else:
@@ -4453,14 +4452,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # compile-edge split in generate_single_compile. cl needs
         # /internalPartition for an internal partition (not /interface); clang's
         # -x c++-module covers both kinds; GCC infers the kind from the source
-        # but its pre-15 driver does not know the module extensions and needs
-        # the language spelled out.
+        # but gets the language spelled out, as on every module edge.
         family = cpp.cpp_module_family()
         if family == 'msvc':
             return ['/internalPartition', '/TP'] if is_internal_partition else ['/interface', '/TP']
         if family == 'clang':
             return ['-x', 'c++-module']
-        return ['-x', 'c++'] if mesonlib.version_compare(cpp.version, '<15') else []
+        return ['-x', 'c++']
 
     def provision_header_units(self, target: build.BuildTarget, compiler: Compiler) -> T.List[str]:
         """Emit build edges for this target's declared header units and return
@@ -5356,13 +5354,20 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                     # writes the BMI next to the object, where the harvest
                     # edge picks it up. No BMI path on the command line.
                     commands += ['-x', 'c++-module', '-fmodule-output']
-                elif module_family == 'gcc' and mesonlib.version_compare(compiler.version, '<15'):
-                    # GCC 14's driver does not know the module extensions and
-                    # would treat the file as linker input (and the -E scan
-                    # would silently emit nothing); hand it the language.
-                    # Interface-ness is still inferred from the source. GCC 15
-                    # taught the driver the extensions.
+                elif module_family == 'gcc':
+                    # Interface-ness is inferred from the source; only the
+                    # language is spelled out, as below.
                     commands += ['-x', 'c++']
+            else:
+                # Every module edge names its language, never trusting the
+                # driver's suffix table: a suffix it does not know (.mpp
+                # anywhere, the module extensions before GCC 15) is taken as
+                # linker input, so the compile writes no object and the -E
+                # scan silently emits nothing. Interfaces get theirs with
+                # their unit flag above. Only the C++ compiler's own C++
+                # sources reach here: a module target's other sources
+                # (assembly, other languages) are no module edge.
+                commands += ['/TP'] if module_family == 'msvc' else ['-x', 'c++']
         elif compiler.get_language() == 'cpp' and compiler.cpp_module_family() == 'gcc' \
                 and self.cpp_module_scanner_for_target(target) == 'regex' \
                 and any(a in commands for a in compiler.get_cpp_modules_args()):
