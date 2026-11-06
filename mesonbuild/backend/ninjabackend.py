@@ -575,19 +575,27 @@ class ImportStdInfo:
     gen_objects: T.List[str]
 
 
+class BmiClassKeys(T.NamedTuple):
+    """A compile's two BMI class keys. `module` is the named-module key
+    (Compiler.get_module_bmi_class_key), which leaves the preprocessor flags out;
+    `header_unit` (get_header_unit_bmi_class_key) keeps them, so it is never
+    coarser. Which one a module provider's BMIs are keyed by is the provider's
+    to say (NinjaBackend._bmi_class_key_for)."""
+    module: T.Tuple[str, ...]
+    header_unit: T.Tuple[str, ...]
+
+
 @dataclass
 class BmiClassInfo:
-    """A BMI equivalence class present in this build (Compiler.get_header_unit_bmi_class_key).
+    """A BMI equivalence class present in this build, of either kind (a
+    BmiClassKeys member): a key tuple names one set of BMI-relevant flags
+    whichever split produced it.
 
-    digest names the BMI class whatever the number of BMI classes: the
-    subdirectory of a provider's public BMI directory (_module_bmi_dir).
-    subdir is the same digest, or None when the machine has a single BMI
-    class; it keys what stays shared across targets -- header units, and the
-    BMI class a GCC mapper program answers for -- so a single-BMI-class build
-    names neither by BMI class. relevant_args keeps the BMI class's
-    BMI-relevant flags in original command-line order for variant compiles.
+    digest names the BMI class: the subdirectory of a provider's public BMI
+    directory (_module_bmi_dir), and the variant id. relevant_args keeps the
+    BMI class's BMI-relevant flags in original command-line order for variant
+    compiles.
     """
-    subdir: T.Optional[str]
     relevant_args: T.List[str]
     digest: str
 
@@ -705,10 +713,13 @@ class NinjaBackend(backends.Backend):
         # class key); provider interface-unit sources are recorded during the
         # provider's own compile generation.
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
+        # Whether the build has more than one header-unit BMI class, which is
+        # when header units (and the GCC mapper's BMI class) are named by one.
+        self._header_unit_bmi_classes_split = False
         self._bmi_variants: T.Dict[T.Tuple[str, T.Tuple[str, ...]], BmiVariant] = {}
-        # The module providers a (target id, BMI class key) resolves imports
+        # The module providers a (target id, BMI class keys) resolves imports
         # from; see _module_providers.
-        self._module_providers_memo: T.Dict[T.Tuple[str, T.Tuple[str, ...]], T.List[ModuleProvider]] = {}
+        self._module_providers_memo: T.Dict[T.Tuple[str, BmiClassKeys], T.List[ModuleProvider]] = {}
         self._target_module_interfaces: T.DefaultDict[str, T.List[ModuleInterfaceSource]] = defaultdict(list)
         # Normalized declared-source paths per (target id, module kwarg). The
         # _is_declared_* predicates ask once per compiled source, so without
@@ -1689,8 +1700,8 @@ class NinjaBackend(backends.Backend):
         if family == 'gcc':
             # The scan asks the mapper server too, before the collate has run:
             # it asks only for named modules' names, never their BMIs, and
-            # reads header units by real path from the (target, BMI class)
-            # manifest -- the variant's class for a BMI-only variant scan. The
+            # reads header units by real path from the (target, header-unit BMI
+            # class) manifest -- the variant's for a BMI-only variant scan. The
             # manifest is an input: a unit declared or moved changes which
             # #includes the scan translates.
             if header_unit_override is None:
@@ -1800,7 +1811,7 @@ class NinjaBackend(backends.Backend):
             os.makedirs(os.path.join(self.environment.get_build_dir(), private), exist_ok=True)
         if self._has_public_bmi_dir(target):
             os.makedirs(os.path.join(self.environment.get_build_dir(),
-                                     self._module_bmi_dir(target, self._bmi_class_key_of(target))),
+                                     self._module_bmi_dir(target, self._own_bmi_class_key(target))),
                         exist_ok=True)
 
         ddis: T.List[str] = []
@@ -1808,7 +1819,7 @@ class NinjaBackend(backends.Backend):
             if lang == 'cpp':
                 ddis.append(self.get_ddi_file_for(source2object[src]))
 
-        providers = self._module_providers(target, self._bmi_class_key_of(target))
+        providers = self._module_providers(target, self._bmi_class_keys_of(target))
         dep_provmaps = [p.provmap for p in providers]
         # Unlike the provmap, never routed through a BMI-class variant: a
         # private module is never recompiled into a variant
@@ -1827,7 +1838,7 @@ class NinjaBackend(backends.Backend):
         # to name, the collate's prune of a missing directory is a no-op.
         self._add_module_collate_edge(
             cpp, [dyndep_file, provmap_file, private_map_file], ddis,
-            dyndep_file, provmap_file, self._module_bmi_dir(target, self._bmi_class_key_of(target)),
+            dyndep_file, provmap_file, self._module_bmi_dir(target, self._own_bmi_class_key(target)),
             self._module_collate_depargs(target, cpp, dep_provmaps, dep_private_maps),
             target.name, dep_provmaps, dep_private_maps)
 
@@ -1989,22 +2000,24 @@ class NinjaBackend(backends.Backend):
                 depargs += ['--header-unit', f'{mode}:{spelling}']
         return depargs
 
-    def _provmap_for_class(self, provider: build.BuildTarget,
-                           class_key: T.Tuple[str, ...]) -> str:
-        """The provided-modules map a consumer in the BMI class `class_key`
+    def _provmap_for_class(self, provider: build.BuildTarget, keys: BmiClassKeys) -> str:
+        """The provided-modules map a consumer with the BMI class keys `keys`
         resolves `provider`'s modules from: the provider's own when the BMI
-        classes agree, else a BMI-only variant's. Every compiler on the P1689
-        path supports BMI classes.
+        class the provider is keyed by agrees (_bmi_class_key_for), else a
+        BMI-only variant's. Every compiler on the P1689 path supports BMI
+        classes.
         """
-        if self._bmi_class_key_of(provider) == class_key:
+        view = self._bmi_class_key_for(provider, keys)
+        if self._own_bmi_class_key(provider) == view:
             return self.get_provided_modules_file_for(provider)
-        return self._get_or_create_bmi_variant(provider, class_key).provmap
+        return self._get_or_create_bmi_variant(provider, view).provmap
 
     def _get_or_create_bmi_variant(self, provider: build.BuildTarget,
                                    class_key: T.Tuple[str, ...]) -> BmiVariant:
         """Synthesize, once per (provider, BMI class), a BMI-only
         recompilation of the provider's module interface units under that
-        class: the same scan/collate/harvest pipeline, but the compiles use
+        class -- `class_key` is of the kind the provider is keyed by
+        (_bmi_class_key_for): the same scan/collate/harvest pipeline, but the compiles use
         the compiler's BMI-only mode (clang --precompile, cl /ifcOnly), emit
         BMIs into the provider's public BMI directory for that class
         (_module_bmi_dir) and produce no objects. Consumers
@@ -2032,8 +2045,8 @@ class NinjaBackend(backends.Backend):
         cpp = provider.compilers['cpp']
         family = cpp.cpp_module_family()
         info = self._bmi_classes[(provider.for_machine, class_key)]
-        assert info.subdir is not None, 'a class divergence implies more than one class'
-        vid = f'{provider.get_id()}@bmi@{info.subdir}'
+        assert class_key != self._own_bmi_class_key(provider), 'a variant is for another BMI class'
+        vid = f'{provider.get_id()}@bmi@{info.digest}'
         private_dir = os.path.join('meson-private', vid)
         variant = BmiVariant(private_dir,
                              os.path.join(private_dir, 'provided-modules.json'),
@@ -2045,19 +2058,32 @@ class NinjaBackend(backends.Backend):
 
         # The provider's BMI-irrelevant flags (its includes, warnings, ...)
         # plus the class's BMI-relevant flags; later flags win, so the class
-        # overrides the provider on any conflict.
+        # overrides the provider on any conflict. The preprocessor flags count
+        # as irrelevant for an ordinary provider, so the variant keeps the
+        # macros the provider's objects were compiled under; a provider built
+        # with header units takes the consumer's instead, whose unit BMIs its
+        # interfaces must then import.
+        follows = self._bmi_class_follows_preprocessor(provider)
         _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp),
-                                           header_unit=True)
+                                           header_unit=follows)
         args = irrelevant + info.relevant_args
+        # The variant's own keys: its imports resolve in them, and its header
+        # units and GCC mapper BMI class follow its header-unit key, which need
+        # not be any target's. Re-splitting the composition must give back the
+        # key the variant was asked for, or the lookups below miss.
+        keys = BmiClassKeys(cpp.get_module_bmi_class_key(args),
+                            cpp.get_header_unit_bmi_class_key(args))
+        assert self._bmi_class_key_for(provider, keys) == class_key, \
+            'a variant composition must re-split to its own BMI class'
+        hu_subdir = self._header_unit_bmi_class_subdir(provider.for_machine, keys.header_unit)
         # An interface's `import <hdr>;` must resolve this class's unit BMI,
         # reusing a class-mate target's edges when they exist. Built from the
         # same pre-module args as a target's own units. `args` keeps growing
         # below, so the unit edges get their own copy.
         hu_outputs, hu_args, hu_bmis = self._provision_class_header_units(
-            cpp, provider, args.copy(),
-            self._header_unit_class_subdir_for(provider.for_machine, class_key))
+            cpp, provider, args.copy())
         # A GCC variant's edges ask the mapper server for its own class.
-        variant_tag = self._gcc_bmi_class_tag(info.subdir)
+        variant_tag = self._gcc_bmi_class_tag(hu_subdir)
         variant_units: T.Optional[str] = None
         if family == 'gcc':
             variant_units = self._gcc_units_manifest(cpp, provider, variant_tag)
@@ -2068,7 +2094,7 @@ class NinjaBackend(backends.Backend):
         # own recompiled interfaces, and its linked providers'. A private
         # module is never recompiled into a variant, so it has no private dir.
         args += cpp.get_module_compile_args(
-            self._module_search_dirs(provider, class_key, None), emit_output=False)
+            self._module_search_dirs(provider, keys, None), emit_output=False)
         args += hu_args
 
         self.generate_bmi_variant_compile_rule(cpp)
@@ -2093,7 +2119,7 @@ class NinjaBackend(backends.Backend):
                                           args + iface_args,
                                           header_deps=header_deps, order_deps=order_deps,
                                           header_unit_override=hu_outputs,
-                                          class_tag=info.subdir)
+                                          class_tag=hu_subdir)
             ddis.append(self.get_ddi_file_for(vpcm))
             elem = NinjaBuildElement(self.all_outputs, vpcm, rulename, rec.rel_src)
             # cl's BMI_VARIANT rule no longer bakes /interface: the per-unit
@@ -2125,7 +2151,7 @@ class NinjaBackend(backends.Backend):
         # a dependency's own file -- the same asymmetry the normal collate's
         # dep_private_maps relies on), so the private side reads each
         # provider's own file rather than anything class-routed.
-        providers = self._module_providers(provider, class_key)
+        providers = self._module_providers(provider, keys)
         dep_provmaps = [p.provmap for p in providers]
         dep_private_maps = sorted(self.private_map_ref_for(p.target) for p in providers)
         # The provider's own private-modules.json: a recompiled public
@@ -2188,18 +2214,20 @@ class NinjaBackend(backends.Backend):
 
     @staticmethod
     def _gcc_bmi_class_tag(class_subdir: T.Optional[str]) -> str:
-        # The BMI class a mapper server answers for, as the class subdir; a
-        # single-class build has none and gets a stable name of its own.
+        # The header-unit BMI class a mapper server answers for, as its
+        # subdir; a build with one header-unit BMI class has none and gets a
+        # stable name of its own. Only header units are looked up by it: named
+        # modules come from the collate's per-TU table.
         return class_subdir or 'default'
 
     def _gcc_target_bmi_class_tag(self, target: build.BuildTarget) -> str:
-        return self._gcc_bmi_class_tag(self._header_unit_class_subdir_for(
-            target.for_machine, self._bmi_class_key_of(target)))
+        return self._gcc_bmi_class_tag(self._header_unit_bmi_class_subdir(
+            target.for_machine, self._bmi_class_keys_of(target).header_unit))
 
     @staticmethod
     def _gcc_units_manifest(compiler: Compiler, owner: build.BuildTarget, bmi_class_tag: str) -> str:
-        # One manifest per (target, BMI class): a target's own class, or a
-        # BMI-only variant's. Named by a digest of the target id where the
+        # One manifest per (target, header-unit BMI class): a target's own, or
+        # a BMI-only variant's. Named by a digest of the target id where the
         # compiler cannot quote the mapper command line, as an id can hold a
         # space.
         tid = owner.get_id()
@@ -2487,53 +2515,102 @@ class NinjaBackend(backends.Backend):
                 'header as a unit.', fatal=False)
 
     @lru_cache(maxsize=None)
-    def _bmi_class_key_of(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
-        """The BMI equivalence class `target` compiles into.
+    def _bmi_class_keys_of(self, target: build.BuildTarget) -> BmiClassKeys:
+        """The BMI equivalence classes `target` compiles into, one per kind.
 
         Memoized: re-asked once per source on the ninja-gen hot path, and each
         answer rebuilds the target's whole compile-arg list to split and sort
-        it. The key is frozen per target at generation time.
+        it. The keys are frozen per target at generation time.
         """
         cpp = target.compilers['cpp']
-        return cpp.get_header_unit_bmi_class_key(self._generate_single_compile(target, cpp))
+        args = self._generate_single_compile(target, cpp)
+        return BmiClassKeys(cpp.get_module_bmi_class_key(args),
+                            cpp.get_header_unit_bmi_class_key(args))
+
+    @lru_cache(maxsize=None)
+    def _bmi_class_follows_preprocessor(self, target: build.BuildTarget) -> bool:
+        """Whether `target`'s module BMIs are keyed by the header-unit key, which
+        keeps the preprocessor flags, rather than the named-module key.
+
+        A named interface is preprocessed once, under its provider's flags, so
+        its importers can share it whatever macros they define -- unless it was
+        built against header units. One translation unit holds one BMI per
+        header unit, and the provider's BMI names the unit BMIs it was built
+        against, so an importer whose preprocessing differs and that imports the
+        same unit has to be handed a BMI of the provider built against its own.
+        The same holds through a module the provider imports, whose BMI carries
+        its unit references into the provider's; the link closure bounds both.
+        """
+        if target.cpp_header_units:
+            return True
+        return any(isinstance(t, build.BuildTarget) and t.cpp_header_units
+                   and t.provides_cpp_modules() and self.target_uses_p1689_cpp_modules(t)
+                   for t in self.get_all_linked_targets(target))
+
+    def _bmi_class_key_for(self, provider: build.BuildTarget, keys: BmiClassKeys) -> T.Tuple[str, ...]:
+        """The BMI class `provider`'s module BMIs are looked up in for a
+        compile with the BMI class keys `keys`."""
+        return keys.header_unit if self._bmi_class_follows_preprocessor(provider) else keys.module
+
+    def _own_bmi_class_key(self, target: build.BuildTarget) -> T.Tuple[str, ...]:
+        """The BMI class `target`'s own module BMIs are built in."""
+        return self._bmi_class_key_for(target, self._bmi_class_keys_of(target))
+
+    @staticmethod
+    def _bmi_class_digest(machine: MachineChoice, key: T.Tuple[str, ...]) -> str:
+        return hashlib.sha256(
+            (machine.get_lower_case_name() + '\x00' + '\x00'.join(key)).encode()
+        ).hexdigest()[:12]
 
     def _compute_bmi_class_registry(self) -> None:
         """Freeze the per-machine set of BMI equivalence classes before any
         target is generated (compile args must not depend on generation order).
-        Every BMI class is named by a digest of the machine identity and the
-        BMI class key, the subdirectory of a provider's public BMI directory;
-        what stays shared across targets (header units, the GCC mapper's BMI
-        class) is keyed by it only when the build has more than one (machine,
-        BMI class) entry. Folding the machine in keeps a cross build's two
-        compilers apart: identical BMI-relevant flags on the build and host
-        machines (the common case) still name two BMI classes, whose BMIs are
-        not interchangeable. The same registry keys header units per BMI
-        class. The key is computed from
+        Both keys of every target are registered (BmiClassKeys); a key tuple
+        names one set of BMI-relevant flags whichever split produced it, so the
+        kinds share one table. Header-unit keys go in first, so a tuple that is
+        both keeps a header unit's own command-line order. Every BMI class is
+        named by a digest of the machine identity and the key, the
+        subdirectory of a provider's public BMI directory; header units (and
+        the GCC mapper's BMI class) are named by theirs only when the build has
+        more than one (machine, header-unit key) entry. Folding the machine in
+        keeps a cross build's two compilers apart: identical BMI-relevant flags
+        on the build and host machines (the common case) still name two BMI
+        classes, whose BMIs are not interchangeable. The keys are computed from
         _generate_single_compile, which excludes get_module_compile_args, so the
         chosen dir cannot feed back into the key.
         """
-        per_machine: T.DefaultDict[MachineChoice, T.Dict[T.Tuple[str, ...], T.List[str]]] = defaultdict(dict)
-        for t in self.build.get_targets().values():
-            if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
-                continue
-            cpp = t.compilers['cpp']
-            relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp), header_unit=True)
-            per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
-        multi = sum(len(classes) for classes in per_machine.values()) > 1
-        for machine, classes in per_machine.items():
-            for key, relevant in classes.items():
-                digest = hashlib.sha256(
-                    (machine.get_lower_case_name() + '\x00' + '\x00'.join(key)).encode()
-                ).hexdigest()[:12]
-                self._bmi_classes[(machine, key)] = BmiClassInfo(
-                    digest if multi else None, relevant, digest)
+        targets = [t for t in self.build.get_targets().values()
+                   if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t)]
+        header_unit_classes: T.Set[T.Tuple[MachineChoice, T.Tuple[str, ...]]] = set()
+        for header_unit in (True, False):
+            for t in targets:
+                cpp = t.compilers['cpp']
+                relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp),
+                                                 header_unit=header_unit)
+                entry = (t.for_machine, tuple(sorted(relevant)))
+                if header_unit:
+                    header_unit_classes.add(entry)
+                if entry not in self._bmi_classes:
+                    self._bmi_classes[entry] = BmiClassInfo(
+                        relevant, self._bmi_class_digest(*entry))
+        self._header_unit_bmi_classes_split = len(header_unit_classes) > 1
+
+    def _header_unit_bmi_class_subdir(self, for_machine: MachineChoice,
+                                      header_unit_key: T.Tuple[str, ...]) -> T.Optional[str]:
+        """The name of a header-unit BMI class: None in a build with only one,
+        where every declarer of a unit shares its BMI. Computed from the key
+        rather than looked up, since a BMI-only variant's composition need not
+        be any target's."""
+        if not self._header_unit_bmi_classes_split:
+            return None
+        return self._bmi_class_digest(for_machine, header_unit_key)
 
     def _module_bmi_dir(self, provider: build.BuildTarget,
                         class_key: T.Tuple[str, ...]) -> str:
         """The directory `provider`'s public BMIs live in for the BMI class
-        `class_key`: its own BMI class, or a BMI-only variant's. The collate
-        that names a public BMI and the harvest edge that publishes one both
-        take the path from here.
+        `class_key` (of the kind _bmi_class_key_for picks for it): its own BMI
+        class, or a BMI-only variant's. The collate that names a public BMI and
+        the harvest edge that publishes one both take the path from here.
 
         Every providing target has a directory of its own, keyed by BMI class
         however many BMI classes the build has, so two unrelated targets may
@@ -2550,12 +2627,13 @@ class NinjaBackend(backends.Backend):
         # modules, so it never publishes a BMI; an export_dynamic one may.
         return target.provides_cpp_modules() and not target.all_cpp_modules_private()
 
-    def _module_search_dirs(self, target: build.BuildTarget, class_key: T.Tuple[str, ...],
+    def _module_search_dirs(self, target: build.BuildTarget, keys: BmiClassKeys,
                             private_dir: T.Optional[str]) -> T.List[str]:
-        """The directories, in order, a compile of `target` in the BMI class
-        `class_key` (its own, or a BMI-only variant's) looks an import up in:
+        """The directories, in order, a compile of `target` with the BMI class
+        keys `keys` (its own, or a BMI-only variant's) looks an import up in:
         its private directory, if any; its own public one; then each linked
-        provider's (_module_providers), in that BMI class. No module name is
+        provider's (_module_providers), each in the BMI class it is keyed by
+        for those keys. No module name is
         in two of them -- two providers of one name reaching one link fail at
         the collate, and each collate prunes the BMIs it no longer provides
         -- so the order only decides how soon a lookup succeeds.
@@ -2567,25 +2645,26 @@ class NinjaBackend(backends.Backend):
             return []
         dirs = [private_dir] if private_dir is not None else []
         if self._has_public_bmi_dir(target):
-            dirs.append(self._module_bmi_dir(target, class_key))
+            dirs.append(self._module_bmi_dir(target, self._bmi_class_key_for(target, keys)))
         # Each directory belongs to a distinct target, so none repeats.
-        dirs.extend(p.bmi_dir for p in self._module_providers(target, class_key))
+        dirs.extend(p.bmi_dir for p in self._module_providers(target, keys))
         return dirs
 
     def _module_providers(self, target: build.BuildTarget,
-                          class_key: T.Tuple[str, ...]) -> T.List[ModuleProvider]:
+                          keys: BmiClassKeys) -> T.List[ModuleProvider]:
         """The module-providing targets `target` links (transitively, through
-        get_all_linked_targets), as seen from the BMI class `class_key`: each
-        provider's own provided-modules map and BMI directory where the BMI
-        classes agree, else (created on first use) a BMI-only variant's.
-        Sorted by provmap path, the order the collate's --dep-provmap list
-        takes.
+        get_all_linked_targets), as seen from a compile with the BMI class keys
+        `keys`: each provider in the BMI class it is keyed by for them
+        (_bmi_class_key_for), with its own provided-modules map and BMI
+        directory where that is its own BMI class, else (created on first use)
+        a BMI-only variant's. Sorted by provmap path, the order the collate's
+        --dep-provmap list takes.
 
-        Memoized per (target id, BMI class key): the link walk is repeated
+        Memoized per (target id, BMI class keys): the link walk is repeated
         for every consumer of a provider, and the variant it may create must
         be created once.
         """
-        memo_key = (target.get_id(), class_key)
+        memo_key = (target.get_id(), keys)
         existing = self._module_providers_memo.get(memo_key)
         if existing is not None:
             return existing
@@ -2593,8 +2672,9 @@ class NinjaBackend(backends.Backend):
         for t in self.get_all_linked_targets(target):
             if isinstance(t, build.BuildTarget) and self.target_uses_p1689_cpp_modules(t) \
                     and t.provides_cpp_modules():
-                provmap = self._provmap_for_class(t, class_key)
-                providers[provmap] = ModuleProvider(t, provmap, self._module_bmi_dir(t, class_key))
+                provmap = self._provmap_for_class(t, keys)
+                providers[provmap] = ModuleProvider(
+                    t, provmap, self._module_bmi_dir(t, self._bmi_class_key_for(t, keys)))
         result = [providers[p] for p in sorted(providers)]
         self._module_providers_memo[memo_key] = result
         return result
@@ -2656,15 +2736,6 @@ class NinjaBackend(backends.Backend):
         if target.all_cpp_modules_private():
             return True
         return self._is_declared_private_interface(target, src)
-
-    def _header_unit_class_subdir_for(self, for_machine: MachineChoice,
-                                      class_key: T.Tuple[str, ...]) -> T.Optional[str]:
-        # The BMI class a header unit is keyed by: None in a single-BMI-class
-        # build, where every declarer of a unit shares one BMI. Keyed
-        # directly, not by target (the BMI-only variant path provisions units
-        # without a target to look the key up from).
-        info = self._bmi_classes.get((for_machine, class_key))
-        return info.subdir if info else None
 
     @staticmethod
     def source_scan_language(src: FileOrString) -> T.Optional[Literal['cpp', 'fortran']]:
@@ -4550,11 +4621,12 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         ever reaches a GCC command line.
 
         Edges are deduped by (mode, resolved header identity) plus the
-        declarer's BMI class: each class builds
-        its own BMI (a unit is interface-only, so per-class copies are purely
-        additive) and each consumer resolves its own class's. Two targets that
-        spell one unit alike but resolve it to different files keep distinct
-        BMIs. On a single-class machine the key carries no class part, keeping
+        declarer's header-unit BMI class, which keeps the preprocessor flags a
+        unit's BMI freezes: each such BMI class builds its own BMI (a unit is
+        interface-only, so per-class copies are purely additive) and each
+        consumer resolves its own BMI class's. Two targets that spell one unit
+        alike but resolve it to different files keep distinct BMIs. With a
+        single header-unit BMI class the key carries no class part, keeping
         paths and edges byte-identical to a pre-class build.
         """
         family = compiler.cpp_module_family()
@@ -4572,8 +4644,6 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
-            class_key = compiler.get_header_unit_bmi_class_key(args)
-            class_subdir = self._header_unit_class_subdir_for(target.for_machine, class_key)
             if family == 'gcc':
                 # The only place a unit that resolves nowhere is reported. The
                 # edges below just skip such a unit; what it means is decided
@@ -4582,7 +4652,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 # Costs a probe only on a target that forces includes at all.
                 self.warn_on_preincluded_header_units(target, args)
             outputs, consumer_args, bmis = self._provision_class_header_units(
-                compiler, target, args, class_subdir)
+                compiler, target, args)
         self._target_header_unit_outputs[tid] = outputs
         self._target_header_unit_consumer_args[tid] = consumer_args
         if family == 'gcc':
@@ -4593,24 +4663,32 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         return outputs
 
     def _provision_class_header_units(self, compiler: Compiler, target: build.BuildTarget,
-                                      args: T.Union['CompilerArgs', T.List[str]],
-                                      class_subdir: T.Optional[str]
+                                      args: T.Union['CompilerArgs', T.List[str]]
                                       ) -> T.Tuple[T.List[str], T.List[str], T.List[T.Tuple[str, str]]]:
-        """Every header unit `target`'s TUs must be able to name, in one class:
-        the units it declares itself, plus the ones it inherits by importing
-        another target's module (see _imported_header_units, empty off cl).
+        """Every header unit a compile of `target` with `args` must be able to
+        name, in the header-unit BMI class of `args` (a target's own, or a
+        BMI-only variant's composition): the units it declares itself, plus the
+        ones it inherits by importing another target's module (see
+        _imported_header_units, empty off cl).
 
-        An inherited unit is built in `target`'s class -- that is the BMI its TUs
+        An inherited unit is built in that BMI class -- that is the BMI the TUs
         must read -- but from the *provider's* BMI-irrelevant flags, because the
         spelling is the provider's and only the provider's include path resolves
-        it. That is the same composition a BMI-only variant uses for the
-        interface itself (_get_or_create_bmi_variant), and it means a consumer
-        and the provider's variant compute one key and emit one edge, whichever
-        of them the backend generates first. The provider is the owner too, so a
-        unit exporting a header that target generates still orders behind its
-        generator. The (real path, BMI) pairs stay the target's own: they feed
-        GCC's units manifest, and GCC inherits nothing here.
+        it. That is the same composition a BMI-only variant of a provider built
+        with header units uses for the interface itself
+        (_get_or_create_bmi_variant), and every provider declaring units is one,
+        so a consumer and the provider's variant compute one key and emit one
+        edge, whichever of them the backend generates first. The provider is the
+        owner too, so a unit exporting a header that target generates still
+        orders behind its generator. The (real path, BMI) pairs stay the
+        target's own: they feed GCC's units manifest, and GCC inherits nothing
+        here.
         """
+        # The composition below keeps `args`'s header-unit key -- the
+        # provider's half holds nothing the key counts -- so one subdir serves
+        # both.
+        class_subdir = self._header_unit_bmi_class_subdir(
+            target.for_machine, compiler.get_header_unit_bmi_class_key(args))
         seen: T.List[T.List[str]] = []
         outputs, consumer_args, bmis = self._provision_header_unit_edges(
             compiler, target.cpp_header_units, args, class_subdir, target, seen)
@@ -5391,16 +5469,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # (see _module_search_dirs).
         if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
-            key = self._bmi_class_key_of(target)
             # Only an interface unit writes a BMI, and only a target that has
             # interfaces has its own BMI directories to write it to.
             output_dir: T.Optional[str] = None
             if is_module_interface:
                 output_dir = private_dir if private_dir is not None \
                     and self._is_private_module_source(target, src) \
-                    else self._module_bmi_dir(target, key)
+                    else self._module_bmi_dir(target, self._own_bmi_class_key(target))
             modargs = compiler.get_module_compile_args(
-                self._module_search_dirs(target, key, private_dir), output_dir)
+                self._module_search_dirs(target, self._bmi_class_keys_of(target), private_dir),
+                output_dir)
             module_family = compiler.cpp_module_family()
             commands += modargs
             # cl and clang need each module-interface unit flagged explicitly
@@ -5651,7 +5729,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             private_dir = self._module_private_bmi_dir_for(target)
             harvest_dir = private_dir if (private_dir is not None
                                           and self._is_private_module_source(target, src)) \
-                else self._module_bmi_dir(target, self._bmi_class_key_of(target))
+                else self._module_bmi_dir(target, self._own_bmi_class_key(target))
             self.generate_cpp_module_harvest(target, compiler, rel_obj, harvest_dir)
         assert isinstance(rel_obj, str)
         assert isinstance(rel_src, str)

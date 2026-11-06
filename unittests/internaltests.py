@@ -1076,6 +1076,7 @@ Thread model: posix'''), '21.9.0')
         be.build_to_src = '..'
         be.all_outputs = set()
         be._bmi_classes = {}
+        be._header_unit_bmi_classes_split = False
         be._header_units = {}
         be._header_unit_group = {}
         be._target_header_unit_outputs = {}
@@ -1122,8 +1123,8 @@ Thread model: posix'''), '21.9.0')
         return be, provision
 
     def test_header_unit_dedup_shared_by_spelling(self):
-        # On a single-class machine a header unit is deduped globally by
-        # (mode, resolved file) for every compiler: another target that
+        # With a single header-unit BMI class a header unit is deduped globally
+        # by (mode, resolved file) for every compiler: another target that
         # resolves the same file reuses the one BMI, even if its compile args
         # differ, so the first edge builds the unit for every consumer. A
         # same-spelling unit resolving to a different file is a different unit
@@ -1139,8 +1140,9 @@ Thread model: posix'''), '21.9.0')
                 a = provision('a', ['-Iinc', '-DFOO'])
                 b = provision('b', ['-Iinc', '-DBAR'])
                 c = provision('c', ['-Iinc', '-DFOO'])
-                # Differing args (-DFOO vs -DBAR) never split the BMI: one
-                # shared edge, regardless of compiler.
+                # With one header-unit BMI class (the mock's), differing args
+                # (-DFOO vs -DBAR) never split the BMI: one shared edge,
+                # regardless of compiler.
                 self.assertEqual(a, b)
                 self.assertEqual(a, c)
                 self.assertTrue(a.endswith(suffix))

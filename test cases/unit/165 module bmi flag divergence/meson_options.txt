@@ -1,1 +1,1 @@
-option('withfoo', type: 'boolean', value: true)
+option('mode', type: 'combo', choices: ['none', 'define', 'std'], value: 'define')

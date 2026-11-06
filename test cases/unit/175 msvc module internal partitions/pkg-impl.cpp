@@ -4,10 +4,10 @@
 module pkg:impl;
 import :part;
 
-#ifdef FOO
-constexpr bool impl_foo = true;
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
+constexpr bool impl_rtti = true;
 #else
-constexpr bool impl_foo = false;
+constexpr bool impl_rtti = false;
 #endif
 
 int hidden() {

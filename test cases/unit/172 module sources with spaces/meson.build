@@ -7,9 +7,10 @@ modlib = static_library('modlib', 'my mod.cppm')
 prog = executable('prog', 'main.cpp', link_with: modlib)
 test('prog', prog)
 
-# A define-divergent consumer demands a BMI-only variant of the spaced
-# interface -- on GCC its path lands in a mapper table, and before GCC 16 that
-# table cannot be named by a spaced path on the mapper's command line.
-progfoo = executable('progfoo', 'foomain.cpp', link_with: modlib,
-                     cpp_args: ['-DFOO'])
-test('progfoo', progfoo)
+# An RTTI-divergent consumer (a dialect flag, which splits a named module's
+# BMI class) demands a BMI-only variant of the spaced interface -- on GCC its
+# path lands in a mapper table, and before GCC 16 that table cannot be named
+# by a spaced path on the mapper's command line.
+prognortti = executable('prognortti', 'norttimain.cpp', link_with: modlib,
+                        override_options: ['cpp_rtti=false'])
+test('prognortti', prognortti)

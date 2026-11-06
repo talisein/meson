@@ -1,12 +1,12 @@
 import pkg;
 
 constexpr bool my_view =
-#ifdef FOO
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
     true;
 #else
     false;
 #endif
 
 int main() {
-    return (pkg_with_foo == my_view && pval() == 42) ? 0 : 1;
+    return (pkg_with_rtti == my_view && pval() == 42) ? 0 : 1;
 }

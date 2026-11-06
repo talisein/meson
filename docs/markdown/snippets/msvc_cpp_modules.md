@@ -63,10 +63,17 @@ module partitions and `import std;` need the P1689 scan and therefore VS 2022
 Diagnostics (a module required by no target, a duplicate module name reaching one
 link, and module dependency cycles) are reported at build time for MSVC exactly
 as for GCC. Targets that share modules but compile with divergent
-module-affecting flags (a different `cpp_std`, extra defines, ...) build
+module-affecting flags (a different `cpp_std`, `/GR-`, ...) build
 correctly: each flag class gets its own subdirectory of a provider's BMI directory, and
 Meson recompiles a shared provider's interfaces per class as BMIs only —
 every consumer still links the provider's objects exactly once. This holds
 across a cross build's two machines exactly as it does for GCC and Clang:
 a build-machine and a host-machine module target are two targets with two BMI
 directories, so they never contend for a BMI.
+Defines and forced includes (`/D`, `/U`, `/FI`) do not split a named module's
+class: an interface is preprocessed once, under its provider's flags, and
+every importer sees that preprocessing, so a `<target>_EXPORTS` macro that
+switches between `dllexport` and `dllimport` works for a library's consumers.
+They do split header units, and the named modules of a provider built with
+header units (it declares `cpp_header_units`, or links a module provider that
+does).

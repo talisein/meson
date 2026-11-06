@@ -77,12 +77,19 @@ refuses a mismatched import with a hard error (a `cpp_std` mismatch, or
 `-pthread` present on one side only — `dependency('threads')` adds it only to
 its own consumers). Targets that share modules but compile with divergent
 module-affecting flags nonetheless build correctly: each flag class gets its
-own subdirectory of a provider's BMI directory, and Meson recompiles a shared provider's
-interfaces per class as BMIs only — every consumer still links the provider's
-objects exactly once. The std module needs no special handling for any of
-this; `dependency('std')` folds the threads dependency in and propagates it
-to every consumer. The same separation holds across a cross build's two
-machines, exactly as for GCC: a build-machine module target and a
+own subdirectory of a provider's BMI directory, and Meson recompiles a shared
+provider's interfaces per class as BMIs only — every consumer still links the
+provider's objects exactly once. Defines and forced includes (`-D`, `-U`,
+`-include`, `-imacros`) do not split a named module's class: an interface is
+preprocessed once, under its provider's flags, and every importer sees that
+preprocessing (so a `<target>_EXPORTS`-style export macro defined only for the
+library still works). They do split header units, and they split the named
+modules of a provider that is built with header units (it declares
+`cpp_header_units`, or links a module provider that does), whose BMIs name the
+unit BMIs they were built against. The std module needs no special handling
+for any of this; `dependency('std')` folds the threads dependency in and
+propagates it to every consumer. The same separation holds across a cross
+build's two machines, exactly as for GCC: a build-machine module target and a
 host-machine one are two targets with two BMI directories, so they never
 contend for a BMI, even under the same module name.
 

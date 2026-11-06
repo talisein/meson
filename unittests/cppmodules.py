@@ -822,7 +822,8 @@ class CppModulesTestMixin:
 
     def check_import_std_reuse(self, extra_args: T.Sequence[str] = ()) -> None:
         """Every consumer of dependency('std') in one BMI class resolves the
-        std target's one BMI; a divergent consumer gets the single variant."""
+        std target's one BMI; the consumer at another cpp_std gets the single
+        variant."""
         self.build_and_check_modules('220 import std reuse', extra_args=extra_args)
         std = '__meson_cxx_std'
         root = self.bmi_root(std)
@@ -920,6 +921,19 @@ class CppModulesTestMixin:
                     rule = tail.split(' ')[0]
                 elif rule.startswith('cpp_MODULE_COMPILER') and line.strip().startswith('ARGS ='):
                     found[out] = line
+        return found
+
+    def gcc_mapper_bmi_classes(self, prefix: str) -> T.Set[str]:
+        """The --bmi-class words the mapper program is started with on the
+        module compile edges whose output starts with `prefix`: the
+        header-unit BMI classes those TUs resolve units in ('default' when the
+        build has only one)."""
+        found: T.Set[str] = set()
+        for out, line in self.module_compile_args().items():
+            if out.startswith(prefix):
+                word = self._program_mapper_word(self._program_mapper_flag(line), '--bmi-class')
+                if word is not None:
+                    found.add(word)
         return found
 
     def gcc_program_tables(self) -> T.Dict[str, str]:

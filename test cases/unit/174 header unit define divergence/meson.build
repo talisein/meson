@@ -3,7 +3,10 @@ project('header unit define divergence', 'cpp', default_options: ['cpp_std=c++20
 # The subproject builds a module library whose interface imports the header
 # unit "util.h". prog and progb share its BMI class and must reuse its unit BMI;
 # progfoo diverges on -DFOO and must get a unit BMI of its own -- and modlib's
-# BMI-only variant for progfoo must import that one, not the provider's.
+# BMI-only variant for progfoo must import that one, not the provider's. A
+# define splits modlib's named-module BMI class only because modlib is built
+# with header units: progfoo cannot import both its own util.h BMI and a modlib
+# BMI built against another.
 # util_foo() observes the define and is constant-evaluated by every importer, so
 # a wrongly shared BMI is a wrong exit code, not just a build failure.
 #

@@ -1,0 +1,1 @@
+option('divergent_std', type: 'string', value: 'c++26')

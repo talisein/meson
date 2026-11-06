@@ -825,8 +825,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'import_std', compiler='msvc')
     def test_msvc_import_std_reuse(self):
-        # cl has no cpp_std=c++23.
-        self.check_import_std_reuse(extra_args=['-Dcpp_std=c++latest'])
+        # cl has no cpp_std=c++23, and no c++26 for the divergent consumer.
+        self.check_import_std_reuse(extra_args=['-Dcpp_std=c++latest',
+                                                '-Ddivergent_std=c++20'])
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
     def test_msvc_module_internal_partitions(self):
@@ -916,10 +917,12 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # A real standard-library header as a header unit on cl: <vector>
         # resolves to an absolute system path, built into the ifc cache and
         # named on the consumer's command line (/headerUnit), so the default
-        # BMI-on-ARGS check is off. A define-divergent second consumer makes
-        # the build multi-class.
+        # BMI-on-ARGS check is off. A define-divergent second consumer splits
+        # header units but not modlib's named-module BMI class.
         self.build_and_check_modules('171 stl header units',
                                      ninja_args_not_contains=())
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_module_source_with_spaces(self):
@@ -1018,12 +1021,14 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler='msvc')
-    def test_msvc_module_define_divergence_builds(self):
-        # A -D divergence splits the class on cl too: prog resolves modlib
-        # through a BMI-only variant built without -DFOO instead of importing
-        # a FOO-mismatched provider BMI.
+    def test_msvc_module_define_divergence_shares_provider_bmi(self):
+        # A /D divergence does not split a named module's BMI class on cl
+        # either: prog imports modlib's own IFC, preprocessed under modlib's
+        # FOO, with no BMI-only variant -- which would describe code modlib's
+        # object never contained.
         self.build_and_check_modules('178 msvc module define divergence')
-        self.assertEqual(len(self.bmi_variant_ids()), 1)
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_unit_rtti_divergence_builds(self):
@@ -1472,12 +1477,17 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_gcc_stl_header_units(self):
         # Windows counterpart of LinuxlikeTests.test_gcc_stl_header_units:
         # <vector> resolves to a drive-letter absolute path here, unlike the
-        # project-local units of the other fixtures. progfoo's -DFOO makes
-        # this a two-class build; prog's tables key <vector> by that real
-        # path, at the BMI its own class's unit edge wrote.
+        # project-local units of the other fixtures. progfoo's -DFOO splits
+        # header units but not modlib's named-module BMI class; prog's tables
+        # key <vector> by that real path, at the BMI its own header-unit BMI
+        # class's unit edge wrote.
         self.build_and_check_modules('171 stl header units',
                                      setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        classes = self.gcc_mapper_bmi_classes('prog.p/')
+        self.assertEqual(len(classes), 1, classes)
+        self.assertNotIn('default', classes)
         self.assert_gcc_table_units('prog', 'vector')
         (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
         self.assertRegex(real, r'^[A-Za-z]:', 'the unit is keyed by its drive-letter real path')

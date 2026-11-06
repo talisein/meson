@@ -105,13 +105,21 @@ declaration, which is ill-formed.
 
 Named modules need GCC >= 14 (the first release with the P1689 scanner);
 `import std;` needs GCC >= 15. Targets that share modules but compile with
-divergent module-affecting flags (a different `cpp_std`, extra defines,
+divergent module-affecting flags (a different `cpp_std`, `-fno-rtti`,
 `-pthread` from `dependency('threads')`, ...) build correctly, as on Clang and
 MSVC: each flag class gets its own subdirectory of a provider's BMI directory,
 named in the compiles' mapper tables, and Meson recompiles a shared provider's
 interfaces per class as BMIs only, so every consumer still links the provider's
 objects exactly once.
 Header units are built per flag class too.
+Defines and forced includes (`-D`, `-U`, `-include`, `-imacros`) do not
+split a named module's class: an interface is preprocessed once, under
+its provider's flags, and every importer sees that preprocessing (so a
+`<target>_EXPORTS`-style export macro defined only for the library still
+works). They do split header units, and they split the named modules of a
+provider that is built with header units (it declares `cpp_header_units`,
+or links a module provider that does), whose BMIs name the unit BMIs they
+were built against.
 
 GCC 14 and 15 split the mapper program's command line at spaces and cannot
 quote it. Where the command running Meson holds a space, quote or backslash (a

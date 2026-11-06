@@ -1,13 +1,9 @@
 import modlib;
 
-// The BMI this TU imports must have been compiled under this TU's own view
-// of FOO -- prog never defines it, modlib does.
-#ifdef FOO
-constexpr bool my_view = true;
-#else
-constexpr bool my_view = false;
-#endif
-
+// prog never defines FOO; modlib does. A named interface is preprocessed once,
+// under its provider's flags, so prog must see modlib's view: a BMI-only
+// variant recompiled without FOO would describe code modlib's object never
+// contained.
 int main() {
-    return my_view == built_with_foo ? (f() - 42) : 1;
+    return built_with_foo ? (f() - 42) : 1;
 }

@@ -1308,7 +1308,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # BMI-irrelevant allowlist: the two stay in one BMI class (one BMI
         # directory, no BMI-only variant), and the mixed build runs fine.
         self.build_and_check_modules('165 module bmi flag divergence',
-                                     extra_args=['-Dwithfoo=false'])
+                                     extra_args=['-Dmode=none'])
         self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
         self.assertEqual(self.bmi_variant_ids(), set())
 
@@ -1394,14 +1394,18 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
-    def test_module_define_divergence_builds(self):
-        # A -D divergence splits the class; with BMI classes it builds and
-        # runs through a variant instead of warning. GCC would otherwise
-        # share the -DFOO BMI silently, which the fixture turns into a wrong
-        # exit code: the importer constant-evaluates the BMI's FOO view
-        # against its own.
-        self.build_and_check_modules('165 module bmi flag divergence')
-        self.assertEqual(len(self.bmi_variant_ids()), 1)
+    def test_module_define_divergence_shares_provider_bmi(self):
+        # modlib is built with -DFOO and prog is not. A named interface is
+        # preprocessed once, under its provider's flags, so the define does not
+        # split the BMI class: prog imports modlib's own BMI -- one BMI class
+        # directory, no BMI-only variant -- and sees modlib's FOO, which the
+        # fixture's constexpr probe checks at run time. A variant would have
+        # been recompiled without FOO, describing code modlib's object never
+        # contained.
+        self.build_and_check_modules('165 module bmi flag divergence',
+                                     extra_args=['-Dmode=define'])
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'partitions', compiler=('gcc', 'clang'))
     def test_module_internal_partitions(self):
@@ -1447,24 +1451,30 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # searches it.
         gcc = self.host_cpp_compiler().cpp_module_family() == 'gcc'
         testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
-        self.init(testdir, extra_args=['-Dwithfoo=false'])
+        self.init(testdir, extra_args=['-Dmode=none'])
         self.build(override_envvars=self.NO_CCACHE)
         self.run_tests()
         self.assertBuildIsNoop()
         self.assertEqual(self.bmi_variant_ids(), set())
+        if gcc:
+            self.assertEqual(self.gcc_mapper_bmi_classes('prog.p/'), {'default'})
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             single_class = f.read()
 
-        self.setconf('-Dwithfoo=true')
+        # A cpp_std divergence splits named modules (a define would not).
+        self.setconf('-Dmode=std')
         self.build(override_envvars=self.NO_CCACHE)
         self.run_tests()
         self.assertBuildIsNoop()
         self.assertEqual(len(self.bmi_variant_ids()), 1)
         if gcc:
-            with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
-                self.assertIn('-fmodule-mapper', f.read())
+            # The mapper program answers for a named BMI class once there are
+            # two.
+            classes = self.gcc_mapper_bmi_classes('prog.p/')
+            self.assertEqual(len(classes), 1, classes)
+            self.assertNotIn('default', classes)
 
-        self.setconf('-Dwithfoo=false')
+        self.setconf('-Dmode=none')
         self.build(override_envvars=self.NO_CCACHE)
         self.run_tests()
         self.assertBuildIsNoop()
@@ -2211,7 +2221,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_header_unit_define_divergence(self):
         # Three declarers of util.h, two in one BMI class and progfoo diverging
         # on -DFOO: each must get its own class's BMI, and modlib's BMI-only
-        # variant for progfoo must import progfoo's, not the provider's. Every
+        # variant for progfoo must import progfoo's, not the provider's. The
+        # define splits modlib's named-module BMI class at all only because
+        # modlib declares header units (_bmi_class_follows_preprocessor). Every
         # program constant-evaluates the unit's view of FOO, so a wrongly shared
         # BMI is a failing test run, not merely a build failure.
         #
@@ -2361,13 +2373,21 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # A real standard-library header unit (<vector> resolves to an
-        # absolute system path) in a two-class build (progfoo's -DFOO splits
-        # the class). prog's tables key <vector> by that real path, at the
-        # BMI its own class's unit edge wrote.
+        # absolute system path) in a build with two header-unit BMI classes
+        # (progfoo's -DFOO) but one named-module BMI class (a define does not
+        # split modlib, which declares no header units). prog's tables key
+        # <vector> by that real path, at the BMI its own header-unit BMI
+        # class's unit edge wrote.
         self.build_and_check_modules('171 stl header units',
                                      setup_not_contains=['Cannot resolve'])
         self.check_gcc_module_mappers()
-        self.assertEqual(len(self.bmi_class_dirs('modlib')), 2)
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
+        # The mapper program answers prog's units for a named header-unit BMI
+        # class: the define split header units without splitting modules.
+        classes = self.gcc_mapper_bmi_classes('prog.p/')
+        self.assertEqual(len(classes), 1, classes)
+        self.assertNotIn('default', classes)
         self.assert_gcc_table_units('prog', 'vector')
         (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
         self.assertTrue(os.path.isabs(real) and os.path.isfile(real), real)
@@ -2483,9 +2503,12 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_stl_header_units(self):
         # Same fixture on clang: the unit BMI is built from the absolute
-        # resolved system header and named on consumer command lines.
+        # resolved system header and named on consumer command lines. The
+        # define splits header units only: modlib keeps one BMI class.
         self.build_and_check_modules('171 stl header units',
                                      ninja_args_not_contains=())
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_header_units(self):
@@ -2615,6 +2638,12 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'import_std', compiler=('gcc', 'clang'))
     def test_import_std_reuse(self):
+        # The fixture's divergent consumer is c++26 (see
+        # test_clang_import_std_bmi_classes).
+        cpp = self.host_cpp_compiler()
+        std_opt = cpp.get_options()[cpp.form_compileropt_key('std')]
+        if 'c++26' not in std_opt.choices:
+            raise SkipTest(f'{cpp.get_id()} {cpp.version} does not offer -std=c++26')
         self.check_import_std_reuse()
 
     @requires_cpp_module_caps('modules', compiler='gcc')
