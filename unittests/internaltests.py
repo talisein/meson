@@ -413,7 +413,7 @@ Thread model: posix'''), '21.9.0')
         deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
                 '--dep-provmap', 'dep/pm.json']
         table = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'm/u.json']
-        # GCC and Clang own their per-target BMI directories, target and
+        # Every family owns its per-target BMI directories, target and
         # variant alike.
         owns = ['--owns-bmi-dir']
         # GCC target: no harvest stamp, the table flags, no interface list.
@@ -453,7 +453,8 @@ Thread model: posix'''), '21.9.0')
                     harvests=True, interface_sources=['x.cc'],
                     header_units=['<vec.h>', 'util.h']),
             ['--own-private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc',
+            + ['--stamp-suffix', '.gcm.stamp'] + owns
+            + ['--interface-source', 'x.cc',
                '--header-unit', 'system:vec.h', '--header-unit', 'user:util.h'])
         # The head is the only per-site difference: identical kwargs under the
         # two heads must agree on everything past it.

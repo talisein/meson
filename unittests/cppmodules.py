@@ -304,7 +304,7 @@ _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/ref
 # (meson-private/<id>@bmi-public/<BMI class digest>/) rather than the shared
 # cache. Transitional, while the families move over one at a time; helpers
 # assert exactly one layout per family, never either.
-_PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang'})
+_PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang', 'msvc'})
 
 
 class CppModulesTestMixin:
@@ -742,12 +742,6 @@ class CppModulesTestMixin:
         for d in class_dirs:
             self.assertTrue(os.path.isfile(os.path.join(root, d, bmi)),
                             f'missing {bmi} in class dir {d}')
-            if not self.per_target_bmi_dirs():
-                # The collator's module-name claim is keyed by the BMI path,
-                # so per-class dirs make claims per-class: both classes of one
-                # module coexist without the duplicate-provider error.
-                self.assertTrue(os.path.isfile(os.path.join(root, d, bmi + '.owner')),
-                                f'missing per-class owner claim in {d}')
         self.assert_no_flat_bmi(provider, module_name)
         targets = sorted(t['name'] for t in self.introspect('--targets'))
         self.assertEqual(targets, sorted(expected_targets),
@@ -804,16 +798,25 @@ class CppModulesTestMixin:
                          'expected exactly one BMI variant of the std target')
         self.assert_variants_emit_no_objects()
 
+    def target_output(self, target: str) -> str:
+        """`target`'s output file (build-dir relative, '/'-separated), as
+        introspection names it: 'prog' or 'prog.exe', 'libfoo.a', ..."""
+        files = [t['filename'][0] for t in self.introspect('--targets') if t['name'] == target]
+        self.assertEqual(len(files), 1, f'expected one target named {target}, got {files}')
+        return os.path.relpath(files[0], self.builddir).replace('\\', '/')
+
     def resolved_bmi(self, consumer: str, module_name: str) -> str:
         """The BMI (build-dir relative, '/'-separated) that `consumer`'s
         compiles resolve `module_name` to. Every compile of the target that
         imports it must agree."""
         family = self.host_cpp_compiler().cpp_module_family()
+        # A target's private directory is its output file's name plus '.p'.
+        pdir = self.target_output(consumer) + '.p/'
         found: T.Set[str] = set()
         if family == 'gcc':
             # Named by exact path in each TU's mapper table.
             for out, table in self.gcc_program_tables().items():
-                if not out.startswith(f'{consumer}.p/'):
+                if not out.replace('\\', '/').startswith(pdir):
                     continue
                 with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
                     bmi = json.load(f)['modules'].get(module_name)
@@ -822,12 +825,15 @@ class CppModulesTestMixin:
         else:
             # Found by searching the compile's directories in turn: exactly
             # one of them may hold it, or the search order would decide.
-            assert family == 'clang', 'resolved by -fprebuilt-module-path search'
+            # build.ninja may quote each argument ("/ifcSearchDir" "dir" on
+            # Windows), so a directory ends at a quote as well as a space.
+            search_flag = {'clang': r'-fprebuilt-module-path=([^"\s]+)',
+                           'msvc': r'/ifcSearchDir"? "?([^"\s]+)'}[family]
             bmi_file = self._bmi_file(module_name)
             for out, args in self.module_compile_args().items():
-                if not out.startswith(f'{consumer}.p/'):
+                if not out.replace('\\', '/').startswith(pdir):
                     continue
-                hits = [f'{d}/{bmi_file}' for d in re.findall(r'-fprebuilt-module-path=(\S+)', args)
+                hits = [f'{d}/{bmi_file}' for d in re.findall(search_flag, args)
                         if os.path.isfile(os.path.join(self.builddir, d, bmi_file))]
                 self.assertLessEqual(len(hits), 1, f'{out}: {module_name} is in more than one search dir: {hits}')
                 found.update(h.replace('\\', '/') for h in hits)
@@ -883,10 +889,27 @@ class CppModulesTestMixin:
         self.assertEqual(self.public_bmi_matches('shadowed'),
                          [self.bmi_path('shadowed', target='bprov')])
 
-    def check_import_std_reuse(self) -> None:
+    def check_module_edges_use_response_files(self, extra_args: T.Sequence[str] = ()) -> None:
+        """Every edge carrying a target's module search directories -- its
+        compiles, its scans, and a BMI-only variant's compiles -- may outgrow
+        a command line, one directory per linked provider. Forced past the
+        threshold, each goes through a response file and the build still
+        builds, runs and is a no-op."""
+        env = {'MESON_RSP_THRESHOLD': '0'}
+        self.init(os.path.join(self.unit_test_dir, '166 bmi classes'),
+                  extra_args=list(extra_args), override_envvars=env)
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            used = {m for m in re.findall(r'^build [^\n]*?: (\S+_RSP)\b', f.read(), re.M)}
+        for kind in ('MODULE_COMPILER', 'MODULE_SCAN', 'BMI_VARIANT'):
+            self.assertTrue(any(kind in r for r in used), f'no {kind} edge uses a response file: {used}')
+        self.build(override_envvars={**self.NO_CCACHE, **env})
+        self.run_tests()
+        self.assertBuildIsNoop()
+
+    def check_import_std_reuse(self, extra_args: T.Sequence[str] = ()) -> None:
         """Every consumer of dependency('std') in one BMI class resolves the
         std target's one BMI; a divergent consumer gets the single variant."""
-        self.build_and_check_modules('220 import std reuse')
+        self.build_and_check_modules('220 import std reuse', extra_args=extra_args)
         std = '__meson_cxx_std'
         root = self.bmi_root(std)
         class_dirs = self.bmi_class_dirs(std)
@@ -895,8 +918,9 @@ class CppModulesTestMixin:
             self.assertTrue(os.path.isfile(os.path.join(root, d, self._bmi_file('std'))))
         self.assertEqual(len(self.bmi_variant_ids()), 1, 'expected exactly one BMI variant of std')
         progs = ('proga', 'progb', 'progc', 'progdiv')
+        std_lib = os.path.basename(self.target_output(std))
         for p in progs:
-            self.assertEqual(self.count_on_link_line(p, 'lib__meson_cxx_std.a'), 1,
+            self.assertEqual(self.count_on_link_line(self.target_output(p), std_lib), 1,
                              f'{p} must link the std library exactly once')
             self.assert_resolves_from(p, 'std', std)
         same = {self.resolved_bmi(p, 'std') for p in progs[:3]}

@@ -623,7 +623,7 @@ class BmiVariant:
 # providing target's own (NinjaBackend._module_bmi_dir) rather than in the
 # shared cache of their BMI class. Transitional, while the families move over
 # one at a time.
-PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang'})
+PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang', 'msvc'})
 
 
 @dataclass(frozen=True)
@@ -4346,6 +4346,9 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         command = compiler.get_exelist(ccache=False)
         description = 'Precompiling C++ module BMI $out'
         family = compiler.cpp_module_family()
+        # $ARGS carries a search directory per linked module provider, so it
+        # may outgrow a command line just as the compile edge's does.
+        options = self._rsp_options(compiler)
         if family == 'msvc':
             # The per-unit /interface or /internalPartition flag rides $ARGS
             # (added by the variant edge), so the shared rule can serve both an
@@ -4353,7 +4356,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             args = ['$ARGS'] + NinjaCommandArg.list(
                 ['/showIncludes', '/ifcOnly',
                  '/ifcOutput', '$out', '/c', '$in'], Quoting.none)
-            self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc'))
+            self.add_rule(NinjaRule(rulename, command, args, description, deps='msvc', **options))
             return
         depargs = NinjaCommandArg.list(compiler.get_dependency_gen_args('$out', '$DEPFILE'), Quoting.none)
         if family == 'gcc':
@@ -4368,7 +4371,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         else:
             args = ['$ARGS'] + depargs + ['-x', 'c++-module', '--precompile', '$in', '-o', '$out']
         self.add_rule(NinjaRule(rulename, command, args,
-                                description, deps='gcc', depfile='$DEPFILE'))
+                                description, deps='gcc', depfile='$DEPFILE', **options))
 
     def generate_cpp_module_scan_rule(self, compiler: Compiler) -> None:
         rulename = self.get_compiler_rule_name('cpp', compiler.for_machine, 'MODULE_SCAN')
@@ -4376,6 +4379,11 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             return
         description = 'Scanning $in for C++ module dependencies'
         family = compiler.cpp_module_family()
+        # $ARGS is the compile edge's, search directories and all, so a scan
+        # may need a response file exactly when its compile does. Every
+        # scanner here reads one: cl and GCC natively, clang-scan-deps for its
+        # whole command line, the wrapped compile command included.
+        options = self._rsp_options(compiler)
         if family == 'clang':
             # Clang's scanner is the separate clang-scan-deps tool, wrapping
             # the full compile command after '--'. It preprocesses with the
@@ -4393,7 +4401,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
                 compiler.get_exelist(ccache=False) + \
                 NinjaCommandArg.list(['$ARGS', '-c', '$in', '-o', '$OBJ',
                                       '-MD', '-MF', '$DEPFILE'], Quoting.none)
-            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
+            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE',
+                             **options)
             self.add_rule(rule)
             return
         # No compiler cache, as on the module compile edges it feeds (see
@@ -4410,9 +4419,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # so the scan there tracks only its source (generated-header existence is
         # covered by order-only deps in generate_cpp_module_scan).
         if family == 'gcc':
-            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE')
+            rule = NinjaRule(rulename, command, args, description, deps='gcc', depfile='$DEPFILE',
+                             **options)
         else:
-            rule = NinjaRule(rulename, command, args, description)
+            rule = NinjaRule(rulename, command, args, description, **options)
         self.add_rule(rule)
 
     def generate_cpp_header_unit_rule(self, compiler: Compiler) -> None:
@@ -5420,9 +5430,13 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
             key = self._bmi_class_key_of(target)
-            output_dir = private_dir if private_dir is not None \
-                and self._is_private_module_source(target, src) \
-                else self._module_bmi_dir(target, key)
+            # Only an interface unit writes a BMI, and only a target that has
+            # interfaces has its own BMI directories to write it to.
+            output_dir: T.Optional[str] = None
+            if is_module_interface:
+                output_dir = private_dir if private_dir is not None \
+                    and self._is_private_module_source(target, src) \
+                    else self._module_bmi_dir(target, key)
             modargs = compiler.get_module_compile_args(
                 self._module_search_dirs(target, key, private_dir), output_dir)
             module_family = compiler.cpp_module_family()

@@ -563,10 +563,11 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('149 msvc cpp modules',
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'dot.mod.sub'])
-        # A single-class build keeps the flat ifc.cache (bmis= above asserted
-        # the flat BMI paths) and plain compile edges: module-resolution args
-        # ride /ifcSearchDir, so nothing pushes a compile into a response file.
-        self.assertEqual(self.bmi_class_dirs('modlib'), [])
+        # A single-class build gives each provider one BMI-class directory
+        # and plain compile edges: module-resolution args ride /ifcSearchDir,
+        # one per linked provider, so nothing pushes a compile into a
+        # response file.
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             for line in f:
                 if line.startswith('build '):
@@ -803,6 +804,30 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 if line.strip().startswith('ARGS =') and '.ifc' in line:
                     self.assertIn('/headerUnit', line)
 
+    # The both_libraries() case of fixture 219 does not apply: a Windows
+    # static and shared library share one object, so nothing compiles the
+    # interface twice.
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_duplicate_module_names(self):
+        self.check_duplicate_module_names()
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_duplicate_module_names_one_link(self):
+        self.check_duplicate_module_names_one_link()
+
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_module_moves_between_providers(self):
+        self.check_module_moves_between_providers()
+
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    def test_msvc_module_edges_use_response_files(self):
+        self.check_module_edges_use_response_files(extra_args=self._MSVC_TWO_CLASS_ARGS)
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='msvc')
+    def test_msvc_import_std_reuse(self):
+        # cl has no cpp_std=c++23.
+        self.check_import_std_reuse(extra_args=['-Dcpp_std=c++latest'])
+
     @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler='msvc')
     def test_msvc_module_internal_partitions(self):
         # An internal (implementation) partition on MSVC: `module pkg:impl;` has
@@ -910,7 +935,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # Flip a module between public and private across reconfigures on cl:
         # secret is imported only by mylib's own implementation unit, so the flip
         # is legal every phase; what changes is whether cl's /ifcOutput writes
-        # its BMI into the shared ifc.cache (public, where linkers of mylib can
+        # its BMI into mylib's public BMI dir (public, where linkers of mylib can
         # resolve it) or mylib's own @bmi-private dir (private, where nothing
         # outside mylib can), and whether mylib publishes it. public -> private
         # -> public: each phase builds, runs and settles to a no-op, and the
@@ -1043,8 +1068,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_private_executable_modules(self):
         # Nothing can ever link an executable, so its modules are private to
-        # it: two executables exporting the same module name must not
-        # collide over the shared ifc.cache directory. cl writes BMIs by
+        # it: two executables exporting the same module name must each keep
+        # their own in their private directory. cl writes BMIs by
         # /ifcOutput directory, so this must be confirmed on disk, not just
         # from the command line.
         self.build_and_check_modules('185 private executable modules')
@@ -1087,11 +1112,11 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self._private_bmi_names(private_dir),
                          {'detail', 'hidden', 'hidden-impl'},
                          'mylib private interfaces did not all land in the private dir')
-        # Neither private module ever reaches the shared cache: only the
-        # public ones (api, pub) may live there.
+        # Neither private module is ever published: only the public ones
+        # (api, pub) may have a public BMI.
         for name in ('detail', 'hidden', 'hidden-impl'):
-            self.assertFalse(os.path.isfile(self.bmi_path(name)),
-                             f'{name} must not be in the shared BMI cache')
+            self.assertEqual(self.public_bmi_matches(name), [],
+                             f'{name} must not have a public BMI')
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='msvc')
     def test_msvc_cpp_private_module_reachability_warns(self):
@@ -1165,9 +1190,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # cl writes BMIs by /ifcOutput directory, so confirm on disk that the
         # private partition landed in the target's private dir...
         self.assertEqual(self._private_bmi_names(next(iter(dirs))), {'pkg-impl'})
-        # ...and never in the shared cache.
-        self.assertFalse(os.path.isfile(self.bmi_path('pkg:impl')),
-                         'a private partition must not be in the shared BMI cache')
+        # ...and is never published.
+        self.assertEqual(self.public_bmi_matches('pkg:impl'), [],
+                         'a private partition must not have a public BMI')
 
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_cpp_private_module_interfaces_direct_import(self):
@@ -1235,15 +1260,12 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_cpp_private_module_interfaces_name_collision(self):
         # Two libraries each privately export a module literally named
-        # "detail", each linked into its own separate executable: privacy
-        # removes the whole-build-tree name claim, so this builds even
-        # though nothing here would pass the public-module uniqueness check.
+        # "detail", each linked into its own separate executable: this builds,
+        # and neither ever publishes it.
         self.build_and_check_modules('189 two libraries private module name collision')
         dirs = self.private_bmi_dirs()
         self.assertEqual(len(dirs), 2)
-        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
-        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                         'a private module must never take a global name claim')
+        self.assertEqual(self.public_bmi_matches('detail'), [])
         # Each private dir independently holds its own same-named detail BMI.
         for d in dirs:
             self.assertEqual(self._private_bmi_names(d), {'detail'},
@@ -1275,9 +1297,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('193 same name targets private module collision')
         dirs = self.private_bmi_dirs()
         self.assertEqual(len(dirs), 2)
-        self.assertFalse(os.path.isfile(self.bmi_path('detail')))
-        self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                         'a private module must never take a global name claim')
+        self.assertEqual(self.public_bmi_matches('detail'), [])
         for d in dirs:
             self.assertEqual(self._private_bmi_names(d), {'detail'},
                              f'{d}: expected its own private detail BMI')
@@ -1355,8 +1375,8 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(dirs), 1)
         self.assertEqual(self._private_bmi_names(next(iter(dirs))), {'priv'},
                          "the executable's public module must not land in its private dir")
-        self.assertFalse(os.path.isfile(self.bmi_path('priv')),
-                         'a private module must not reach the shared BMI cache')
+        self.assertEqual(self.public_bmi_matches('priv'), [],
+                         'a private module must not have a public BMI')
 
     @requires_cpp_module_caps('modules', compiler='msvc')
     def test_msvc_export_dynamic_executable_private_module_import(self):

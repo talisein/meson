@@ -2604,6 +2604,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_both_libraries_module_compiled_twice(self):
         self.check_both_libraries_module_compiled_twice()
 
+    @requires_cpp_module_caps('modules', 'bmi_classes', compiler=('gcc', 'clang'))
+    def test_module_edges_use_response_files(self):
+        self.check_module_edges_use_response_files()
+
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_moves_between_providers(self):
         self.check_module_moves_between_providers()
