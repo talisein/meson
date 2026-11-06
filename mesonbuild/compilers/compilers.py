@@ -108,6 +108,11 @@ SUFFIX_TO_LANG: T.Mapping[str, Language] = dict(itertools.chain(*(
 LANGUAGES_USING_LDFLAGS = {'objcpp', 'cpp', 'objc', 'c', 'fortran', 'd', 'cuda'}
 # Languages that should use CPPFLAGS arguments when linking.
 LANGUAGES_USING_CPPFLAGS = {'c', 'cpp', 'objc', 'objcpp'}
+
+# GCC/Clang's forced-include flags, in the lead-less body form split_bmi_args
+# matches. Each takes a mandatory argument, attached (-includex.h) or detached
+# (-include x.h).
+GNU_FORCED_INCLUDE_FLAGS = frozenset({'include', 'imacros'})
 soregex = re.compile(r'.*\.so(\.[0-9]+)?(\.[0-9]+)?(\.[0-9]+)?$')
 
 # Environment variables that each lang uses.
@@ -1629,6 +1634,31 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return frozenset(flag.lstrip('-') for flag, _ in self.get_include_dir_flags())
 
+    def _bmi_preprocessor_flags(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str]]:
+        """(flags, protected prefixes) of the preprocessor superset: the flags
+        that only set the preprocessor state a translation unit starts from
+        (macros and forced includes), in the body form split_bmi_args matches.
+
+        Every flag takes a mandatory argument, attached (-DFOO, /FIx.h) or
+        detached (-D FOO, /FI x.h), so each is both a prefix and a consuming
+        entry. A named module's BMI class ignores them -- its interface is
+        preprocessed once, under the provider's flags, and importers see that
+        preprocessing -- while a header unit's splits on them, since its content
+        is its importer's preprocessing. A protected prefix keeps a flag that
+        merely shares a superset spelling out of it: Clang's -include-pch names a
+        precompiled header, not text to preprocess.
+
+        One inventory per argument syntax, like _bmi_irrelevant_include_flags, so
+        the named-module and header-unit keys draw from the same list. A compiler
+        family with neither syntax has no superset: every flag splits both keys.
+        """
+        syntax = self.get_argument_syntax()
+        if syntax == 'msvc':
+            return frozenset({'D', 'U', 'FI'}), frozenset()
+        if syntax == 'gcc':
+            return frozenset({'D', 'U'}) | GNU_FORCED_INCLUDE_FLAGS, frozenset({'include-pch'})
+        return frozenset(), frozenset()
+
     def get_depfile_format(self) -> str:
         return 'msvc' if self.get_argument_syntax() == 'msvc' else 'gcc'
 
@@ -1808,12 +1838,18 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return frozenset(), frozenset(), frozenset(), frozenset()
 
-    def split_bmi_args(self, args: T.Iterable[str]) -> T.Tuple[T.List[str], T.List[str]]:
+    def split_bmi_args(self, args: T.Iterable[str], *,
+                       header_unit: bool = False) -> T.Tuple[T.List[str], T.List[str]]:
         """Partition a compile command into (BMI-relevant, BMI-irrelevant)
         flags per get_bmi_irrelevant_args, original order preserved in each
         half. Unrecognized flags are relevant, so an unknown divergence splits
         the class rather than sharing a potentially incompatible BMI. A
-        protected-prefix match wins over all three other categories.
+        protected-prefix match wins over every other category.
+
+        The preprocessor superset (_bmi_preprocessor_flags) is irrelevant to a
+        named module's BMI and relevant to a header unit's: `header_unit`
+        selects which split this is. A superset flag carries its detached
+        argument into the same half.
 
         A flag and a detached argument of its own always land in the same half,
         adjacent and in order: the halves are re-concatenated to replay a
@@ -1832,6 +1868,8 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         fallback into a clean strip.
         """
         exact, prefixes, consuming, protected = self.get_bmi_irrelevant_args()
+        superset, superset_protected = self._bmi_preprocessor_flags()
+        protected = protected | superset_protected
         strippable_prefixes = prefixes | consuming
         leads = ('--', '-', '/') if self.get_argument_syntax() == 'msvc' else ('--', '-')
 
@@ -1854,6 +1892,16 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
             if any(body.startswith(p) for p in protected):
                 relevant.append(arg)
                 continue
+            if any(body.startswith(s) for s in superset):
+                # Unambiguous, unlike an irrelevant prefix below: the flag
+                # itself is the detached spelling, and any longer body is the
+                # attached one, which takes no following token.
+                half = relevant if header_unit else irrelevant
+                half.append(arg)
+                if body in superset and following is not None:
+                    half.append(following)
+                    i += 1
+                continue
             if body in consuming:
                 irrelevant.append(arg)
                 if following is not None:
@@ -1874,12 +1922,20 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
             relevant.append(arg)
         return relevant, irrelevant
 
-    def get_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
-        """The BMI equivalence class of a compile command: the sorted flags
-        surviving get_bmi_irrelevant_args stripping. Targets with equal keys
-        may legitimately share BMIs.
+    def get_module_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
+        """The named-module BMI equivalence class of a compile command: the
+        sorted flags surviving get_bmi_irrelevant_args stripping, with the
+        preprocessor superset stripped too. Targets with equal keys may
+        legitimately share named-module BMIs.
         """
         return tuple(sorted(self.split_bmi_args(args)[0]))
+
+    def get_header_unit_bmi_class_key(self, args: T.Iterable[str]) -> T.Tuple[str, ...]:
+        """The header-unit BMI equivalence class of a compile command: the
+        named-module key plus the preprocessor superset, which a header unit's
+        BMI freezes. Never coarser than get_module_bmi_class_key.
+        """
+        return tuple(sorted(self.split_bmi_args(args, header_unit=True)[0]))
 
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules.

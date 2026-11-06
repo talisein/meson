@@ -484,8 +484,10 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # A speculative list of Clang flags a BMI does not depend on, erring
-        # towards leaving a flag relevant. Defines are deliberately
-        # absent: a -D difference must split the BMI class. fPIC/fPIE are
+        # towards leaving a flag relevant. The preprocessor flags (-D, -U,
+        # -include, -imacros) are not listed: split_bmi_args strips them from a
+        # named module's key and keeps them in a header unit's (see
+        # _bmi_preprocessor_flags). fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable). A user-passed -fmodules is intentionally NOT stripped:
         # implicit Clang header modules genuinely change the compile. The
@@ -918,8 +920,10 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # A speculative list of GCC flags a BMI does not depend on, erring
-        # towards leaving a flag relevant. Defines are deliberately
-        # absent: a -D difference must split the BMI class. fPIC/fPIE are
+        # towards leaving a flag relevant. The preprocessor flags (-D, -U,
+        # -include, -imacros) are not listed: split_bmi_args strips them from a
+        # named module's key and keeps them in a header unit's (see
+        # _bmi_preprocessor_flags). fPIC/fPIE are
         # listed because Meson injects them asymmetrically (library vs
         # executable); -Mno-modules shapes only the depfile, never the BMI. The
         # include-dir flags are not hand-listed: they are derived from
@@ -1415,9 +1419,10 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # A speculative list of MSVC flags a BMI does not depend on, erring
-        # towards leaving a flag relevant. Defines are deliberately
-        # absent (a -D difference must split the BMI class) and so is /O
-        # (conservative: optimization divergence splits here). The include-dir
+        # towards leaving a flag relevant. The preprocessor flags (/D, /U, /FI)
+        # are not listed: split_bmi_args strips them from a named module's key
+        # and keeps them in a header unit's (see _bmi_preprocessor_flags). /O is
+        # absent too (conservative: optimization divergence splits here). The include-dir
         # flags are not hand-listed: they are derived from get_include_dir_flags
         # (see _bmi_irrelevant_include_flags) so the class key and the identity
         # machinery share one inventory of them -- and that covers the unix-form

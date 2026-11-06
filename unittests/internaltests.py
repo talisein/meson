@@ -573,143 +573,181 @@ Thread model: posix'''), '21.9.0')
         msvc = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
 
         base = ['-std=c++20', '-DBAR', '-pthread']
-        # Allowlisted differences do not split.
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-O2', '-Ia', '-Wall', '-fPIC']),
-                         gcc.get_bmi_class_key(base + ['-O0', '-Ib', '-Werror']))
-        # A family prefix ('W', 'O', 'w', 'g') is only safe as far as every
-        # real flag sharing that leading letter is BMI-irrelevant. Each
-        # assertion below is a regression lock for one flag `man gcc`/`clang
-        # --help-hidden` shows sharing a leading letter with an allowlisted
-        # family while meaning something unrelated and BMI-affecting.
-        #
-        # -Wa,/-Wp,/-Wl, forward opaque, comma-delimited content to another
-        # tool stage -- -Wp, in particular can carry a real -D -- and must
-        # not be swallowed by the bare 'W' meant for -Wall et al.
-        self.assertNotEqual(gcc.get_bmi_class_key(base),
-                            gcc.get_bmi_class_key(base + ['-Wp,-DFOO=1']))
-        self.assertNotEqual(gcc.get_bmi_class_key(base),
-                            gcc.get_bmi_class_key(base + ['-Wl,--as-needed']))
-        self.assertNotEqual(gcc.get_bmi_class_key(base),
-                            gcc.get_bmi_class_key(base + ['-Wa,--noexecstack']))
-        self.assertNotEqual(clang.get_bmi_class_key(base),
-                            clang.get_bmi_class_key(base + ['-Wp,-DFOO=1']))
-        # -ObjC/-ObjC++ select a different source language, not an
-        # optimization level, despite sharing 'O' with -O0../-O3.
-        self.assertNotEqual(gcc.get_bmi_class_key(base),
-                            gcc.get_bmi_class_key(base + ['-ObjC']))
-        self.assertNotEqual(clang.get_bmi_class_key(base),
-                            clang.get_bmi_class_key(base + ['-ObjC++']))
-        # --gcc-toolchain= picks an entirely different GCC install
-        # (headers/libs/macros), despite sharing 'g' with Clang's -g/-gdwarf/...
-        self.assertNotEqual(clang.get_bmi_class_key(base),
-                            clang.get_bmi_class_key(base + ['--gcc-toolchain=/opt/gcc-13']))
-        # -working-directory changes how relative #includes resolve, despite
-        # sharing 'w' with Clang's -w.
-        self.assertNotEqual(clang.get_bmi_class_key(base),
-                            clang.get_bmi_class_key(base + ['-working-directory', '/src']))
-        # -wrapper forwards an opaque, comma-separated program+args list (the
-        # same shape as -Wa,/-Wp,/-Wl,), despite sharing 'w' with GCC's -w.
-        self.assertNotEqual(gcc.get_bmi_class_key(base),
-                            gcc.get_bmi_class_key(base + ['-wrapper', 'gdb,--args']))
-        # Ordinary -W warning flags that merely share the leading letter must
-        # keep stripping: this must not regress into treating every -W* as
-        # relevant.
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-Wpedantic']),
-                         gcc.get_bmi_class_key(base))
-        # Two-token and joined include spellings are both stripped.
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-isystem', '/x']),
-                         gcc.get_bmi_class_key(base + ['-isystem/y']))
-        # Every include-dir flag get_include_dir_flags knows -- not just -I and
-        # -isystem -- is BMI-irrelevant: two targets differing only in an
-        # -iquote or -idirafter directory share a class. Regression lock for the
-        # class key splitting on an include dir the identity machinery already
-        # resolves the same, which built a redundant BMI per split. Both the
-        # two-token and the joined spelling strip (the joined form goes through
-        # the prefix branch, the two-token form through the consuming branch).
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-iquote', '/a']),
-                         gcc.get_bmi_class_key(base + ['-iquote', '/b']))
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-iquote/a']),
-                         gcc.get_bmi_class_key(base))
-        self.assertEqual(gcc.get_bmi_class_key(base + ['-idirafter', '/a']),
-                         gcc.get_bmi_class_key(base + ['-idirafter', '/b']))
-        self.assertEqual(clang.get_bmi_class_key(base + ['-iquote', '/a']),
-                         clang.get_bmi_class_key(base))
-        self.assertEqual(clang.get_bmi_class_key(base + ['-idirafter', '/a']),
-                         clang.get_bmi_class_key(base))
-        # Non-allowlisted differences split, unknown flags included.
-        for divergent in (['-DFOO'], ['-std=c++23'], ['-ftrivial-auto-var-init=zero']):
-            self.assertNotEqual(gcc.get_bmi_class_key(base),
-                                gcc.get_bmi_class_key(base + divergent), divergent)
-        self.assertNotEqual(gcc.get_bmi_class_key(['-std=c++20']),
-                            gcc.get_bmi_class_key(['-std=c++20', '-pthread']))
 
-        # Clang additionally strips -g and its module-machinery flags.
-        self.assertEqual(clang.get_bmi_class_key(base + ['-g', '-fmodule-file=m=x.pcm']),
-                         clang.get_bmi_class_key(base))
-        self.assertNotEqual(clang.get_bmi_class_key(base),
-                            clang.get_bmi_class_key(base + ['-DFOO']))
+        def keys(comp):
+            return (comp.get_module_bmi_class_key, comp.get_header_unit_bmi_class_key)
 
-        # MSVC: warnings and BMI plumbing are stripped (both slash and dash
-        # spellings), defines and /std: divergences split.
-        mbase = ['/std:c++20', '/DBAR']
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/W4', '-Ipath', '-isystem', '/x']),
-                         msvc.get_bmi_class_key(mbase + ['/w']))
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/reference', 'm=x.ifc']),
-                         msvc.get_bmi_class_key(mbase))
-        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
-                            msvc.get_bmi_class_key(mbase + ['/DFOO']))
-        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
-                            msvc.get_bmi_class_key(['/std:c++23', '/DBAR']))
-        # cl sees -iquote/-idirafter in unix form too (Meson emits them that way
-        # until native conversion folds them into /I at write time), so they
-        # strip on an msvc command line just as on a GNU one. Regression lock for
-        # the observed cl defect: an -iquote dir passed via cpp_args leaking into
-        # the class key and splitting same-file header-unit targets apart.
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['-iquote', '/a']),
-                         msvc.get_bmi_class_key(mbase))
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['-idirafter', '/a']),
-                         msvc.get_bmi_class_key(mbase))
-        # The '/' lead is MSVC-only: a stray absolute path must survive on a
-        # GNU-syntax command line even though 'W' would prefix-match it.
-        self.assertIn('/Work/lib.a', gcc.get_bmi_class_key(base + ['/Work/lib.a']))
+        # Everything but the preprocessor superset is common to both keys: a
+        # header unit's key is the named-module key plus the superset.
+        for gk, ck, mk in zip(keys(gcc), keys(clang), keys(msvc)):
+            # Allowlisted differences do not split.
+            self.assertEqual(gk(base + ['-O2', '-Ia', '-Wall', '-fPIC']),
+                             gk(base + ['-O0', '-Ib', '-Werror']))
+            # A family prefix ('W', 'O', 'w', 'g') is only safe as far as every
+            # real flag sharing that leading letter is BMI-irrelevant. Each
+            # assertion below is a regression lock for one flag `man gcc`/`clang
+            # --help-hidden` shows sharing a leading letter with an allowlisted
+            # family while meaning something unrelated and BMI-affecting.
+            #
+            # -Wa,/-Wp,/-Wl, forward opaque, comma-delimited content to another
+            # tool stage -- -Wp, in particular can carry a real -D -- and must
+            # not be swallowed by the bare 'W' meant for -Wall et al.
+            self.assertNotEqual(gk(base),
+                                gk(base + ['-Wp,-DFOO=1']))
+            self.assertNotEqual(gk(base),
+                                gk(base + ['-Wl,--as-needed']))
+            self.assertNotEqual(gk(base),
+                                gk(base + ['-Wa,--noexecstack']))
+            self.assertNotEqual(ck(base),
+                                ck(base + ['-Wp,-DFOO=1']))
+            # -ObjC/-ObjC++ select a different source language, not an
+            # optimization level, despite sharing 'O' with -O0../-O3.
+            self.assertNotEqual(gk(base),
+                                gk(base + ['-ObjC']))
+            self.assertNotEqual(ck(base),
+                                ck(base + ['-ObjC++']))
+            # --gcc-toolchain= picks an entirely different GCC install
+            # (headers/libs/macros), despite sharing 'g' with Clang's -g/-gdwarf/...
+            self.assertNotEqual(ck(base),
+                                ck(base + ['--gcc-toolchain=/opt/gcc-13']))
+            # -working-directory changes how relative #includes resolve, despite
+            # sharing 'w' with Clang's -w.
+            self.assertNotEqual(ck(base),
+                                ck(base + ['-working-directory', '/src']))
+            # -wrapper forwards an opaque, comma-separated program+args list (the
+            # same shape as -Wa,/-Wp,/-Wl,), despite sharing 'w' with GCC's -w.
+            self.assertNotEqual(gk(base),
+                                gk(base + ['-wrapper', 'gdb,--args']))
+            # Ordinary -W warning flags that merely share the leading letter must
+            # keep stripping: this must not regress into treating every -W* as
+            # relevant.
+            self.assertEqual(gk(base + ['-Wpedantic']),
+                             gk(base))
+            # Two-token and joined include spellings are both stripped.
+            self.assertEqual(gk(base + ['-isystem', '/x']),
+                             gk(base + ['-isystem/y']))
+            # Every include-dir flag get_include_dir_flags knows -- not just -I and
+            # -isystem -- is BMI-irrelevant: two targets differing only in an
+            # -iquote or -idirafter directory share a class. Regression lock for the
+            # class key splitting on an include dir the identity machinery already
+            # resolves the same, which built a redundant BMI per split. Both the
+            # two-token and the joined spelling strip (the joined form goes through
+            # the prefix branch, the two-token form through the consuming branch).
+            self.assertEqual(gk(base + ['-iquote', '/a']),
+                             gk(base + ['-iquote', '/b']))
+            self.assertEqual(gk(base + ['-iquote/a']),
+                             gk(base))
+            self.assertEqual(gk(base + ['-idirafter', '/a']),
+                             gk(base + ['-idirafter', '/b']))
+            self.assertEqual(ck(base + ['-iquote', '/a']),
+                             ck(base))
+            self.assertEqual(ck(base + ['-idirafter', '/a']),
+                             ck(base))
+            # Non-allowlisted differences split, unknown flags included.
+            for divergent in (['-std=c++23'], ['-ftrivial-auto-var-init=zero']):
+                self.assertNotEqual(gk(base),
+                                    gk(base + divergent), divergent)
+            self.assertNotEqual(gk(['-std=c++20']),
+                                gk(['-std=c++20', '-pthread']))
 
-        # cpp_eh (/EH*) must split the class: 'E' is exact-only, not a
-        # prefix, so it no longer swallows /EHsc, /EHs-c-, /EHa -- regression
-        # lock for the bug where bare 'E' as a prefix merged exception-model
-        # divergences into one class.
-        self.assertNotEqual(msvc.get_bmi_class_key(mbase + ['/EHsc']),
-                            msvc.get_bmi_class_key(mbase + ['/EHs-c-']))
-        self.assertNotEqual(msvc.get_bmi_class_key(mbase + ['/EHsc']),
-                            msvc.get_bmi_class_key(mbase + ['/EHa']))
-        self.assertNotEqual(msvc.get_bmi_class_key(mbase),
-                            msvc.get_bmi_class_key(mbase + ['/EHsc']))
-        # Bare /E (preprocess-only) still strips as before -- the exact-set
-        # move must not regress the original stripping intent.
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/E']),
-                         msvc.get_bmi_class_key(mbase))
-        # Spot-check two more entries moved from prefix- to exact-matching:
-        # still stripped when bare.
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/nologo']),
-                         msvc.get_bmi_class_key(mbase))
-        self.assertEqual(msvc.get_bmi_class_key(mbase + ['/TP']),
-                         msvc.get_bmi_class_key(mbase))
+            # Clang additionally strips -g and its module-machinery flags.
+            self.assertEqual(ck(base + ['-g', '-fmodule-file=m=x.pcm']),
+                             ck(base))
 
-        # A suffix-spelled flag whose argument is a separate token strips as a
-        # unit: neither the flag nor its argument reaches the key, so two
-        # targets differing only in a prebuilt header unit or an external
-        # include dir share a BMI class. The regression this locks: the bare
-        # argument alone landing in the key (splitting the class on it, and --
-        # worse -- being replayed without its flag).
-        for pair in (['/headerUnit:quote', 'a.h=a.ifc'],
-                     ['/headerUnit:angle', 'vector=vector.ifc'],
-                     ['/headerUnit', 'a.h=a.ifc'],
-                     ['/headerName:angle', 'vector'],
-                     ['/external:I', 'C:/sdk/include'],
-                     ['/sourceDependencies', 'dep.json'],
-                     ['/ifcOutput', 'out/']):
-            key = msvc.get_bmi_class_key(mbase + pair)
-            self.assertEqual(key, msvc.get_bmi_class_key(mbase), pair)
-            self.assertNotIn(pair[1], key)
+            # MSVC: warnings and BMI plumbing are stripped (both slash and dash
+            # spellings); /std: divergences split.
+            mbase = ['/std:c++20', '/DBAR']
+            self.assertEqual(mk(mbase + ['/W4', '-Ipath', '-isystem', '/x']),
+                             mk(mbase + ['/w']))
+            self.assertEqual(mk(mbase + ['/reference', 'm=x.ifc']),
+                             mk(mbase))
+            self.assertNotEqual(mk(mbase),
+                                mk(['/std:c++23', '/DBAR']))
+            # cl sees -iquote/-idirafter in unix form too (Meson emits them that way
+            # until native conversion folds them into /I at write time), so they
+            # strip on an msvc command line just as on a GNU one. Regression lock for
+            # the observed cl defect: an -iquote dir passed via cpp_args leaking into
+            # the class key and splitting same-file header-unit targets apart.
+            self.assertEqual(mk(mbase + ['-iquote', '/a']),
+                             mk(mbase))
+            self.assertEqual(mk(mbase + ['-idirafter', '/a']),
+                             mk(mbase))
+            # The '/' lead is MSVC-only: a stray absolute path must survive on a
+            # GNU-syntax command line even though 'W' would prefix-match it.
+            self.assertIn('/Work/lib.a', gk(base + ['/Work/lib.a']))
+
+            # cpp_eh (/EH*) must split the class: 'E' is exact-only, not a
+            # prefix, so it no longer swallows /EHsc, /EHs-c-, /EHa -- regression
+            # lock for the bug where bare 'E' as a prefix merged exception-model
+            # divergences into one class.
+            self.assertNotEqual(mk(mbase + ['/EHsc']),
+                                mk(mbase + ['/EHs-c-']))
+            self.assertNotEqual(mk(mbase + ['/EHsc']),
+                                mk(mbase + ['/EHa']))
+            self.assertNotEqual(mk(mbase),
+                                mk(mbase + ['/EHsc']))
+            # Bare /E (preprocess-only) still strips as before -- the exact-set
+            # move must not regress the original stripping intent.
+            self.assertEqual(mk(mbase + ['/E']),
+                             mk(mbase))
+            # Spot-check two more entries moved from prefix- to exact-matching:
+            # still stripped when bare.
+            self.assertEqual(mk(mbase + ['/nologo']),
+                             mk(mbase))
+            self.assertEqual(mk(mbase + ['/TP']),
+                             mk(mbase))
+
+            # A suffix-spelled flag whose argument is a separate token strips as a
+            # unit: neither the flag nor its argument reaches the key, so two
+            # targets differing only in a prebuilt header unit or an external
+            # include dir share a BMI class. The regression this locks: the bare
+            # argument alone landing in the key (splitting the class on it, and --
+            # worse -- being replayed without its flag).
+            for pair in (['/headerUnit:quote', 'a.h=a.ifc'],
+                         ['/headerUnit:angle', 'vector=vector.ifc'],
+                         ['/headerUnit', 'a.h=a.ifc'],
+                         ['/headerName:angle', 'vector'],
+                         ['/external:I', 'C:/sdk/include'],
+                         ['/sourceDependencies', 'dep.json'],
+                         ['/ifcOutput', 'out/']):
+                key = mk(mbase + pair)
+                self.assertEqual(key, mk(mbase), pair)
+                self.assertNotIn(pair[1], key)
+
+        # The preprocessor superset (macros and forced includes, every
+        # spelling) never splits a named module's BMI class -- its interface is
+        # preprocessed once, under the provider's flags -- and always splits a
+        # header unit's, whose content is the importer's preprocessing.
+        for comp, cbase, flags in (
+                (gcc, base, (['-DFOO'], ['-D', 'FOO'], ['-UBAR'], ['-U', 'BAR'],
+                             ['-include', 'x.h'], ['-includex.h'],
+                             ['-imacros', 'x.h'], ['-imacrosx.h'])),
+                (clang, base, (['-DFOO'], ['-D', 'FOO'], ['-UBAR'], ['-include', 'x.h'],
+                               ['-imacros', 'x.h'])),
+                (msvc, mbase, (['/DFOO'], ['-DFOO'], ['/D', 'FOO'], ['/UBAR'], ['/U', 'BAR'],
+                               ['/FI', 'x.h'], ['/FIx.h'], ['-FIx.h']))):
+            for flag in flags:
+                self.assertEqual(comp.get_module_bmi_class_key(cbase + flag),
+                                 comp.get_module_bmi_class_key(cbase), flag)
+                self.assertNotEqual(comp.get_header_unit_bmi_class_key(cbase + flag),
+                                    comp.get_header_unit_bmi_class_key(cbase), flag)
+                # A detached argument travels with its flag: never left behind
+                # in the named-module key.
+                self.assertNotIn(flag[-1], comp.get_module_bmi_class_key(cbase + flag), flag)
+        # The base's own define is in the header-unit key and not the
+        # named-module one.
+        self.assertIn('-DBAR', gcc.get_header_unit_bmi_class_key(base))
+        self.assertNotIn('-DBAR', gcc.get_module_bmi_class_key(base))
+        # A trailing detached flag whose argument never arrived takes nothing.
+        self.assertEqual(gcc.split_bmi_args(base + ['-D']), (['-std=c++20', '-pthread'],
+                                                             ['-DBAR', '-D']))
+        # Protected spellings stay relevant to both keys even where they share
+        # a superset prefix: -Wp, can carry a real -D, and Clang's -include-pch
+        # names a precompiled header, not text to preprocess.
+        for comp in (gcc, clang):
+            for flag in (['-Wp,-DFOO=1'], ['-include-pch', 'p.pch']):
+                for key in keys(comp):
+                    self.assertNotEqual(key(base), key(base + flag), flag)
 
         # Anti-drift tripwire: the BMI-class consuming set must cover every
         # include-dir flag get_include_dir_flags reports (dash-stripped), so the
@@ -774,12 +812,25 @@ Thread model: posix'''), '21.9.0')
         self.assertEqual(msvc.split_bmi_args(['/Foout.obj', '/W4']),
                          ([], ['/Foout.obj', '/W4']))
         self.assertEqual(msvc.split_bmi_args(['/external:W0', '/DFOO']),
+                         ([], ['/external:W0', '/DFOO']))
+        self.assertEqual(msvc.split_bmi_args(['/external:W0', '/DFOO'], header_unit=True),
                          (['/DFOO'], ['/external:W0']))
         self.assertEqual(gcc.split_bmi_args(['-Idir', '-Wall']), ([], ['-Idir', '-Wall']))
 
         # Exact-consuming flags still consume unconditionally.
         assert_paired(gcc, ['-isystem', '/x'], expect_irrelevant=True)
         assert_paired(msvc, ['/reference', 'm=x.ifc'], expect_irrelevant=True)
+
+        # A detached preprocessor-superset argument stays with its flag in
+        # either split: irrelevant to a named module, relevant to a header unit
+        # -- and in the header-unit split it must not be mistaken for an
+        # unflagged token of its own.
+        for comp, pair in ((gcc, ['-D', 'FOO']), (gcc, ['-U', 'FOO']),
+                           (gcc, ['-include', 'x.h']), (gcc, ['-imacros', 'x.h']),
+                           (msvc, ['/D', 'FOO']), (msvc, ['/FI', 'x.h']), (msvc, ['-U', 'FOO'])):
+            assert_paired(comp, pair, expect_irrelevant=True)
+            self.assertEqual(comp.split_bmi_args(pair + ['-Wall'], header_unit=True),
+                             (pair, ['-Wall']), pair)
 
     def test_cpp_std_supports_modules(self):
         # C++ modules need C++20+. The helper must accept c++20 and later in all
@@ -1046,7 +1097,7 @@ Thread model: posix'''), '21.9.0')
         cpp.get_module_bmi_suffix.return_value = suffix
         cpp.get_header_unit_consumer_args.return_value = []
         cpp.program_mapper_quotes.return_value = True
-        cpp.get_bmi_class_key.return_value = ()
+        cpp.get_header_unit_bmi_class_key.return_value = ()
         # No provider imports units here: the target declares its own, so
         # the relevant/irrelevant split is only consulted for an empty
         # provider loop.

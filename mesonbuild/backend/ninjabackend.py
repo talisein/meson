@@ -29,6 +29,7 @@ from .. import compilers
 from .. import tooldetect
 from ..arglist import CompilerArgs
 from ..compilers import Compiler, is_library
+from ..compilers.compilers import GNU_FORCED_INCLUDE_FLAGS
 from ..linkers import ArLikeLinker, RSPFileSyntax, StaticLinker, VisualStudioLikeLinkerMixin
 from ..mesonlib import (
     File, LibType, MachineChoice, MesonBugException, MesonException, OrderedSet, PerMachine,
@@ -576,7 +577,7 @@ class ImportStdInfo:
 
 @dataclass
 class BmiClassInfo:
-    """A BMI equivalence class present in this build (Compiler.get_bmi_class_key).
+    """A BMI equivalence class present in this build (Compiler.get_header_unit_bmi_class_key).
 
     digest names the BMI class whatever the number of BMI classes: the
     subdirectory of a provider's public BMI directory (_module_bmi_dir).
@@ -2045,7 +2046,8 @@ class NinjaBackend(backends.Backend):
         # The provider's BMI-irrelevant flags (its includes, warnings, ...)
         # plus the class's BMI-relevant flags; later flags win, so the class
         # overrides the provider on any conflict.
-        _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp))
+        _, irrelevant = cpp.split_bmi_args(self._generate_single_compile(provider, cpp),
+                                           header_unit=True)
         args = irrelevant + info.relevant_args
         # An interface's `import <hdr>;` must resolve this class's unit BMI,
         # reusing a class-mate target's edges when they exist. Built from the
@@ -2270,7 +2272,7 @@ class NinjaBackend(backends.Backend):
         out: T.List[str] = []
         it = iter(args)
         for arg in it:
-            for flag in ('-include', '-imacros'):
+            for flag in sorted('-' + f for f in GNU_FORCED_INCLUDE_FLAGS):
                 if arg == flag:
                     next(it, None)
                     break
@@ -2493,7 +2495,7 @@ class NinjaBackend(backends.Backend):
         it. The key is frozen per target at generation time.
         """
         cpp = target.compilers['cpp']
-        return cpp.get_bmi_class_key(self._generate_single_compile(target, cpp))
+        return cpp.get_header_unit_bmi_class_key(self._generate_single_compile(target, cpp))
 
     def _compute_bmi_class_registry(self) -> None:
         """Freeze the per-machine set of BMI equivalence classes before any
@@ -2515,7 +2517,7 @@ class NinjaBackend(backends.Backend):
             if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
                 continue
             cpp = t.compilers['cpp']
-            relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
+            relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp), header_unit=True)
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
         multi = sum(len(classes) for classes in per_machine.values()) > 1
         for machine, classes in per_machine.items():
@@ -4570,7 +4572,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # preprocessor state -- a unit built under different macros (e.g. cl
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
-            class_key = compiler.get_bmi_class_key(args)
+            class_key = compiler.get_header_unit_bmi_class_key(args)
             class_subdir = self._header_unit_class_subdir_for(target.for_machine, class_key)
             if family == 'gcc':
                 # The only place a unit that resolves nowhere is reported. The
@@ -4612,10 +4614,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         seen: T.List[T.List[str]] = []
         outputs, consumer_args, bmis = self._provision_header_unit_edges(
             compiler, target.cpp_header_units, args, class_subdir, target, seen)
-        relevant, _ = compiler.split_bmi_args(args)
+        relevant, _ = compiler.split_bmi_args(args, header_unit=True)
         for provider, units in self._imported_header_units(target, compiler):
             _, irrelevant = compiler.split_bmi_args(
-                self._generate_single_compile(provider, compiler))
+                self._generate_single_compile(provider, compiler), header_unit=True)
             composed = irrelevant + relevant
             prov_outputs, prov_args, _ = self._provision_header_unit_edges(
                 compiler, units, composed, class_subdir, provider, seen)
