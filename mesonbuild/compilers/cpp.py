@@ -477,29 +477,20 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         # resolution machinery either.
         return True
 
-    def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None,
-                                private_output: bool = False,
+    def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
+                                output_dir: T.Optional[str] = None,
                                 *, emit_output: bool = True) -> T.List[str]:
-        # Imports resolve by name lookup in the shared cache (the target's
-        # class subdir of it, when BMI classes are in play). Producers write
-        # their BMI next to the object (-fmodule-output, added per interface
-        # unit by the backend) and a harvest edge publishes it into the cache;
-        # no module name or BMI path ever appears on a command line.
-        #
-        # private_dir, set whenever the target has any private module of its
-        # own, is searched first: a private import resolves there, never in
-        # the shared cache. The shared class cache is still listed, since the
-        # target may also import its dependencies' public modules, or (for a
-        # library) have public modules of its own. private_output and
-        # emit_output are both unused here: unlike MSVC's directory-addressed
-        # /ifcOutput, Clang's own BMI never has a compile-time output directory
-        # to steer -- the harvest edge decides per-source, private or shared,
-        # where a Clang interface's BMI is published (see the backend's Clang
-        # harvest call site).
-        paths = [private_dir] if private_dir is not None else []
-        paths.append(self.get_module_cache_dir(class_subdir))
-        return [f'-fprebuilt-module-path={p}' for p in paths]
+        # Imports resolve by name lookup in each search directory in turn.
+        # Producers write their BMI next to the object (-fmodule-output,
+        # added per interface unit by the backend) and a harvest edge
+        # publishes it into the target's own directory; no module name or BMI
+        # path ever appears on a command line. output_dir and emit_output are
+        # unused: unlike MSVC's directory-addressed /ifcOutput, Clang's own
+        # BMI never has a compile-time output directory to steer -- the
+        # harvest edge decides per source, private or public, where a Clang
+        # interface's BMI is published (see the backend's Clang harvest call
+        # site).
+        return [f'-fprebuilt-module-path={p}' for p in search_dirs]
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:
         # A speculative list of Clang flags a BMI does not depend on, erring
@@ -839,9 +830,8 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # -fmodules-ts.
         return '-fmodules' if version_compare(self.version, '>=15') else '-fmodules-ts'
 
-    def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None,
-                                private_output: bool = False,
+    def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
+                                output_dir: T.Optional[str] = None,
                                 *, emit_output: bool = True) -> T.List[str]:
         # The modules flag enables named modules. -Mno-modules stops GCC from
         # writing its make-style module dependency rules (phony
@@ -1427,38 +1417,25 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
     def get_module_bmi_suffix(self) -> str:
         return '.ifc'
 
-    def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None,
-                                private_output: bool = False,
+    def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
+                                output_dir: T.Optional[str] = None,
                                 *, emit_output: bool = True) -> T.List[str]:
-        # Read and write BMIs by directory, shared by every compile. /interface
-        # is per interface-unit and is added at the compile site, not here. The
-        # trailing slash marks /ifcOutput as a directory; a forward slash avoids
+        # Read and write BMIs by directory. /interface is per interface-unit
+        # and is added at the compile site, not here. The trailing slash
+        # marks /ifcOutput as a directory; a forward slash avoids
         # backslash-escaping in the generated ninja file (cl accepts either).
         #
-        # private_dir, set whenever the target has any private module of its
-        # own, is always an extra search dir, alongside the shared class
-        # cache: a private import resolves there, and the target may also
-        # import public modules (its own, or a dependency's) from the shared
-        # cache. /ifcOutput, cl's single write destination for this compile,
-        # is the one place the two cannot both be listed -- private_output
-        # picks which of the two this specific compile's BMI (if it produces
-        # one) is written to. A wholly-private executable (Stage 7) always
-        # passes private_output=True for its own compiles; a library mixing
-        # public and private interfaces passes it per source.
-        #
-        # emit_output=False omits the /ifcOutput pair entirely: a BMI-variant
-        # compile supplies its own explicit-file /ifcOutput in the build rule
-        # and only needs the /ifcSearchDir entries to resolve its imports.
-        cache = self.get_module_cache_dir(class_subdir)
-        if private_dir is not None:
-            out = private_dir if private_output else cache
-            args = ['/ifcSearchDir', private_dir, '/ifcSearchDir', cache]
-        else:
-            out = cache
-            args = ['/ifcSearchDir', out]
-        if emit_output:
-            args += ['/ifcOutput', f'{out}/']
+        # /ifcOutput is cl's single write destination for this compile: the
+        # backend picks the target's private directory for a private
+        # interface, its public one otherwise. emit_output=False omits it: a
+        # BMI-variant compile supplies its own explicit-file /ifcOutput in
+        # the build rule and only needs the /ifcSearchDir entries to resolve
+        # its imports.
+        args: T.List[str] = []
+        for d in search_dirs:
+            args += ['/ifcSearchDir', d]
+        if emit_output and output_dir is not None:
+            args += ['/ifcOutput', f'{output_dir}/']
         return args
 
     def get_bmi_irrelevant_args(self) -> T.Tuple[T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str], T.FrozenSet[str]]:

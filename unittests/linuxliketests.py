@@ -1007,13 +1007,13 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_clang_cpp_modules(self):
         # oddname.pcm's module name differs from its file name, proving the
         # harvest names BMIs from the scan, not the source.
-        # ninja_not_contains pins the single-class regression: a one-class
-        # build must keep the flat pcm.cache (no class subdir) and synthesize
-        # no BMI-only variant.
+        # The single-class regression: a one-class build names exactly one BMI
+        # class and synthesizes no BMI-only variant.
         self.build_and_check_modules('156 clang cpp modules',
                                      bmis=['modlib', 'pkg', 'pkg:part', 'pkg:impl',
                                            'kwmod', 'genmod', 'oddname', 'dot.mod.sub'],
-                                     ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
+                                     ninja_not_contains=('--precompile', '@bmi@'))
+        self.assertEqual(len(self.bmi_class_digests()), 1)
 
     @requires_cpp_module_caps('modules', 'partitions', compiler='clang')
     def test_clang_generated_module_sources(self):
@@ -1027,7 +1027,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('201 generated module sources',
                                      bmis=['pkg', 'pkg:part', 'pkg:detail', 'pkg:detail2',
                                            'wrap', 'face1', 'face2'],
-                                     ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
+                                     ninja_not_contains=('--precompile', '@bmi@'))
+        self.assertEqual(len(self.bmi_class_digests()), 1)
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='clang')
     def test_clang_cpp_module_interfaces(self):
@@ -1035,7 +1036,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # -x c++-module and its BMI is harvested into the shared cache by name.
         self.build_and_check_modules('162 cpp module interfaces',
                                      bmis=['mymod', 'filemod'],
-                                     ninja_not_contains=('--precompile', '@bmi@', 'pcm.cache/'))
+                                     ninja_not_contains=('--precompile', '@bmi@'))
+        self.assertEqual(len(self.bmi_class_digests()), 1)
 
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler=('gcc', 'clang'))
     def test_module_edges_skip_detected_ccache(self):
@@ -1828,16 +1830,11 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_name_collision(self):
         # Two libraries each privately export a module literally named
-        # "detail", each linked into its own separate executable: privacy
-        # removes the *global*, whole-build-tree name claim, so this builds
-        # even though nothing here would have passed the old "exported by
-        # more than one target in this build" check.
+        # "detail", each linked into its own separate executable: this builds,
+        # and neither ever publishes it.
         self.build_and_check_modules('189 two libraries private module name collision')
         self.assertEqual(len(self.private_bmi_dirs()), 2)
         self.assertEqual(self.public_bmi_matches('detail'), [])
-        if not self.per_target_bmi_dirs():
-            self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                             'a private module must never take a global name claim')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_name_collision_in_one_link(self):
@@ -1867,9 +1864,6 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('193 same name targets private module collision')
         self.assertEqual(len(self.private_bmi_dirs()), 2)
         self.assertEqual(self.public_bmi_matches('detail'), [])
-        if not self.per_target_bmi_dirs():
-            self.assertFalse(os.path.isfile(self.bmi_path('detail') + '.owner'),
-                             'a private module must never take a global name claim')
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_same_name_targets_in_one_link(self):
@@ -2598,19 +2592,23 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_duplicate_module_names(self):
         self.check_duplicate_module_names()
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_duplicate_module_names_one_link(self):
         self.check_duplicate_module_names_one_link()
 
-    @requires_cpp_module_caps('modules', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_both_libraries_module_compiled_twice(self):
         self.check_both_libraries_module_compiled_twice()
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_moves_between_providers(self):
+        self.check_module_moves_between_providers()
+
+    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler=('gcc', 'clang'))
     def test_import_std_reuse(self):
         self.check_import_std_reuse()
 

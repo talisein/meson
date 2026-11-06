@@ -1,0 +1,1 @@
+option('mode', type: 'combo', choices: ['initial', 'moved'], value: 'initial')

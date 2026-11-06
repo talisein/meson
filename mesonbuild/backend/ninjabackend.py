@@ -623,7 +623,7 @@ class BmiVariant:
 # providing target's own (NinjaBackend._module_bmi_dir) rather than in the
 # shared cache of their BMI class. Transitional, while the families move over
 # one at a time.
-PER_TARGET_BMI_FAMILIES = frozenset({'gcc'})
+PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang'})
 
 
 @dataclass(frozen=True)
@@ -2082,9 +2082,11 @@ class NinjaBackend(backends.Backend):
             self._write_gcc_units_manifest(variant_units, variant_tag, provider, hu_bmis)
         # The variant rule names its own explicit-file BMI output, so it asks
         # the compiler for module args without the directory-addressed output
-        # pair (emit_output=False); the class cache stays searchable for the
-        # variant's own imports.
-        args += cpp.get_module_compile_args(info.subdir, emit_output=False)
+        # pair (emit_output=False). Its imports resolve in this BMI class: its
+        # own recompiled interfaces, and its linked providers'. A private
+        # module is never recompiled into a variant, so it has no private dir.
+        args += cpp.get_module_compile_args(
+            self._module_search_dirs(provider, class_key, None), emit_output=False)
         args += hu_args
 
         self.generate_bmi_variant_compile_rule(cpp)
@@ -2583,6 +2585,30 @@ class NinjaBackend(backends.Backend):
         # A module-providing executable nothing can link has only private
         # modules, so it never publishes a BMI; an export_dynamic one may.
         return target.provides_cpp_modules() and not target.all_cpp_modules_private()
+
+    def _module_search_dirs(self, target: build.BuildTarget, class_key: T.Tuple[str, ...],
+                            private_dir: T.Optional[str]) -> T.List[str]:
+        """The directories, in order, a compile of `target` in the BMI class
+        `class_key` (its own, or a BMI-only variant's) looks an import up in:
+        its private directory, if any; its own public one; then each linked
+        provider's (_module_providers), in that BMI class. No module name is
+        in two of them -- two providers of one name reaching one link fail at
+        the collate, and each collate prunes the BMIs it no longer provides
+        -- so the order only decides how soon a lookup succeeds.
+
+        GCC needs none: its mapper program names every BMI by exact path.
+        """
+        cpp = target.compilers['cpp']
+        if cpp.cpp_module_family() == 'gcc':
+            return []
+        dirs = [private_dir] if private_dir is not None else []
+        if not self._per_target_bmi_dirs(cpp):
+            # The shared cache of the BMI class holds every public BMI.
+            return dirs + [self._module_bmi_dir(target, class_key)]
+        if self._has_public_bmi_dir(target):
+            dirs.append(self._module_bmi_dir(target, class_key))
+        dirs.extend(p.bmi_dir for p in self._module_providers(target, class_key))
+        return list(dict.fromkeys(dirs))
 
     def _module_providers(self, target: build.BuildTarget,
                           class_key: T.Tuple[str, ...]) -> T.List[ModuleProvider]:
@@ -5389,13 +5415,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # C++ named modules: compile every scanned TU of a module-enabled
         # target with the module flags, exactly as it will be scanned. The
         # module name and BMI path never appear on the command line -- ordering
-        # is carried by the dyndep and BMIs are found by directory lookup in
-        # the shared cache.
+        # is carried by the dyndep and BMIs are found by directory lookup
+        # (see _module_search_dirs).
         if is_module_edge:
             private_dir = self._module_private_bmi_dir_for(target)
-            private_output = private_dir is not None and self._is_private_module_source(target, src)
+            key = self._bmi_class_key_of(target)
+            output_dir = private_dir if private_dir is not None \
+                and self._is_private_module_source(target, src) \
+                else self._module_bmi_dir(target, key)
             modargs = compiler.get_module_compile_args(
-                self._bmi_class_subdir_for(target), private_dir, private_output)
+                self._module_search_dirs(target, key, private_dir), output_dir)
             module_family = compiler.cpp_module_family()
             commands += modargs
             # cl and clang need each module-interface unit flagged explicitly

@@ -1729,35 +1729,27 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         return module_to_filename(module_name, self.get_module_cache_dir(class_subdir),
                                   self.get_module_bmi_suffix())
 
-    def get_module_compile_args(self, class_subdir: T.Optional[str] = None,
-                                private_dir: T.Optional[str] = None,
-                                private_output: bool = False,
+    def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
+                                output_dir: T.Optional[str] = None,
                                 *, emit_output: bool = True) -> T.List[str]:
         """Flags to compile a C++ translation unit in a module-enabled target.
 
-        ``class_subdir`` selects a per-BMI-equivalence-class subdirectory of
-        the module cache; None means the single shared cache dir (the only
-        case for compilers without supports_bmi_classes()). ``private_dir``,
-        set whenever the target has any module of its own that is private
-        (a module-providing executable, where nothing can ever link it so
-        every module is private; or a library with a
-        cpp_private_module_interfaces declaration), is a directory outside
-        the shared cache: it is always additionally searchable, alongside the
-        shared class cache, so the target's own private imports and its
-        dependencies' public imports both resolve. ``private_output``, only
-        meaningful when ``private_dir`` is set, says whether *this specific
-        compile*, if it produces a BMI, writes it to ``private_dir`` rather
-        than the shared cache -- the mixed public/private case a library can
-        have that a wholly-private executable cannot.
+        ``search_dirs`` are the directories, in order, an import is looked up
+        in by module name: the target's own private BMI directory (if it has
+        private modules), its own public one, and each linked provider's in
+        the target's BMI class. The backend computes them, so a compiler only
+        spells them; one that resolves modules some other way (GCC's mapper)
+        ignores them. ``output_dir`` is where *this* compile's own BMI goes,
+        for a compiler that writes BMIs by directory (only MSVC: /ifcOutput
+        <dir>/): the target's private directory for a private interface,
+        else its public one.
 
-        ``emit_output``, when False, drops the directory-addressed BMI output
-        destination a family bakes into this flag set (only MSVC has one:
-        /ifcOutput <dir>/). A BMI-variant compile names its own explicit-file
-        output in the build rule, so it asks for the args without that pair;
-        families that carry no output destination here (GCC steers by module
-        mapper, Clang writes next to the object via a compile-site
-        -fmodule-output) ignore it. Returns [] for compilers/targets that do
-        not use the module pipeline.
+        ``emit_output``, when False, drops that directory-addressed output.
+        A BMI-variant compile names its own explicit-file output in the build
+        rule, so it asks for the args without it; families that carry no
+        output destination here (GCC steers by module mapper, Clang writes
+        next to the object via a compile-site -fmodule-output) ignore it.
+        Returns [] for compilers/targets that do not use the module pipeline.
         """
         return []
 

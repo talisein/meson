@@ -304,7 +304,7 @@ _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/ref
 # (meson-private/<id>@bmi-public/<BMI class digest>/) rather than the shared
 # cache. Transitional, while the families move over one at a time; helpers
 # assert exactly one layout per family, never either.
-_PER_TARGET_BMI_FAMILIES = frozenset({'gcc'})
+_PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang'})
 
 
 class CppModulesTestMixin:
@@ -808,16 +808,29 @@ class CppModulesTestMixin:
         """The BMI (build-dir relative, '/'-separated) that `consumer`'s
         compiles resolve `module_name` to. Every compile of the target that
         imports it must agree."""
-        cpp = self.host_cpp_compiler()
-        assert cpp.cpp_module_family() == 'gcc', 'resolved from the GCC mapper tables'
+        family = self.host_cpp_compiler().cpp_module_family()
         found: T.Set[str] = set()
-        for out, table in self.gcc_program_tables().items():
-            if not out.startswith(f'{consumer}.p/'):
-                continue
-            with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
-                bmi = json.load(f)['modules'].get(module_name)
-            if bmi is not None:
-                found.add(bmi.replace('\\', '/'))
+        if family == 'gcc':
+            # Named by exact path in each TU's mapper table.
+            for out, table in self.gcc_program_tables().items():
+                if not out.startswith(f'{consumer}.p/'):
+                    continue
+                with open(os.path.join(self.builddir, table), encoding='utf-8') as f:
+                    bmi = json.load(f)['modules'].get(module_name)
+                if bmi is not None:
+                    found.add(bmi.replace('\\', '/'))
+        else:
+            # Found by searching the compile's directories in turn: exactly
+            # one of them may hold it, or the search order would decide.
+            assert family == 'clang', 'resolved by -fprebuilt-module-path search'
+            bmi_file = self._bmi_file(module_name)
+            for out, args in self.module_compile_args().items():
+                if not out.startswith(f'{consumer}.p/'):
+                    continue
+                hits = [f'{d}/{bmi_file}' for d in re.findall(r'-fprebuilt-module-path=(\S+)', args)
+                        if os.path.isfile(os.path.join(self.builddir, d, bmi_file))]
+                self.assertLessEqual(len(hits), 1, f'{out}: {module_name} is in more than one search dir: {hits}')
+                found.update(h.replace('\\', '/') for h in hits)
         self.assertEqual(len(found), 1, f'{consumer} must resolve {module_name} to one BMI, got {found}')
         return found.pop()
 
@@ -854,6 +867,21 @@ class CppModulesTestMixin:
                                      extra_args=['-Dmode=bothlibs', '-Db_staticpic=false'])
         self.assertEqual(len(self.public_bmi_roots('dup')), 2)
         self.assertEqual(len(self.public_bmi_matches('duplicate')), 2)
+
+    def check_module_moves_between_providers(self) -> None:
+        """A module that moves from one linked provider to another leaves no
+        BMI behind in the first: its collate prunes it, so a consumer
+        linking both finds only the new one, whatever the search order."""
+        self.init(os.path.join(self.unit_test_dir, '221 module moves between providers'))
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertTrue(os.path.isfile(self.bmi_path('shadowed', target='aprov')))
+        self.setconf('-Dmode=moved')
+        self.build(override_envvars=self.NO_CCACHE)
+        self.run_tests()
+        self.assertBuildIsNoop()
+        self.assertEqual(self.public_bmi_matches('shadowed'),
+                         [self.bmi_path('shadowed', target='bprov')])
 
     def check_import_std_reuse(self) -> None:
         """Every consumer of dependency('std') in one BMI class resolves the
@@ -935,6 +963,26 @@ class CppModulesTestMixin:
         Windows path arrives with every backslash doubled."""
         m = re.search(re.escape(option) + r' ((?:\\.|[^\s\\?])+)', text)
         return re.sub(r'\\(.)', r'\1', m.group(1)) if m else None
+
+    def bmi_class_digests(self) -> T.Set[str]:
+        """The distinct BMI-class digests of the per-target public BMI
+        directories build.ninja names: one per BMI class in use."""
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            return set(re.findall(r'@bmi-public[/\\]([0-9a-f]{12})', f.read()))
+
+    def module_compile_args(self) -> T.Dict[str, str]:
+        """Module compile output -> its ARGS line, as build.ninja has it."""
+        found: T.Dict[str, str] = {}
+        out = rule = ''
+        with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('build '):
+                    head, _, tail = line.partition(': ')
+                    out = head[len('build '):].split(' ')[0]
+                    rule = tail.split(' ')[0]
+                elif rule.startswith('cpp_MODULE_COMPILER') and line.strip().startswith('ARGS ='):
+                    found[out] = line
+        return found
 
     def gcc_program_tables(self) -> T.Dict[str, str]:
         """Compile output -> the mapper program table it answers from, as the

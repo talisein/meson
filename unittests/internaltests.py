@@ -413,7 +413,8 @@ Thread model: posix'''), '21.9.0')
         deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
                 '--dep-provmap', 'dep/pm.json']
         table = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'm/u.json']
-        # GCC owns its per-target BMI directories, target and variant alike.
+        # GCC and Clang own their per-target BMI directories, target and
+        # variant alike.
         owns = ['--owns-bmi-dir']
         # GCC target: no harvest stamp, the table flags, no interface list.
         self.assertEqual(
@@ -443,7 +444,7 @@ Thread model: posix'''), '21.9.0')
             depargs('clang', ['--private-map', 'p.json', 'd'],
                     harvests=True, interface_sources=['x.cc'], header_units=[]),
             ['--private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc'])
+            + ['--stamp-suffix', '.gcm.stamp'] + owns + ['--interface-source', 'x.cc'])
         # MSVC: the declared header units close the sequence. A non-empty list
         # exercises the --header-unit branch (the parse strips an angle-wrapped
         # system spelling); header_units=[] on every case above pins it a no-op.
@@ -562,17 +563,25 @@ Thread model: posix'''), '21.9.0')
         with self.assertRaises(MesonException):
             be.check_cpp_modules_scanner(target)
 
-    def test_msvc_module_compile_args_use_cache_dir(self):
-        # /ifcSearchDir and /ifcOutput must point at the compiler's own module
-        # cache dir (get_module_cache_dir), not a hardcoded literal, so the BMI
-        # search/output dir stays in lockstep with the collator's dir.
-        comp = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
-        with mock.patch.object(comp, 'get_module_cache_dir', return_value='sentinel.cache'):
-            args = comp.get_module_compile_args()
-        self.assertNotIn('ifc.cache', args)
-        self.assertNotIn('ifc.cache/', args)
-        self.assertIn('sentinel.cache', args)
-        self.assertIn('sentinel.cache/', args)
+    def test_module_compile_args_spell_search_dirs(self):
+        # The backend chooses the directories; a compiler only spells them,
+        # in order, and nothing else. cl also writes this compile's own BMI
+        # by directory (/ifcOutput), which a BMI-variant compile, naming its
+        # own output file, drops.
+        from mesonbuild.compilers.cpp import ClangCPPCompiler, GnuCPPCompiler
+        cl = VisualStudioCPPCompiler.__new__(VisualStudioCPPCompiler)
+        self.assertEqual(cl.get_module_compile_args(['priv', 'pub'], 'priv'),
+                         ['/ifcSearchDir', 'priv', '/ifcSearchDir', 'pub', '/ifcOutput', 'priv/'])
+        self.assertEqual(cl.get_module_compile_args(['pub'], 'pub', emit_output=False),
+                         ['/ifcSearchDir', 'pub'])
+        self.assertEqual(cl.get_module_compile_args(['pub']), ['/ifcSearchDir', 'pub'])
+        clang = ClangCPPCompiler.__new__(ClangCPPCompiler)
+        self.assertEqual(clang.get_module_compile_args(['priv', 'pub'], 'priv'),
+                         ['-fprebuilt-module-path=priv', '-fprebuilt-module-path=pub'])
+        gcc = GnuCPPCompiler.__new__(GnuCPPCompiler)
+        gcc.version = '16.1.0'
+        self.assertEqual(gcc.get_module_compile_args(['priv', 'pub'], 'priv'),
+                         gcc.get_module_compile_args())
 
     def test_bmi_class_key(self):
         # The BMI equivalence-class key must be conservative: only allowlisted
