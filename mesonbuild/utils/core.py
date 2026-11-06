@@ -181,20 +181,17 @@ CPP_MODULE_INTERFACE_SUFFIXES = frozenset({'cppm', 'ixx'})
 
 
 def module_to_filename(name: str, bmidir: str, suffix: str) -> str:
-    """The BMI path a compiler names a C++ module's interface at.
+    """The BMI path a C++ module's interface is named at in a BMI directory.
 
     The mapping is <bmidir>/<name><suffix> with a partition separator ':'
-    becoming '-' (gcm.cache/pkg-part.gcm for GCC, ifc.cache/pkg-part.ifc for
-    MSVC). Two sides need it and must never disagree: the compiler layer
-    (Compiler.module_name_to_filename, which supplies the dir and suffix from
-    the compiler itself) and the collator (scripts/depaccumulate.py), which
-    names BMIs from logical-names alone because the P1689 output carries no
-    compiled-module-path. It lives here rather than on the compiler side
-    because the collator has no Compiler instance to ask: it receives the
-    cache dir and BMI suffix as command-line arguments, so a method deriving
-    them from ``self`` is not one it could ever call. That it is also a
-    build-time subprocess run once per edge, where import weight is worth
-    something, is a lesser reason pointing the same way.
+    becoming '-' (pkg-part.gcm for GCC, pkg-part.ifc for MSVC), the name
+    cl and Clang's harvest give a BMI in a directory and the one Meson's GCC
+    mapper program answers with. The collator (scripts/depaccumulate.py)
+    names BMIs from logical-names alone, because the P1689 output carries no
+    compiled-module-path, and the build-time GCC mapper names them too; it
+    lives here, not on the compiler side, because neither has a Compiler
+    instance to ask: they receive the directory and BMI suffix as
+    command-line arguments.
     """
     return f'{bmidir}/{name.replace(":", "-")}{suffix}'
 

@@ -183,11 +183,10 @@ kwargs:
       `.cppm`/`.ixx` source is then compiled as ordinary C++ (no module
       pipeline, and no `cpp_std c++20` floor).
 
-      The target's `native:` kwarg selects which machine it belongs to, and
-      with it which machine's module cache its provided and imported modules
-      use: a `native: true` target and a `native: false` one never contend
-      over a module name, even the same one, since their BMIs never share a
-      cache path.
+      Each target keeps the modules it provides in a directory of its own,
+      so two targets may provide modules of the same name -- a `native: true`
+      target and a `native: false` one, or two unrelated libraries -- as long
+      as no single link reaches both.
 
       Module detection never reads source contents; it is driven entirely by
       extensions, this keyword and the link graph. With GCC, a module

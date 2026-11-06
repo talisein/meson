@@ -597,7 +597,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='msvc')
     def test_msvc_cpp_module_interfaces(self):
         # A .cc source declared a module interface via cpp_module_interfaces gets
-        # /interface and its BMI lands in the shared cache under the module name.
+        # /interface and its BMI lands in its target's directory under the module name.
         self.build_and_check_modules('162 cpp module interfaces',
                                      bmis=['mymod', 'filemod'])
 
@@ -1083,7 +1083,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_private_executable_imports_dependency(self):
         # An executable's own private module and a linked library's public
         # module must both resolve in the same target: the private dir and
-        # the shared cache both ride /ifcSearchDir on one command line, while
+        # the library's public one both ride /ifcSearchDir on one command line, while
         # /ifcOutput must pick only the private one for this target's own
         # interface.
         self.build_and_check_modules('186 private executable imports dependency',
@@ -1101,9 +1101,9 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # (detail; hidden with its own independently-private internal
         # partition): api's implementation unit imports both its own private
         # modules and a linked dependency's public module in one TU, so that
-        # compile carries two /ifcSearchDir entries (private dir, then the
-        # shared cache) while /ifcOutput for each interface source must pick
-        # the right one of the two, per compile.
+        # compile carries /ifcSearchDir entries for its private dir, its own
+        # public dir and the dependency's, while /ifcOutput for each interface
+        # source must pick the right one of its own two, per compile.
         self.build_and_check_modules('187 cpp private module interfaces',
                                      bmis=['api', 'pub'])
         dirs = self.private_bmi_dirs()
@@ -1181,7 +1181,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         # on. No importer can ever need its BMI, so privacy costs nothing -- this
         # must build, run, and warn nowhere. On cl an internal partition compiles
         # with /internalPartition, so its flags differ from the Linux run; its
-        # BMI stays in the target's own private dir and never in the shared cache.
+        # BMI stays in the target's own private dir and is never published.
         self.build_and_check_modules('200 private module reachability',
                                      extra_args=['-Dmode=impl-unit-import'],
                                      build_not_contains=['reaches it from its interface'])

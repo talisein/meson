@@ -3,8 +3,10 @@
 Meson can now build C++20 named modules (and module partitions,
 internal implementation partitions included) with GCC on the Ninja
 backend. Sources are scanned with GCC's P1689 dependency scanner and
-ordered through Ninja `dyndep`; compiled module interfaces live in a single shared
-`gcm.cache` at the build root. GCC has no module search-path flag, so it finds
+ordered through Ninja `dyndep`. Each module-providing target keeps its compiled
+module interfaces in a directory of its own, so unrelated targets may provide
+modules of the same name as long as no single link reaches two of them (which is
+an error). GCC has no module search-path flag, so it finds
 them by asking a module mapper program Meson provides: GCC starts
 `meson --internal gccmapper`, which answers from a per-translation-unit table
 the dependency collation writes. No `-fmodule-file=` mappings or module names
@@ -44,8 +46,9 @@ support existed.
 
 `import std;` and `import std.compat;` are available through `dependency('std')`.
 Meson locates the standard library's module sources from the selected libstdc++
-(GCC >= 15, which ships `libstdc++.modules.json`) and builds them into the shared
-cache as an ordinary module-providing library; linking that dependency both
+(GCC >= 15, which ships `libstdc++.modules.json`) and builds them as an ordinary
+module-providing library, whose BMIs every consumer of one flag class reuses;
+linking that dependency both
 resolves the imports and puts the standard library's module objects on the link
 line. A target that only links another target which imports std -- without
 importing std itself -- gets those objects transitively and needs no declaration
@@ -104,10 +107,10 @@ Named modules need GCC >= 14 (the first release with the P1689 scanner);
 `import std;` needs GCC >= 15. Targets that share modules but compile with
 divergent module-affecting flags (a different `cpp_std`, extra defines,
 `-pthread` from `dependency('threads')`, ...) build correctly, as on Clang and
-MSVC: each flag class gets its own subdirectory of `gcm.cache`, named in the
-compiles' mapper tables, and Meson recompiles a shared provider's interfaces
-per class as BMIs only, so every consumer still links the provider's objects
-exactly once. A single-class build keeps every BMI in the flat `gcm.cache`.
+MSVC: each flag class gets its own subdirectory of a provider's BMI directory,
+named in the compiles' mapper tables, and Meson recompiles a shared provider's
+interfaces per class as BMIs only, so every consumer still links the provider's
+objects exactly once.
 Header units are built per flag class too.
 
 GCC 14 and 15 split the mapper program's command line at spaces and cannot

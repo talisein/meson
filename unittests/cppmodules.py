@@ -300,19 +300,14 @@ def requires_cpp_module_caps(*tokens: str,
 # carries an id of its own -- intel-llvm, armltdclang, emscripten.
 _BMI_MAP_FLAG = {'gcc': '-fmodule-file', 'clang': '-fmodule-file', 'msvc': '/reference'}
 
-# The compiler families whose public BMIs live in per-target directories
-# (meson-private/<id>@bmi-public/<BMI class digest>/) rather than the shared
-# cache. Transitional, while the families move over one at a time; helpers
-# assert exactly one layout per family, never either.
-_PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang', 'msvc'})
-
 
 class CppModulesTestMixin:
 
     """Shared driver for C++ module tests; mix into a BasePlatformTests
-    subclass. Test bodies read the detected compiler's BMI cache layout
-    (get_module_cache_dir/get_module_bmi_suffix) so the same method works
-    under whichever single compiler the process was launched with."""
+    subclass. Test bodies find a provider's public BMIs in its own
+    meson-private/<id>@bmi-public/<BMI class digest>/ directory, named with
+    the detected compiler's BMI suffix, so the same method works under
+    whichever single compiler the process was launched with."""
 
     # Rebuild tests exercise Meson's dependency graph, so ccache must not
     # answer for the compiler: it does not track the contents of BMIs, so a
@@ -325,11 +320,6 @@ class CppModulesTestMixin:
         assert cpp is not None, 'gate the test with require(s)_cpp_module_caps first'
         return cpp
 
-    def per_target_bmi_dirs(self) -> bool:
-        """Whether the detected compiler publishes public BMIs into each
-        providing target's own directory rather than the shared cache."""
-        return self.host_cpp_compiler().cpp_module_family() in _PER_TARGET_BMI_FAMILIES
-
     def _bmi_file(self, module_name: str) -> str:
         # Partition ':' maps to '-' as in the documented scheme.
         return module_name.replace(':', '-') + self.host_cpp_compiler().get_module_bmi_suffix()
@@ -339,7 +329,6 @@ class CppModulesTestMixin:
         every providing target when None), sorted. A target id is its name
         and type suffix, behind a subdir digest unless it is at the top
         level."""
-        assert self.per_target_bmi_dirs()
         priv = glob.escape(os.path.join(self.builddir, 'meson-private'))
         name = '*' if provider is None else glob.escape(provider)
         return sorted({*glob.glob(os.path.join(priv, f'{name}@*@bmi-public')),
@@ -351,13 +340,9 @@ class CppModulesTestMixin:
         return roots[0]
 
     def bmi_path(self, module_name: str, target: T.Optional[str] = None) -> str:
-        """Where the BMI of the given module lands: the shared cache, or, for
-        a compiler with per-target BMI directories, the one BMI-class subdir
+        """Where the BMI of the given module lands: the one BMI-class subdir
         of its provider's public directory holding it. `target` names the
         provider, and must when more than one target provides the name."""
-        if not self.per_target_bmi_dirs():
-            return os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir(),
-                                self._bmi_file(module_name))
         roots = [self._provider_root(target)] if target is not None else self.public_bmi_roots()
         matches = [m for r in roots for m in glob.glob(os.path.join(glob.escape(r), '*', self._bmi_file(module_name)))]
         self.assertEqual(len(matches), 1,
@@ -366,13 +351,10 @@ class CppModulesTestMixin:
         return matches[0]
 
     def public_bmi_matches(self, module_name: str) -> T.List[str]:
-        """Every public BMI of the given module anywhere in the build, in
-        either the shared cache (flat or a BMI-class subdir) or any target's
-        public directory; [] means no target publishes it."""
+        """Every public BMI of the given module anywhere in the build, flat
+        or in a BMI-class subdir of any target's public directory; [] means no
+        target publishes it."""
         bmi = self._bmi_file(module_name)
-        if not self.per_target_bmi_dirs():
-            cache = glob.escape(os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir()))
-            return sorted(glob.glob(os.path.join(cache, bmi)) + glob.glob(os.path.join(cache, '*', bmi)))
         return sorted(m for r in self.public_bmi_roots()
                       for m in glob.glob(os.path.join(glob.escape(r), bmi))
                       + glob.glob(os.path.join(glob.escape(r), '*', bmi)))
@@ -396,7 +378,8 @@ class CppModulesTestMixin:
         srcdir: a pre-copied fixture path to configure from directly (e.g. a
             deterministically spaced tmp copy); the name still labels messages.
             When None the name resolves under the unit-test dir as usual.
-        bmis: logical module names whose BMIs must exist in the shared cache.
+        bmis: logical module names whose BMIs must exist, each in the one
+            public BMI directory publishing it (bmi_path).
         ninja_args_not_contains: needles no 'ARGS =' line may contain; None
             selects the compiler default (the BMI suffix and the flag that
             names a BMI), () disables the check (header units legitimately
@@ -689,26 +672,20 @@ class CppModulesTestMixin:
 
     def bmi_root(self, provider: str) -> str:
         """The directory whose BMI-class subdirectories hold `provider`'s
-        public BMIs: its own public directory, or the shared cache for a
-        compiler without per-target BMI directories."""
-        if self.per_target_bmi_dirs():
-            return self._provider_root(provider)
-        return os.path.join(self.builddir, self.host_cpp_compiler().get_module_cache_dir())
+        public BMIs: its own public directory."""
+        return self._provider_root(provider)
 
     def bmi_class_dirs(self, provider: str) -> T.List[str]:
-        """The BMI-class subdirectories `provider`'s public BMIs live in
-        (shared by every provider on a compiler without per-target BMI
-        directories), sorted. A per-target directory always has one, even in
-        a single-BMI-class build."""
+        """The BMI-class subdirectories `provider`'s public BMIs live in,
+        sorted: always at least one, even in a single-BMI-class build."""
         root = self.bmi_root(provider)
         return sorted(e for e in os.listdir(root)
                       if os.path.isdir(os.path.join(root, e)))
 
     def assert_no_flat_bmi(self, provider: str, module_name: str) -> None:
         """A public BMI must never sit directly in the directory its
-        BMI-class subdirectories live in: per-target directories are always
-        keyed by BMI class, and the shared cache is in a multi-BMI-class
-        build."""
+        BMI-class subdirectories live in: public BMI directories are always
+        keyed by BMI class."""
         flat = os.path.join(self.bmi_root(provider), self._bmi_file(module_name))
         self.assertFalse(os.path.exists(flat), f'flat BMI {flat} must not exist')
 

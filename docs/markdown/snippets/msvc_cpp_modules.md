@@ -2,10 +2,13 @@
 
 C++20 named modules (and module partitions) now build with MSVC on the Ninja
 backend, through the same pipeline used for GCC. Sources are scanned with cl's
-`/scanDependencies` P1689 output and ordered through Ninja `dyndep`;
-compiled module interfaces (`.ifc`) live in a single shared `ifc.cache` at the
-build root and are found by name through `/ifcSearchDir`. No `/reference`
-mappings or module names appear on any compile command line.
+`/scanDependencies` P1689 output and ordered through Ninja `dyndep`. Each
+module-providing target keeps its compiled module interfaces (`.ifc`) in a
+directory of its own, and a compile finds them by name through one
+`/ifcSearchDir` per module-providing target it links, so unrelated targets may
+provide modules of the same name as long as no single link reaches two of them
+(which is an error). No `/reference` mappings or module names appear on any
+compile command line.
 
 The user-facing interface is identical to the GCC one: a target is
 module-enabled when it has a module-interface source (`.cppm` / `.ixx`, including
@@ -61,9 +64,9 @@ Diagnostics (a module required by no target, a duplicate module name reaching on
 link, and module dependency cycles) are reported at build time for MSVC exactly
 as for GCC. Targets that share modules but compile with divergent
 module-affecting flags (a different `cpp_std`, extra defines, ...) build
-correctly: each flag class gets its own subdirectory of `ifc.cache`, and
+correctly: each flag class gets its own subdirectory of a provider's BMI directory, and
 Meson recompiles a shared provider's interfaces per class as BMIs only —
 every consumer still links the provider's objects exactly once. This holds
 across a cross build's two machines exactly as it does for GCC and Clang:
-each machine keeps its own `ifc.cache` entries, so the build and host
-machines never contend for a BMI.
+a build-machine and a host-machine module target are two targets with two BMI
+directories, so they never contend for a BMI.

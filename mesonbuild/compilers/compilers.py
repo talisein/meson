@@ -22,7 +22,6 @@ from ..mesonlib import (
 )
 from ..options import OptionKey
 from ..arglist import CompilerArgs
-from ..utils.core import module_to_filename
 
 if T.TYPE_CHECKING:
     from typing_extensions import Literal, TypeAlias
@@ -1684,9 +1683,6 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_outdir_args(self, path: str) -> T.List[str]:
         raise EnvironmentException(f'{self.id} does not implement get_module_outdir_args')
 
-    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
-        raise EnvironmentException(f'{self.id} does not implement get_module_cache_dir')
-
     def get_module_program_mapper_args(self, command: T.List[str], bmi_class: str,
                                        units: str, table: T.Optional[str] = None) -> T.List[str]:
         """Flags making an edge resolve C++ modules through a mapper *program*
@@ -1720,14 +1716,8 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
     def get_module_bmi_suffix(self) -> str:
         raise EnvironmentException(f'{self.id} does not implement get_module_bmi_suffix')
 
-    def module_name_to_filename(self, module_name: str, class_subdir: T.Optional[str] = None) -> str:
-        # The mapping itself lives in utils.core, shared with the collator
-        # (scripts/depaccumulate.py), which names BMIs from logical-names
-        # without scanning compiler output. The collator has no Compiler to
-        # call this on -- it takes the cache dir and BMI suffix as command-line
-        # arguments -- so the shared definition cannot live here.
-        return module_to_filename(module_name, self.get_module_cache_dir(class_subdir),
-                                  self.get_module_bmi_suffix())
+    def module_name_to_filename(self, module_name: str) -> str:
+        raise EnvironmentException(f'{self.id} does not implement module_name_to_filename')
 
     def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
                                 output_dir: T.Optional[str] = None,

@@ -1033,7 +1033,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', 'module_interfaces', compiler='clang')
     def test_clang_cpp_module_interfaces(self):
         # A .cc source declared a module interface via cpp_module_interfaces gets
-        # -x c++-module and its BMI is harvested into the shared cache by name.
+        # -x c++-module and its BMI is harvested into its target's directory by name.
         self.build_and_check_modules('162 cpp module interfaces',
                                      bmis=['mymod', 'filemod'],
                                      ninja_not_contains=('--precompile', '@bmi@'))
@@ -1306,12 +1306,10 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_module_bmi_divergence_ignores_bmi_irrelevant_flags(self):
         # Provider and consumer differ only in optimization, which is on the
         # BMI-irrelevant allowlist: the two stay in one BMI class (one BMI
-        # directory, no BMI-only variant), and the mixed build runs fine. A
-        # per-target directory is always keyed by BMI class; the shared cache
-        # is flat in a single-BMI-class build.
+        # directory, no BMI-only variant), and the mixed build runs fine.
         self.build_and_check_modules('165 module bmi flag divergence',
                                      extra_args=['-Dwithfoo=false'])
-        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1 if self.per_target_bmi_dirs() else 0)
+        self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
         self.assertEqual(self.bmi_variant_ids(), set())
 
     @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes',
@@ -1444,9 +1442,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # residue in the generated build: the final build.ninja is
         # byte-identical to the first.
         # Each reconfigure also runs ninja's restat+cleandead over the flip
-        # (ninja >= 1.12), reaping the dead topology's declared outputs;
-        # stale class-cache BMIs and owner claims stay on disk, inert, like
-        # the harvest cache in general.
+        # (ninja >= 1.12), reaping the dead topology's declared outputs; a
+        # dead BMI class's directory stays on disk, inert, since nothing
+        # searches it.
         gcc = self.host_cpp_compiler().cpp_module_family() == 'gcc'
         testdir = os.path.join(self.unit_test_dir, '165 module bmi flag divergence')
         self.init(testdir, extra_args=['-Dwithfoo=false'])
@@ -1621,9 +1619,9 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_cpp_private_module_interfaces_unlisted_partition(self):
         # hidden is a private primary; its internal partition hidden-impl
         # must independently be listed in cpp_private_module_interfaces too,
-        # or its BMI lands in the shared public cache and its name
-        # (hidden:impl) takes the whole-build-tree public-name claim the
-        # private primary was trying to avoid in the first place.
+        # or its BMI (hidden:impl) is published to every target that links
+        # the library, which the private primary was trying to avoid in the
+        # first place.
         testdir = os.path.join(self.unit_test_dir, '187 cpp private module interfaces')
         self.init(testdir, extra_args=['-Dmode=unlisted-partition'])
         with self.assertRaises(subprocess.CalledProcessError) as cm:
@@ -1634,7 +1632,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             cm.exception.stdout)
         self.assertIn(
             ' in cpp_private_module_interfaces too -- a partition of a private module '
-            'takes the module-wide claim its primary deliberately avoids.',
+            'would otherwise be published to every target that links this one, '
+            'which its primary deliberately is not.',
             cm.exception.stdout)
 
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))

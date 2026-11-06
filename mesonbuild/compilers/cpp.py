@@ -464,9 +464,6 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
         assert self._clang_scan_deps is not None, 'only valid when supports_cpp_modules_p1689()'
         return [self._clang_scan_deps]
 
-    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
-        return 'pcm.cache' if class_subdir is None else f'pcm.cache/{class_subdir}'
-
     def get_module_bmi_suffix(self) -> str:
         return '.pcm'
 
@@ -818,9 +815,6 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
     def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
         return 'gcc'
 
-    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
-        return 'gcm.cache' if class_subdir is None else f'gcm.cache/{class_subdir}'
-
     def get_module_bmi_suffix(self) -> str:
         return '.gcm'
 
@@ -839,10 +833,10 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         # 'gcm.cache/<name>.gcm:| <obj>' line) into the -MD depfile: Ninja's
         # gcc-deps parser cannot handle that shape, and module ordering is
         # carried by the dyndep instead. BMI generation is unaffected. Every
-        # arg here is unused: GCC carries no cache dir on the command line, so
-        # there is no output pair to drop for emit_output; every BMI a compile
-        # resolves, in any class or a target-private directory, is named by
-        # Meson's mapper program instead (get_module_program_mapper_args),
+        # arg here is unused: GCC carries no BMI directory on the command line,
+        # so there is no output pair to drop for emit_output; every BMI a
+        # compile resolves, in any BMI class or a target-private directory, is
+        # named by Meson's mapper program instead (get_module_program_mapper_args),
         # answering from a per-TU table the collator writes
         # (--private-bmi-dir/--private-interface-object at the collator, in
         # lockstep with this target's own privacy). A scan asks it only for
@@ -1410,9 +1404,6 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
 
     def cpp_module_family(self) -> T.Literal['none', 'gcc', 'clang', 'msvc']:
         return 'msvc'
-
-    def get_module_cache_dir(self, class_subdir: T.Optional[str] = None) -> str:
-        return 'ifc.cache' if class_subdir is None else f'ifc.cache/{class_subdir}'
 
     def get_module_bmi_suffix(self) -> str:
         return '.ifc'

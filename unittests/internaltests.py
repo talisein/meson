@@ -221,37 +221,17 @@ Thread model: posix'''), '21.9.0')
             OS name: "linux", version: "5.12.17", arch: "amd64", family: "unix"'''),
             '3.8.1')
 
-    def test_module_bmi_naming_lockstep(self):
-        # The BMI path is derived independently by the compiler
-        # (module_name_to_filename) and the collator (depaccumulate.
-        # module_to_filename, fed the compiler's dir/suffix); they must agree,
-        # and must use forward slashes on every platform (they feed ninja paths
-        # / dyndep).
-        from mesonbuild.compilers.cpp import GnuCPPCompiler, VisualStudioCPPCompiler
-        from mesonbuild.scripts.depaccumulate import module_to_filename
-        cases = [
-            (GnuCPPCompiler, {
-                'foo': 'gcm.cache/foo.gcm',
-                'pkg:part': 'gcm.cache/pkg-part.gcm',
-                'my.module': 'gcm.cache/my.module.gcm',
-            }),
-            (VisualStudioCPPCompiler, {
-                'foo': 'ifc.cache/foo.ifc',
-                'pkg:part': 'ifc.cache/pkg-part.ifc',
-                'my.module': 'ifc.cache/my.module.ifc',
-            }),
-        ]
-        for cls, expected in cases:
-            # These methods use no instance state, so an uninitialized instance
-            # is enough to exercise the (self-dispatching) mapping.
-            comp = cls.__new__(cls)
-            bmidir = comp.get_module_cache_dir()
-            suffix = comp.get_module_bmi_suffix()
-            for name, want in expected.items():
-                compiler_side = comp.module_name_to_filename(name)
-                self.assertEqual(compiler_side, want)
-                self.assertEqual(compiler_side, module_to_filename(name, bmidir, suffix))
-                self.assertNotIn('\\', compiler_side)
+    def test_module_bmi_naming(self):
+        # The collator, and the GCC mapper program, name a module's BMI in a
+        # BMI directory from its logical-name alone: a partition's ':' becomes
+        # '-' (the name cl and Clang's harvest give it too), dots stay, and the
+        # separator is always '/' (the path feeds ninja and dyndep files).
+        from mesonbuild.utils.core import module_to_filename
+        bmidir = 'meson-private/lib@sta@bmi-public/0123456789ab'
+        for suffix in ('.gcm', '.pcm', '.ifc'):
+            for name, want in (('foo', 'foo'), ('pkg:part', 'pkg-part'), ('my.module', 'my.module')):
+                self.assertEqual(module_to_filename(name, bmidir, suffix), f'{bmidir}/{want}{suffix}')
+        self.assertEqual(module_to_filename('m', 'meson-private\\x', '.ifc'), 'meson-private\\x/m.ifc')
 
     def test_depaccumulate_p1689_empty_ddis(self):
         # A C++-module-enabled target can have zero compiled C++ TUs (e.g. only
@@ -398,7 +378,6 @@ Thread model: posix'''), '21.9.0')
         be.build_to_src = '..'
         cpp = mock.MagicMock()
         cpp.get_module_bmi_suffix.return_value = '.gcm'
-        cpp.get_module_cache_dir.return_value = 'gcm.cache'
         cpp.program_mapper_quotes.return_value = True
 
         def depargs(family, head, *, harvests, interface_sources, header_units,
@@ -413,15 +392,12 @@ Thread model: posix'''), '21.9.0')
         deps = ['--dep-private-map', 'dep/priv.json', 'id0', 'disp0',
                 '--dep-provmap', 'dep/pm.json']
         table = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'm/u.json']
-        # Every family owns its per-target BMI directories, target and
-        # variant alike.
-        owns = ['--owns-bmi-dir']
         # GCC target: no harvest stamp, the table flags, no interface list.
         self.assertEqual(
             depargs('gcc', ['--private-map', 'p.json', 'd'],
                     harvests=False, interface_sources=[], header_units=[],
                     units_manifest='m/u.json'),
-            ['--private-map', 'p.json', 'd'] + deps + owns + table)
+            ['--private-map', 'p.json', 'd'] + deps + table)
         # GCC variant: always harvests, so the table block *and* the recompiled
         # interfaces, the interface list coming after the table block.
         self.assertEqual(
@@ -429,7 +405,7 @@ Thread model: posix'''), '21.9.0')
                     harvests=True, interface_sources=['x.cc'], header_units=[],
                     units_manifest='m/u.json'),
             ['--own-private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp'] + owns + table + ['--interface-source', 'x.cc'])
+            + ['--stamp-suffix', '.gcm.stamp'] + table + ['--interface-source', 'x.cc'])
         # A GCC that cannot quote its mapper command line keeps its tables at
         # digest-named paths.
         cpp.program_mapper_quotes.return_value = False
@@ -437,14 +413,14 @@ Thread model: posix'''), '21.9.0')
             depargs('gcc', ['--private-map', 'p.json', 'd'],
                     harvests=False, interface_sources=[], header_units=[],
                     units_manifest='m/u.json'),
-            ['--private-map', 'p.json', 'd'] + deps + owns + table
+            ['--private-map', 'p.json', 'd'] + deps + table
             + ['--hashed-table-dir', 'meson-private/gcc-module-tables'])
         # Clang: stamp plus the interface list, no mapper block.
         self.assertEqual(
             depargs('clang', ['--private-map', 'p.json', 'd'],
                     harvests=True, interface_sources=['x.cc'], header_units=[]),
             ['--private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp'] + owns + ['--interface-source', 'x.cc'])
+            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc'])
         # MSVC: the declared header units close the sequence. A non-empty list
         # exercises the --header-unit branch (the parse strips an angle-wrapped
         # system spelling); header_units=[] on every case above pins it a no-op.
@@ -453,8 +429,7 @@ Thread model: posix'''), '21.9.0')
                     harvests=True, interface_sources=['x.cc'],
                     header_units=['<vec.h>', 'util.h']),
             ['--own-private-map', 'p.json', 'd'] + deps
-            + ['--stamp-suffix', '.gcm.stamp'] + owns
-            + ['--interface-source', 'x.cc',
+            + ['--stamp-suffix', '.gcm.stamp', '--interface-source', 'x.cc',
                '--header-unit', 'system:vec.h', '--header-unit', 'user:util.h'])
         # The head is the only per-site difference: identical kwargs under the
         # two heads must agree on everything past it.
@@ -1069,7 +1044,6 @@ Thread model: posix'''), '21.9.0')
         cpp.cpp_module_family.return_value = cid
         cpp.get_exelist.return_value = ['c++']
         cpp.get_module_bmi_suffix.return_value = suffix
-        cpp.get_module_cache_dir.return_value = 'gcm.cache'
         cpp.get_header_unit_consumer_args.return_value = []
         cpp.program_mapper_quotes.return_value = True
         cpp.get_bmi_class_key.return_value = ()
@@ -1619,101 +1593,6 @@ Thread model: posix'''), '21.9.0')
             self.assertIn('provided by no target', msg)
             self.assertIn('cpp_modules: true', msg)
 
-    def test_depaccumulate_p1689_duplicate_provider_across_targets(self):
-        # Two unrelated targets exporting the same module never meet in one
-        # collate, but their BMIs share one cache path keyed by the module
-        # name; the second collate must error via the on-disk owner claim
-        # rather than leave ninja silently wedged on the colliding BMI.
-        from mesonbuild.scripts.depaccumulate import run_p1689
-        from mesonbuild.utils.core import MesonException
-
-        def collate(d: str, bmidir: str, tgt: str) -> int:
-            ddi = os.path.join(d, f'{tgt}.cpp.o.ddi')
-            with open(ddi, 'w', encoding='utf-8') as f:
-                json.dump({'rules': [{'primary-output': f'{tgt}.cpp.o',
-                                      'provides': [{'logical-name': 'dupmod'}]}]}, f)
-            return run_p1689(['--dyndep', os.path.join(d, f'{tgt}.dd'),
-                              '--provmap', os.path.join(d, f'{tgt}-pm.json'),
-                              '--bmi-dir', bmidir, '--bmi-suffix', '.gcm', ddi])
-
-        with tempfile.TemporaryDirectory() as d:
-            bmidir = os.path.join(d, 'gcm.cache')
-            self.assertEqual(collate(d, bmidir, 'liba'), 0)
-            # Re-collating the same target (an ordinary rebuild) is no duplicate.
-            self.assertEqual(collate(d, bmidir, 'liba'), 0)
-            with self.assertRaises(MesonException) as cm:
-                collate(d, bmidir, 'libb')
-            msg = str(cm.exception)
-            self.assertIn('exported by more than one target', msg)
-            self.assertIn('dupmod', msg)
-            # A claim always appears with its contents (published by hard
-            # link): an owner file that exists but is empty is not a live
-            # claim -- the artifact of the pre-atomic write scheme that let
-            # two concurrent collates both take ownership -- and must be
-            # taken over rather than trusted.
-            owner = os.path.join(bmidir, 'dupmod.gcm.owner')
-            os.unlink(owner)
-            with open(owner, 'w', encoding='utf-8'):
-                pass
-            self.assertEqual(collate(d, bmidir, 'libb'), 0)
-            with open(owner, encoding='utf-8') as f:
-                self.assertTrue(f.read().endswith('libb-pm.json'))
-            # A stale claim heals: once the owner's map no longer lists the
-            # module (it moved away and the old provider re-collated), another
-            # target may take the name over ...
-            with open(os.path.join(d, 'liba-pm.json'), 'w', encoding='utf-8') as f:
-                json.dump({}, f)
-            self.assertEqual(collate(d, bmidir, 'libb'), 0)
-            # ... after which the original owner is the refused stranger.
-            with self.assertRaises(MesonException):
-                collate(d, bmidir, 'liba')
-
-    def test_depaccumulate_claim_owner_vanishes_under_a_loser(self):
-        # Collates run concurrently under ninja, and a stale claim is taken
-        # over by unlinking its owner file: a claimant that loses the atomic
-        # link can therefore find the very claim it lost to already gone by
-        # the time it reads it. That means the name is unowned again, not that
-        # the build is broken -- the claim must be retried, not raised on.
-        # Driven at the seam, the window itself being unreproducible: the
-        # first os.link fails the way a lost race fails, having first removed
-        # the owner file the way a concurrent takeover would.
-        from mesonbuild.scripts.depaccumulate import _claim_module_provider
-
-        real_link = os.link
-
-        with tempfile.TemporaryDirectory() as d:
-            cache_bmi = os.path.join(d, 'gcm.cache', 'mod.gcm')
-            owner_file = cache_bmi + '.owner'
-            ours = os.path.join(d, 'libb-pm.json')
-            theirs = os.path.join(d, 'liba-pm.json')
-            os.mkdir(os.path.dirname(cache_bmi))
-            with open(theirs, 'w', encoding='utf-8') as f:
-                json.dump({'mod': 'gcm.cache/mod.gcm'}, f)
-            with open(owner_file, 'w', encoding='utf-8') as f:
-                f.write(theirs)
-
-            calls: T.List[None] = []
-
-            def link(src: str, dst: str) -> None:
-                calls.append(None)
-                if len(calls) == 1:
-                    # The claim we lose to is taken over and unlinked by a
-                    # third collate in the same instant.
-                    os.unlink(owner_file)
-                    raise FileExistsError(f'File exists: {dst!r}')
-                real_link(src, dst)
-
-            with mock.patch('os.link', link):
-                _claim_module_provider('mod', cache_bmi, ours)
-            # Retried rather than trusting the failed link's verdict, and the
-            # claim is now ours.
-            self.assertGreater(len(calls), 1)
-            with open(owner_file, encoding='utf-8') as f:
-                self.assertEqual(f.read(), ours)
-            # No temp file left behind.
-            self.assertEqual(os.listdir(os.path.dirname(cache_bmi)),
-                             [os.path.basename(owner_file)])
-
     def test_depaccumulate_p1689_interface_source_through_symlink(self):
         # A source declared as a module interface and the same source named in
         # a P1689 scan may be spelled by different routes to one file: a
@@ -1991,12 +1870,11 @@ Thread model: posix'''), '21.9.0')
             finally:
                 os.chdir(olddir)
 
-    def test_depaccumulate_p1689_owns_bmi_dir(self):
-        # With --owns-bmi-dir the collate claims no module name build-wide and
-        # prunes, from its own --bmi-dir and --private-bmi-dir, every BMI it
-        # no longer provides there -- leaving what it provides, files that are
-        # not BMIs, and subdirectories (other BMI classes) alone. Without the
-        # flag, a shared cache: nothing is pruned and the name is claimed.
+    def test_depaccumulate_p1689_prunes_own_bmi_dirs(self):
+        # A collate owns its --bmi-dir and --private-bmi-dir, so it prunes
+        # from them every BMI it no longer provides there -- leaving what it
+        # provides, files that are not BMIs, and subdirectories (other BMI
+        # classes) alone -- and claims no module name build-wide.
         from mesonbuild.scripts.depaccumulate import run_p1689
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
@@ -2018,11 +1896,6 @@ Thread model: posix'''), '21.9.0')
                         '--private-bmi-dir', 'priv', '--private-interface-object', 'p.o',
                         '--private-map', 'priv.json', 'lib']
                 self.assertEqual(run_p1689(args + ['lib.ddi']), 0)
-                self.assertTrue(os.path.isfile('pub/Old.gcm'), 'a shared cache must never be pruned')
-                self.assertTrue(os.path.isfile('pub/A.gcm.owner'))
-                os.unlink('pub/A.gcm.owner')
-
-                self.assertEqual(run_p1689(args + ['--owns-bmi-dir', 'lib.ddi']), 0)
                 self.assertEqual(sorted(os.listdir('pub')), ['A.gcm', 'notes.txt', 'other'])
                 self.assertEqual(os.listdir('pub/other'), ['X.gcm'])
                 self.assertEqual(os.listdir('priv'), ['P.gcm'])

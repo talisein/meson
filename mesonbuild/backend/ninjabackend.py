@@ -578,13 +578,13 @@ class ImportStdInfo:
 class BmiClassInfo:
     """A BMI equivalence class present in this build (Compiler.get_bmi_class_key).
 
-    subdir is the class's subdirectory of the module cache, or None when the
-    machine has a single class (flat cache, command lines identical to a
-    build without BMI classes). relevant_args keeps the class's BMI-relevant
-    flags in original command-line order for variant compiles. digest names
-    the class whatever the number of classes: the subdirectory of a
-    provider's own public BMI directory (_module_bmi_dir), and equal to
-    subdir whenever subdir is set.
+    digest names the BMI class whatever the number of BMI classes: the
+    subdirectory of a provider's public BMI directory (_module_bmi_dir).
+    subdir is the same digest, or None when the machine has a single BMI
+    class; it keys what stays shared across targets -- header units, and the
+    BMI class a GCC mapper program answers for -- so a single-BMI-class build
+    names neither by BMI class. relevant_args keeps the BMI class's
+    BMI-relevant flags in original command-line order for variant compiles.
     """
     subdir: T.Optional[str]
     relevant_args: T.List[str]
@@ -612,18 +612,12 @@ class ModuleInterfaceSource:
 @dataclass
 class BmiVariant:
     """A synthesized BMI-only recompilation of a provider's module interfaces
-    for one BMI class. Emits BMIs into the class's cache subdir and no
-    objects; consumers link the original provider."""
+    for one BMI class. Emits BMIs into the provider's public BMI directory
+    for that BMI class and no objects; consumers link the original
+    provider."""
     private_dir: str
     provmap: str
     dyndep: str
-
-
-# The C++ module families whose public BMIs live in a directory of each
-# providing target's own (NinjaBackend._module_bmi_dir) rather than in the
-# shared cache of their BMI class. Transitional, while the families move over
-# one at a time.
-PER_TARGET_BMI_FAMILIES = frozenset({'gcc', 'clang', 'msvc'})
 
 
 @dataclass(frozen=True)
@@ -1765,8 +1759,8 @@ class NinjaBackend(backends.Backend):
 
     def generate_cpp_module_harvest(self, target: build.BuildTarget, compiler: Compiler,
                                     rel_obj: str, bmi_dir: str) -> None:
-        """Publish a source-keyed BMI into ``bmi_dir`` (the shared class cache,
-        or a target's private directory) under the module's own name, read
+        """Publish a source-keyed BMI into ``bmi_dir`` (a provider's public BMI
+        directory, or its private one) under the module's own name, read
         from the interface's already-scanned .ddi. Used by Clang's own
         pipeline (which self-names BMIs after the source) and by BMI-only
         variants on any compiler. The edge's command line is static -- the
@@ -1792,31 +1786,19 @@ class NinjaBackend(backends.Backend):
         It consumes this target's per-source .ddi scans plus the provided-module
         maps of its module-providing dependencies, and produces the dyndep that
         orders the module compiles together with this target's own provided-module
-        map. A single module cache at the build root is shared by every compile,
-        with per-machine class subdirs keeping a cross build's build-machine and
-        host-machine BMIs apart, and the cache dir is created up front for
-        cl/clang. Per-compiler collator flags come from _module_collate_depargs.
+        map. The target's own BMI directories (_module_bmi_dir, and
+        _module_private_bmi_dir_for if it has private modules) are created up
+        front. Per-compiler collator flags come from _module_collate_depargs.
         """
         cpp = target.compilers['cpp']
-        family = cpp.cpp_module_family()
+        # Created here, by the target's own collate setup, whatever order its
+        # consumers are generated in: cl does not create /ifcOutput itself,
+        # Clang consumers search the directories before any harvest fills them,
+        # and nothing shows GCC creates these path shapes for its CMIs.
         private = self._module_private_bmi_dir_for(target)
         if private is not None:
-            # Unconditional across compilers, mirroring _get_or_create_bmi_variant's
-            # own private_dir creation: unlike the shared class cache, there is no
-            # existing evidence GCC auto-creates this new top-level path shape.
             os.makedirs(os.path.join(self.environment.get_build_dir(), private), exist_ok=True)
-        if self._per_target_bmi_dirs(cpp):
-            # The target's own public BMI directory, created here, by its own
-            # collate's setup, whatever generation order its consumers take.
-            if self._has_public_bmi_dir(target):
-                os.makedirs(os.path.join(self.environment.get_build_dir(),
-                                         self._module_bmi_dir(target, self._bmi_class_key_of(target))),
-                            exist_ok=True)
-        elif family in {'msvc', 'clang'}:
-            # cl does not create /ifcOutput itself, and clang consumers name
-            # pcm.cache before the first harvest populates it. Created even when
-            # this target has its own private dir: that dir's search path still
-            # needs the shared class cache for its dependencies' public modules.
+        if self._has_public_bmi_dir(target):
             os.makedirs(os.path.join(self.environment.get_build_dir(),
                                      self._module_bmi_dir(target, self._bmi_class_key_of(target))),
                         exist_ok=True)
@@ -1838,9 +1820,9 @@ class NinjaBackend(backends.Backend):
         dyndep_file = self.get_dep_scan_file_for(target, 'cpp')[1]
         provmap_file = self.get_provided_modules_file_for(target)
         private_map_file = self.get_private_modules_file_for(target)
-        # A target's own public provides are always named in the shared class
-        # cache (BMIDIR): a private provide is redirected to --private-bmi-dir
-        # in DEPARGS instead (_module_collate_depargs), never here.
+        # A target's own public provides are named in its public BMI directory
+        # (BMIDIR): a private provide is redirected to --private-bmi-dir in
+        # DEPARGS instead (_module_collate_depargs), never here.
         self._add_module_collate_edge(
             cpp, [dyndep_file, provmap_file, private_map_file], ddis,
             dyndep_file, provmap_file, self._module_bmi_dir(target, self._bmi_class_key_of(target)),
@@ -1888,7 +1870,7 @@ class NinjaBackend(backends.Backend):
                                 dep_private_maps: T.List[T.Tuple[str, str, str]]) -> T.List[str]:
         """Per-compiler flags for the P1689 collator (depaccumulate --p1689).
 
-        Clang BMIs reach the shared cache via harvest edges, so the dyndep orders
+        Clang BMIs reach a BMI directory via harvest edges, so the dyndep orders
         consumers against the harvest stamps (--stamp-suffix, in lockstep with
         get_bmi_stamp_for), and the collator rejects a provide from a source
         Clang did not compile as an interface unit -- extension-less interfaces
@@ -1938,7 +1920,7 @@ class NinjaBackend(backends.Backend):
                 for p in sorted(self._private_module_interface_objs(target)):
                     head += ['--private-interface-object', p]
         family = cpp.cpp_module_family()
-        # Only Clang harvests a target's own BMIs into the shared cache; the
+        # Only Clang harvests a target's own BMIs into its directories; the
         # interface-extension check the harvest stamp gates on runs in lockstep,
         # so the declared extension-less interfaces are named only then.
         harvests = family == 'clang'
@@ -1983,10 +1965,6 @@ class NinjaBackend(backends.Backend):
             depargs += ['--dep-provmap', pm]
         if harvests:
             depargs += ['--stamp-suffix', cpp.get_module_bmi_suffix() + '.stamp']
-        if self._per_target_bmi_dirs(cpp):
-            # Every collate's --bmi-dir (and --private-bmi-dir) is its own
-            # rule set's alone: nothing to claim, and stale BMIs to prune.
-            depargs += ['--owns-bmi-dir']
         family = cpp.cpp_module_family()
         if family == 'gcc':
             # A GCC collate writes each TU's lookup table for the mapper
@@ -2026,7 +2004,8 @@ class NinjaBackend(backends.Backend):
         recompilation of the provider's module interface units under that
         class: the same scan/collate/harvest pipeline, but the compiles use
         the compiler's BMI-only mode (clang --precompile, cl /ifcOnly), emit
-        BMIs into the class's cache subdir and produce no objects. Consumers
+        BMIs into the provider's public BMI directory for that class
+        (_module_bmi_dir) and produce no objects. Consumers
         keep linking the provider's own objects, so the
         one-provider-per-module-name rule is untouched. The variant is not a
         target: its edges hang off consuming collates and dyndeps only, so a
@@ -2123,7 +2102,7 @@ class NinjaBackend(backends.Backend):
                 elem.add_item('DEPFILE', vpcm + '.d')
             if variant_units is not None:
                 # The variant's collate writes this table; the server sends
-                # the export to $out and the imports to the class cache.
+                # the export to $out and the imports to their BMI directories.
                 elem.add_item('MAPPERFLAG', self._gcc_program_mapper_args(
                     cpp, variant_tag, variant_units, self._gcc_module_table(cpp, vpcm)))
                 elem.add_dep(self._gcc_module_table(cpp, vpcm))
@@ -2154,7 +2133,7 @@ class NinjaBackend(backends.Backend):
         # generate(), which always declares this file as an output, empty
         # JSON list or not.
         own_private_map = self.get_private_modules_file_for(provider)
-        # A variant's BMIs always reach the shared cache through harvest edges,
+        # A variant's BMIs always reach its BMI directory through harvest edges,
         # on every compiler, so it always stamps and always names its recompiled
         # interfaces (unlike a target collate, which does so only on Clang).
         head = ['--own-private-map', own_private_map,
@@ -2518,14 +2497,14 @@ class NinjaBackend(backends.Backend):
     def _compute_bmi_class_registry(self) -> None:
         """Freeze the per-machine set of BMI equivalence classes before any
         target is generated (compile args must not depend on generation order).
-        The whole build keeps the flat cache dir only when it has exactly one
-        (machine, class) entry; otherwise every class gets its own subdirectory
-        named by a digest of the machine identity and the class key. Folding the
-        machine in keeps a cross build's two compilers apart: identical
-        BMI-relevant flags on the build and host machines (the common case) no
-        longer collide in one subdir, and a two-machine build never flattens
-        into a shared cache even at one class per machine, where the BMIs are
-        still not interchangeable. Only compilers with supports_bmi_classes()
+        Every BMI class is named by a digest of the machine identity and the
+        BMI class key, the subdirectory of a provider's public BMI directory;
+        what stays shared across targets (header units, the GCC mapper's BMI
+        class) is keyed by it only when the build has more than one (machine,
+        BMI class) entry. Folding the machine in keeps a cross build's two
+        compilers apart: identical BMI-relevant flags on the build and host
+        machines (the common case) still name two BMI classes, whose BMIs are
+        not interchangeable. Only compilers with supports_bmi_classes()
         participate -- the same registry keys their header units per class; the
         rest keep the divergence warning. The key is computed from
         _generate_single_compile, which excludes get_module_compile_args, so the
@@ -2549,12 +2528,6 @@ class NinjaBackend(backends.Backend):
                 self._bmi_classes[(machine, key)] = BmiClassInfo(
                     digest if multi else None, relevant, digest)
 
-    def _bmi_class_subdir_for(self, target: build.BuildTarget) -> T.Optional[str]:
-        if 'cpp' not in target.compilers or not target.compilers['cpp'].supports_bmi_classes():
-            return None
-        info = self._bmi_classes.get((target.for_machine, self._bmi_class_key_of(target)))
-        return info.subdir if info else None
-
     def _module_bmi_dir(self, provider: build.BuildTarget,
                         class_key: T.Tuple[str, ...]) -> str:
         """The directory `provider`'s public BMIs live in for the BMI class
@@ -2562,23 +2535,14 @@ class NinjaBackend(backends.Backend):
         that names a public BMI and the harvest edge that publishes one both
         take the path from here.
 
-        A compiler family in PER_TARGET_BMI_FAMILIES gives every providing
-        target a directory of its own, keyed by BMI class however many BMI
-        classes the build has, so two unrelated targets may provide one
-        module name. Any other family publishes into the shared cache of the
-        BMI class, flat when there is only one.
+        Every providing target has a directory of its own, keyed by BMI class
+        however many BMI classes the build has, so two unrelated targets may
+        provide one module name; only a single link reaching both is an error
+        (the collate's).
         """
-        cpp = provider.compilers['cpp']
-        info = self._bmi_classes.get((provider.for_machine, class_key)) \
-            if cpp.supports_bmi_classes() else None
-        if self._per_target_bmi_dirs(cpp):
-            assert info is not None, 'every BMI class is registered before generation'
-            return os.path.join('meson-private', f'{provider.get_id()}@bmi-public', info.digest)
-        return cpp.get_module_cache_dir(info.subdir if info else None)
-
-    @staticmethod
-    def _per_target_bmi_dirs(cpp: Compiler) -> bool:
-        return cpp.cpp_module_family() in PER_TARGET_BMI_FAMILIES
+        info = self._bmi_classes.get((provider.for_machine, class_key))
+        assert info is not None, 'every BMI class is registered before generation'
+        return os.path.join('meson-private', f'{provider.get_id()}@bmi-public', info.digest)
 
     @staticmethod
     def _has_public_bmi_dir(target: build.BuildTarget) -> bool:
@@ -2602,9 +2566,6 @@ class NinjaBackend(backends.Backend):
         if cpp.cpp_module_family() == 'gcc':
             return []
         dirs = [private_dir] if private_dir is not None else []
-        if not self._per_target_bmi_dirs(cpp):
-            # The shared cache of the BMI class holds every public BMI.
-            return dirs + [self._module_bmi_dir(target, class_key)]
         if self._has_public_bmi_dir(target):
             dirs.append(self._module_bmi_dir(target, class_key))
         dirs.extend(p.bmi_dir for p in self._module_providers(target, class_key))
@@ -2638,12 +2599,13 @@ class NinjaBackend(backends.Backend):
         return result
 
     def _module_private_bmi_dir_for(self, target: build.BuildTarget) -> T.Optional[str]:
-        """A directory outside the shared cache for the modules of
+        """A directory beside the target's public BMI directory for the modules of
         target.provides_private_cpp_modules(): a link sink, whose modules
         nothing could ever import anyway, or any target with an explicit
         cpp_private_module_interfaces declaration. Only the target's private
-        modules go here -- a target may well publish others to the shared
-        cache alongside (_is_private_module_source decides per source).
+        modules go here -- a target may well publish others to its public
+        directory alongside (_is_private_module_source decides per source),
+        but only its own compiles ever search this one.
         Unkeyed by BMI class: a private module's only possible consumers are
         this target's own translation units, which all share one class.
         """
@@ -2696,9 +2658,10 @@ class NinjaBackend(backends.Backend):
 
     def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
                                       class_key: T.Tuple[str, ...]) -> T.Optional[str]:
-        # The header-unit analogue of _bmi_class_subdir_for, keyed directly (the
-        # BMI-only variant path provisions units without a target to look the
-        # key up from).
+        # The BMI class a header unit is keyed by: None in a single-BMI-class
+        # build, where every declarer of a unit shares one BMI. Keyed
+        # directly, not by target (the BMI-only variant path provisions units
+        # without a target to look the key up from).
         if not compiler.supports_bmi_classes():
             return None
         info = self._bmi_classes.get((for_machine, class_key))
@@ -4317,10 +4280,10 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             self.add_rule(rule)
 
     def generate_cpp_module_harvest_rule(self) -> None:
-        # Publishes a source-keyed BMI into the shared cache under the
+        # Publishes a source-keyed BMI into a BMI directory under the
         # module's own name, read from the interface's .ddi at build time.
         # Ordering rides the stamp: consumers' dyndep inputs point at it, so
-        # the cache path itself never needs to enter Ninja's graph. Registered
+        # the published path itself never needs to enter Ninja's graph. Registered
         # lazily (with the first harvest edge) so builds without a harvesting
         # pipeline see no new rule.
         rulename = 'cpp_module_harvest'
@@ -5660,16 +5623,16 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # variant can recompile the same set under another BMI class. A Clang
         # interface's compile also writes the source-keyed BMI
         # (-fmodule-output): declare it so Ninja knows its producer, and
-        # publish it into the shared cache with a harvest edge. cl needs
-        # neither -- its directory /ifcOutput writes the BMI straight into the
-        # class cache and the dyndep declares it there.
+        # publish it into the target's BMI directory with a harvest edge. cl
+        # needs neither -- its directory /ifcOutput writes the BMI straight
+        # into that directory and the dyndep declares it there.
         is_miu = is_module_interface and compiler.supports_bmi_classes()
         clang_miu = is_miu and compiler.cpp_module_family() == 'clang'
         if clang_miu:
             element.implicit_outfilenames.append(self.get_bmi_file_for(compiler, rel_obj))
         # Declared header units are implicit inputs: their BMIs must exist
-        # before this compile (in gcm.cache for GCC, at the path we chose for
-        # MSVC), and a source that imports one must recompile when its BMI
+        # before this compile (at the path provision_header_units chose for
+        # them), and a source that imports one must recompile when its BMI
         # changes. See provision_header_units.
         if is_module_edge:
             element.add_dep(self.provision_header_units(target, compiler))

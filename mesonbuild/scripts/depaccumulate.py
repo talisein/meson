@@ -352,94 +352,6 @@ def _warn_private_interface_reach(rules: T.List[Rule], provided: T.Dict[str, str
                     queue.append((req, inter))
 
 
-def _claim_module_provider(name: str, cache_bmi: str, provmap: str) -> None:
-    """Enforce one providing target per module cache path.
-
-    Unrelated targets never meet in a collate (--dep-provmap carries only
-    linked dependencies), but every provider's BMI lands in the shared module
-    cache at a path keyed by the module name within its machine-and-flag class
-    subdir, so two exporters landing on one BMI path would silently fight over
-    the same file and wedge the build. The same module name on two machines
-    lands at two distinct paths and coexists unconditionally (consumers never
-    cross machines). Two divergent flag classes likewise land apart, but only
-    conditionally: a BMI-only variant recompiled for a consumer's class can
-    still meet a same-named provider in that class's subdir, and this claim is
-    what catches the meeting.
-    Record the owning target's provmap path next to the would-be BMI; a second
-    claimant errors. A claim is stale -- and taken over -- when its provmap is
-    gone (target removed; meson reconfigure runs `ninja -t cleandead`) or no
-    longer lists the module (the module moved and the old provider
-    re-collated).
-
-    The claim is published by hard-linking a fully written file, so its name
-    and contents appear atomically: collates run concurrently under ninja,
-    and a loser that could read a created-but-not-yet-written owner would
-    mistake the winner's live claim for a stale one and take it over.
-
-    A claim can equally vanish under a loser -- another collate found the same
-    claim stale and unlinked it -- so every step here loops rather than trusts
-    what the previous step saw: an owner file that is gone means the name is
-    unowned again, not that the build is broken.
-    """
-    owner_file = cache_bmi + '.owner'
-    os.makedirs(os.path.dirname(owner_file), exist_ok=True)
-    tmp = f'{owner_file}.{os.getpid()}.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(provmap)
-    try:
-        while True:
-            try:
-                os.link(tmp, owner_file)
-                return
-            except FileExistsError:
-                pass
-            except OSError:
-                # Filesystem without hard links: fall back to exclusive
-                # create + write (a narrow non-atomic window, as before).
-                try:
-                    fd = os.open(owner_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                except FileExistsError:
-                    pass
-                else:
-                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                        f.write(provmap)
-                    return
-            try:
-                with open(owner_file, encoding='utf-8') as f:
-                    owner = f.read()
-            except FileNotFoundError:
-                # The claim we just lost the race to is already gone: another
-                # collate judged it stale and unlinked it. The name is up for
-                # grabs again -- retry the atomic claim.
-                continue
-            if owner == provmap:
-                return
-            live = False
-            if os.path.exists(owner):
-                try:
-                    with open(owner, encoding='utf-8') as f:
-                        live = name in json.load(f)
-                except (OSError, ValueError):
-                    pass
-            if live:
-                raise MesonException(
-                    f'Module "{name}" is exported by more than one target in this '
-                    f'build ({os.path.dirname(owner)} and {os.path.dirname(provmap)}); '
-                    f'both would write their BMI to {cache_bmi}. A module name may '
-                    'have only one providing target per module cache path (that is, '
-                    'per machine and flag class). (If the module recently moved '
-                    'between targets this claim may be stale; re-run ninja once.)')
-            # Stale: drop it and retry the atomic claim; a concurrent
-            # claimant may win the retry, and the next round then reads its
-            # live claim.
-            try:
-                os.unlink(owner_file)
-            except FileNotFoundError:
-                pass
-    finally:
-        os.unlink(tmp)
-
-
 def _read_private_map(path: str) -> T.Tuple[T.List[str], bool]:
     """A target's private-modules.json: its private module names, and whether
     they are private by construction (--all-provides-private, an executable
@@ -468,13 +380,13 @@ def run_p1689(argv: T.List[str]) -> int:
     module-providing executable where every module is private by
     construction, --all-provides-private) is instead named at
     --private-bmi-dir: it is resolvable within this target's own compiles but
-    never published to --provmap, never globally claimed, and its name is
+    never published to --provmap, and its name is
     published separately, by name only, to --private-map -- so a dependent
     can recognize (via --dep-private-map) that a module it's missing is
     private rather than absent, without ever being able to resolve it.
-    "Never globally claimed" narrows the uniqueness requirement to one link's
-    own transitive closure rather than the whole build tree; it does not
-    remove it: two targets of one link privately providing the same name
+    Module names need only be unique within one link's own transitive
+    closure, and private names are no exception: two targets of one link
+    privately providing the same name
     still collide at the linkage-symbol level (a module's exported entities
     are mangled from its bare name, private or not), so --dep-private-map is
     also checked for that collision here -- between two dependencies, and
@@ -499,7 +411,8 @@ def run_p1689(argv: T.List[str]) -> int:
     parser.add_argument('--provmap', required=True,
                         help="Output provided-module map for this target.")
     parser.add_argument('--bmi-dir', required=True,
-                        help='Directory the compiler names BMIs in (e.g. gcm.cache).')
+                        help="This rule set's own public BMI directory: its provides are "
+                             'named here, and any other BMI here is removed as stale.')
     parser.add_argument('--bmi-suffix', required=True,
                         help='BMI file suffix including the dot (e.g. .gcm).')
     parser.add_argument('--dep-provmap', action='append', default=[],
@@ -554,12 +467,8 @@ def run_p1689(argv: T.List[str]) -> int:
                              'generic "provided by no target" one. Its mere presence marks '
                              'the collate as a variant\'s, so no separate flag is needed to '
                              'say so. Never repeated -- a variant has exactly one provider.')
-    parser.add_argument('--owns-bmi-dir', action='store_true',
-                        help='--bmi-dir (and --private-bmi-dir) belong to this rule set alone: '
-                             'claim no module name build-wide, and remove any BMI in them '
-                             'this rule set no longer provides.')
     parser.add_argument('--stamp-suffix', default=None,
-                        help='BMIs reach the shared cache via harvest edges (Clang\'s '
+                        help='BMIs reach their BMI directory via harvest edges (Clang\'s '
                              'own pipeline, and BMI-only variants on any compiler): '
                              'map a provided module to its harvest stamp '
                              '(<primary-output> + this suffix) instead of the cache BMI '
@@ -614,14 +523,11 @@ def run_p1689(argv: T.List[str]) -> int:
     # "export module detail;" translation units emit the identical symbol for
     # a same-named function, e.g. detail_value@detail()), so linking two
     # same-named private modules into one binary is a silent ODR violation --
-    # the linker picks one definition arbitrarily, regardless of which
-    # target's collate ever tried to claim the name. Privacy removes the
-    # *global*, whole-build-tree uniqueness requirement
-    # (_claim_module_provider), not the requirement that one link's own
-    # transitive closure never contains two same-named modules -- that second
-    # requirement is the same one the public "provided by more than one target
-    # reaching this link" check below enforces, and it applies to private
-    # names exactly as much as public ones.
+    # the linker picks one definition arbitrarily. One link's transitive
+    # closure must never contain two same-named modules -- the requirement the
+    # public "provided by more than one target reaching this link" check below
+    # enforces -- and it applies to private names exactly as much as public
+    # ones.
     #
     # A provider is identified by its target *id*: it is what tells two
     # providers apart, and a target name cannot, being unique only within one
@@ -677,7 +583,7 @@ def run_p1689(argv: T.List[str]) -> int:
     # publish to --provmap).
     provided: T.Dict[str, str] = {}
     # Names of this target's own private provides: resolvable here, but never
-    # published to --provmap and never globally claimed.
+    # published to --provmap.
     private_names: T.Set[str] = set()
     # name -> human-readable provider (object file or dep-map path), used for
     # duplicate diagnostics.
@@ -738,8 +644,8 @@ def run_p1689(argv: T.List[str]) -> int:
 
     # A module partition inherits no privacy from its primary: a private
     # primary's own partition must be independently listed in
-    # cpp_private_module_interfaces too, or its BMI lands in the shared
-    # public cache and its name claims the whole build tree, defeating the
+    # cpp_private_module_interfaces too, or its BMI is published, importable
+    # by every target that links this one, defeating the
     # point of making the primary private. Two passes because `rules` order
     # is whatever order the backend passed .ddi files in -- the primary's
     # own provide may be visited after its partition's.
@@ -752,7 +658,8 @@ def run_p1689(argv: T.List[str]) -> int:
                 f'Module partition "{name}" ({display}) belongs to the private module '
                 f'"{primary}" but is not itself private. List {display} in '
                 'cpp_private_module_interfaces too -- a partition of a private module '
-                "takes the module-wide claim its primary deliberately avoids.")
+                'would otherwise be published to every target that links this one, '
+                'which its primary deliberately is not.')
 
     # The mirror case, and a warning rather than an error: a private module (or
     # private partition) that this target's own *public* interface is built out
@@ -837,7 +744,7 @@ def run_p1689(argv: T.List[str]) -> int:
                     # that declared output, the rule's primary-output.
                     table_modules[name] = obj
                 else:
-                    # Same private/shared choice as the provides loop above,
+                    # Same private/public choice as the provides loop above,
                     # by name rather than re-deriving from source-path: this
                     # is the second, independent place a provide's BMI path is
                     # computed, and the two must never disagree.
@@ -951,26 +858,13 @@ def run_p1689(argv: T.List[str]) -> int:
             json.dump({'names': sorted(private_names),
                        'by_construction': args.all_provides_private}, pm)
 
-    if args.owns_bmi_dir:
-        # Nothing else writes these directories, so a BMI in one that this
-        # rule set no longer provides is stale, and must go: a compiler that
-        # finds modules by searching directories would otherwise find it
-        # first for a consumer that also links the module's new provider.
-        _prune_bmi_dir(args.bmi_dir, args.bmi_suffix, provided)
-        if args.private_bmi_dir is not None:
-            _prune_bmi_dir(args.private_bmi_dir, args.bmi_suffix, private_names)
-        return 0
-
-    # Claim the provided names only after publishing the map, so a concurrent
-    # collate that loses the claim race always finds a live claimant. A
-    # private name is never claimed: its BMI lives in this target's own
-    # private directory, physically unreachable from any other target's
-    # private directory regardless of name reuse, so there is nothing to
-    # arbitrate.
-    for name in provided:
-        _claim_module_provider(
-            name, module_to_filename(name, args.bmi_dir, args.bmi_suffix), args.provmap)
-
+    # Nothing else writes this rule set's BMI directories, so a BMI in one
+    # that it no longer provides is stale, and must go: a compiler that finds
+    # modules by searching directories would otherwise find it first for a
+    # consumer that also links the module's new provider.
+    _prune_bmi_dir(args.bmi_dir, args.bmi_suffix, provided)
+    if args.private_bmi_dir is not None:
+        _prune_bmi_dir(args.private_bmi_dir, args.bmi_suffix, private_names)
     return 0
 
 
@@ -991,7 +885,7 @@ def _prune_bmi_dir(bmi_dir: str, bmi_suffix: str, names: T.Iterable[str]) -> Non
 
 
 def run_harvest(argv: T.List[str]) -> int:
-    """Publish a module interface's source-keyed BMI into the shared cache.
+    """Publish a module interface's source-keyed BMI into a BMI directory.
 
     Copies a BMI the compile wrote at a source-keyed path (Clang's bare
     -fmodule-output, or a BMI-only variant's declared output on any compiler)
@@ -1007,7 +901,7 @@ def run_harvest(argv: T.List[str]) -> int:
     parser.add_argument('--ddi', required=True,
                         help="The interface's P1689 scan result.")
     parser.add_argument('--bmi-dir', required=True,
-                        help='The shared module cache directory (e.g. pcm.cache).')
+                        help='The BMI directory to publish into.')
     parser.add_argument('--bmi-suffix', required=True,
                         help='BMI file suffix including the dot (e.g. .pcm).')
     parser.add_argument('--stamp', required=True, help='Stamp file to write on success.')

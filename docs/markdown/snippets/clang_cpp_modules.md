@@ -3,10 +3,13 @@
 C++20 named modules (and module partitions, internal implementation
 partitions included) now build with Clang on the Ninja backend,
 through the same pipeline used for GCC and MSVC. Sources are scanned
-with `clang-scan-deps` (P1689) and ordered through Ninja `dyndep`; compiled
-module interfaces (`.pcm`) live in a single shared `pcm.cache` at the build
-root and are found by name through `-fprebuilt-module-path`. No
-`-fmodule-file=` mappings or module names appear on any compile command line.
+with `clang-scan-deps` (P1689) and ordered through Ninja `dyndep`. Each
+module-providing target keeps its compiled module interfaces (`.pcm`) in a
+directory of its own, and a compile finds them by name through one
+`-fprebuilt-module-path` per module-providing target it links, so unrelated
+targets may provide modules of the same name as long as no single link reaches
+two of them (which is an error). No `-fmodule-file=` mappings or module names
+appear on any compile command line.
 
 The scanner requirement is detected by running `clang-scan-deps`, not by
 version: Meson looks for the tool next to the compiler (then on `PATH`) and
@@ -24,7 +27,7 @@ in the target's `cpp_module_interfaces`, which marks a source an interface unit
 regardless of its extension (so an `export module` in a plain `.cpp` now builds).
 
 Because Clang names a compiled interface after its *source* file, Meson
-publishes each interface's BMI into the shared cache under its scanned module
+publishes each interface's BMI into its target's directory under its scanned module
 name as a small build-time step; this is invisible in the API and keeps every
 compile command line static.
 
@@ -74,14 +77,14 @@ refuses a mismatched import with a hard error (a `cpp_std` mismatch, or
 `-pthread` present on one side only — `dependency('threads')` adds it only to
 its own consumers). Targets that share modules but compile with divergent
 module-affecting flags nonetheless build correctly: each flag class gets its
-own subdirectory of `pcm.cache`, and Meson recompiles a shared provider's
+own subdirectory of a provider's BMI directory, and Meson recompiles a shared provider's
 interfaces per class as BMIs only — every consumer still links the provider's
 objects exactly once. The std module needs no special handling for any of
 this; `dependency('std')` folds the threads dependency in and propagates it
 to every consumer. The same separation holds across a cross build's two
-machines, exactly as for GCC: each machine keeps its own `pcm.cache` entries,
-so a build-machine module target and a host-machine one never contend for a
-BMI, even under the same module name.
+machines, exactly as for GCC: a build-machine module target and a
+host-machine one are two targets with two BMI directories, so they never
+contend for a BMI, even under the same module name.
 
 A compiler cache does not track BMI contents and would serve stale objects
 for module consumers, so Meson leaves a cache it detected off every module
