@@ -700,8 +700,7 @@ class NinjaBackend(backends.Backend):
         # cl and clang, so declared spellings of one file share it.
         self._header_unit_group: T.Dict[T.Tuple[str, str], str] = {}
         # BMI class registry, frozen by _compute_bmi_class_registry before any
-        # target is generated; only populated for compilers that
-        # supports_bmi_classes(). Variants are memoized per (provider id,
+        # target is generated. Variants are memoized per (provider id,
         # class key); provider interface-unit sources are recorded during the
         # provider's own compile generation.
         self._bmi_classes: T.Dict[T.Tuple[MachineChoice, T.Tuple[str, ...]], BmiClassInfo] = {}
@@ -1695,7 +1694,7 @@ class NinjaBackend(backends.Backend):
             # #includes the scan translates.
             if header_unit_override is None:
                 self.provision_header_units(target, compiler)
-                tag = self._gcc_target_bmi_class_tag(target, compiler)
+                tag = self._gcc_target_bmi_class_tag(target)
             else:
                 tag = self._gcc_bmi_class_tag(class_tag)
             scan_units = self._gcc_units_manifest(compiler, target, tag)
@@ -1943,7 +1942,7 @@ class NinjaBackend(backends.Backend):
             harvests=harvests, interface_sources=interface_sources,
             header_units=target.cpp_header_units,
             units_manifest=self._gcc_units_manifest(
-                cpp, target, self._gcc_target_bmi_class_tag(target, cpp))
+                cpp, target, self._gcc_target_bmi_class_tag(target))
             if family == 'gcc' else None)
 
     def _collate_depargs(self, cpp: Compiler, head: T.List[str], *,
@@ -2054,7 +2053,7 @@ class NinjaBackend(backends.Backend):
         # below, so the unit edges get their own copy.
         hu_outputs, hu_args, hu_bmis = self._provision_class_header_units(
             cpp, provider, args.copy(),
-            self._header_unit_class_subdir_for(provider.for_machine, cpp, class_key))
+            self._header_unit_class_subdir_for(provider.for_machine, class_key))
         # A GCC variant's edges ask the mapper server for its own class.
         variant_tag = self._gcc_bmi_class_tag(info.subdir)
         variant_units: T.Optional[str] = None
@@ -2191,9 +2190,9 @@ class NinjaBackend(backends.Backend):
         # single-class build has none and gets a stable name of its own.
         return class_subdir or 'default'
 
-    def _gcc_target_bmi_class_tag(self, target: build.BuildTarget, compiler: Compiler) -> str:
+    def _gcc_target_bmi_class_tag(self, target: build.BuildTarget) -> str:
         return self._gcc_bmi_class_tag(self._header_unit_class_subdir_for(
-            target.for_machine, compiler, self._bmi_class_key_of(target)))
+            target.for_machine, self._bmi_class_key_of(target)))
 
     @staticmethod
     def _gcc_units_manifest(compiler: Compiler, owner: build.BuildTarget, bmi_class_tag: str) -> str:
@@ -2506,9 +2505,8 @@ class NinjaBackend(backends.Backend):
         BMI class) entry. Folding the machine in keeps a cross build's two
         compilers apart: identical BMI-relevant flags on the build and host
         machines (the common case) still name two BMI classes, whose BMIs are
-        not interchangeable. Only compilers with supports_bmi_classes()
-        participate -- the same registry keys their header units per class; the
-        rest keep the divergence warning. The key is computed from
+        not interchangeable. The same registry keys header units per BMI
+        class. The key is computed from
         _generate_single_compile, which excludes get_module_compile_args, so the
         chosen dir cannot feed back into the key.
         """
@@ -2517,8 +2515,6 @@ class NinjaBackend(backends.Backend):
             if not isinstance(t, build.BuildTarget) or not self.target_uses_p1689_cpp_modules(t):
                 continue
             cpp = t.compilers['cpp']
-            if not cpp.supports_bmi_classes():
-                continue
             relevant, _ = cpp.split_bmi_args(self._generate_single_compile(t, cpp))
             per_machine[t.for_machine].setdefault(tuple(sorted(relevant)), relevant)
         multi = sum(len(classes) for classes in per_machine.values()) > 1
@@ -2659,14 +2655,12 @@ class NinjaBackend(backends.Backend):
             return True
         return self._is_declared_private_interface(target, src)
 
-    def _header_unit_class_subdir_for(self, for_machine: MachineChoice, compiler: Compiler,
+    def _header_unit_class_subdir_for(self, for_machine: MachineChoice,
                                       class_key: T.Tuple[str, ...]) -> T.Optional[str]:
         # The BMI class a header unit is keyed by: None in a single-BMI-class
         # build, where every declarer of a unit shares one BMI. Keyed
         # directly, not by target (the BMI-only variant path provisions units
         # without a target to look the key up from).
-        if not compiler.supports_bmi_classes():
-            return None
         info = self._bmi_classes.get((for_machine, class_key))
         return info.subdir if info else None
 
@@ -4553,8 +4547,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         GCC resolves it through the module mapper instead, so no unit BMI path
         ever reaches a GCC command line.
 
-        Edges are deduped by (mode, resolved header identity) plus, for compilers
-        with supports_bmi_classes(), the declarer's BMI class: each class builds
+        Edges are deduped by (mode, resolved header identity) plus the
+        declarer's BMI class: each class builds
         its own BMI (a unit is interface-only, so per-class copies are purely
         additive) and each consumer resolves its own class's. Two targets that
         spell one unit alike but resolve it to different files keep distinct
@@ -4577,7 +4571,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             # /MDd's _DEBUG) than the importer is IFNDR.
             args = self._generate_single_compile(target, compiler)
             class_key = compiler.get_bmi_class_key(args)
-            class_subdir = self._header_unit_class_subdir_for(target.for_machine, compiler, class_key)
+            class_subdir = self._header_unit_class_subdir_for(target.for_machine, class_key)
             if family == 'gcc':
                 # The only place a unit that resolves nowhere is reported. The
                 # edges below just skip such a unit; what it means is decided
@@ -4592,7 +4586,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         if family == 'gcc':
             # Every module edge of the target asks the mapper server, which
             # reads this whether or not the target declares any units.
-            tag = self._gcc_target_bmi_class_tag(target, compiler)
+            tag = self._gcc_target_bmi_class_tag(target)
             self._write_gcc_units_manifest(self._gcc_units_manifest(compiler, target, tag), tag, target, bmis)
         return outputs
 
@@ -5591,7 +5585,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
             if compiler.cpp_module_family() == 'gcc':
                 # The collate writes the TU's table; the server answers the
                 # compile from it.
-                tag = self._gcc_target_bmi_class_tag(target, compiler)
+                tag = self._gcc_target_bmi_class_tag(target)
                 compile_commands = compile_commands + self._gcc_program_mapper_args(
                     compiler, tag, self._gcc_units_manifest(compiler, target, tag),
                     self._gcc_module_table(compiler, rel_obj))
@@ -5629,7 +5623,7 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
         # publish it into the target's BMI directory with a harvest edge. cl
         # needs neither -- its directory /ifcOutput writes the BMI straight
         # into that directory and the dyndep declares it there.
-        is_miu = is_module_interface and compiler.supports_bmi_classes()
+        is_miu = is_module_interface
         clang_miu = is_miu and compiler.cpp_module_family() == 'clang'
         if clang_miu:
             element.implicit_outfilenames.append(self.get_bmi_file_for(compiler, rel_obj))

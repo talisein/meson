@@ -467,13 +467,6 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCPPStds, ClangCompiler, CPPCompiler
     def get_module_bmi_suffix(self) -> str:
         return '.pcm'
 
-    def supports_bmi_classes(self) -> bool:
-        # clang-cl never reaches the P1689 pipeline, and AppleClang inherits
-        # this deliberately. Consumers name each unit's BMI with -fmodule-file=
-        # (see get_header_unit_consumer_args), so per-class units need no new
-        # resolution machinery either.
-        return True
-
     def get_module_compile_args(self, search_dirs: T.Sequence[str] = (),
                                 output_dir: T.Optional[str] = None,
                                 *, emit_output: bool = True) -> T.List[str]:
@@ -915,15 +908,6 @@ class GnuCPPCompiler(_StdCPPLibMixin, GnuCPPStds, GnuCompiler, CPPCompiler):
         else:
             line = ' '.join(words)
         return [f'-fmodule-mapper=|{line}?']
-
-    def supports_bmi_classes(self) -> bool:
-        # Divergent classes work through Meson's module mapper program. Only
-        # consulted on the P1689 path (GCC >= 14); -fmodule-mapper is far
-        # older than that. The mapper names a header unit's CMI too, by the
-        # header's real path, so a unit can stand at a per-class path with
-        # each consumer sent to its own class's, and no BMI path on any
-        # command line.
-        return True
 
     def supports_pch_with_cpp_modules(self) -> bool:
         # Mutually exclusive: any -fmodules compile rejects a .gch built
@@ -1444,8 +1428,7 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         # cpp_eh controls) is deliberately NOT stripped: it changes
         # _CPPUNWIND, an ABI-relevant macro that can be baked into
         # constexpr-evaluated BMI content, so a divergence there must split
-        # the class -- the key is not advisory here (supports_bmi_classes()
-        # is unconditionally True for this compiler). 'E' therefore lives in
+        # the BMI class -- the key is never advisory. 'E' therefore lives in
         # the exact set below, not prefix: as a prefix it used to also match
         # /EHsc and /EHs-c-, silently merging BMIs built under different
         # exception-handling models. No protected prefixes here: cl has no
@@ -1522,12 +1505,6 @@ class VisualStudioCPPCompiler(CPP11AsCPP14Mixin, VisualStudioLikeCPPCompilerMixi
         flag = '/headerUnit:quote' if mode == 'user' else '/headerUnit:angle'
         return [flag, f'{spelling}={bmi_path}']
 
-    def supports_bmi_classes(self) -> bool:
-        # Only consulted inside the P1689 pipeline (cl >= 19.32), where
-        # /ifcSearchDir and /ifcOnly are always available. clang-cl never
-        # reaches P1689. Header units use the same explicit-path resolution as
-        # clang (/headerUnit above), so the per-class unit path works unchanged.
-        return True
 
 class ClangClCPPCompiler(VisualStudioLikeCPPCompilerMixin, ClangClCompiler, CPPCompiler):
 

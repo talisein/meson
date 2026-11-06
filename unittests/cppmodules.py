@@ -38,14 +38,10 @@ Token vocabulary (the API for the C++ module test series):
     The compiler can emit a BMI with no object file (GCC ``-fmodule-only``,
     Clang ``--precompile``, cl ``/ifcOnly``). Probed by compiling a trivial
     interface unit and checking a BMI appears and no object does. The
-    prerequisite for BMI-only variants.
-``bmi_classes``
-    Divergent BMI equivalence classes work rather than warn: Meson gives
-    each BMI class its own subdirectory of a provider's BMI directory and
-    synthesizes BMI-only variants of shared module providers
-    (``Compiler.supports_bmi_classes()``, plus the ``bmionly`` probe). Clang,
-    MSVC from cl 19.32, and GCC (from 14, the P1689 floor; its BMIs are named
-    by Meson's module mapper there).
+    prerequisite for BMI-only variants, so for any build whose targets
+    diverge in BMI-affecting flags: Meson gives each BMI class its own
+    subdirectory of a provider's BMI directory and recompiles shared module
+    providers into it.
 ``ixx_as_cpp``
     The driver compiles a ``.ixx`` source as C++ from its extension alone, with
     no language flag -- what a target that opts a ``.ixx`` out of module
@@ -82,7 +78,7 @@ if T.TYPE_CHECKING:
 
 CPP_MODULE_CAPS = frozenset({
     'modules', 'partitions', 'header_units', 'module_interfaces',
-    'import_std', 'regex_scanner', 'bmionly', 'bmi_classes', 'ixx_as_cpp',
+    'import_std', 'regex_scanner', 'bmionly', 'ixx_as_cpp',
 })
 
 _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
@@ -245,8 +241,6 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
         caps.add('regex_scanner')
     if 'modules' in caps and bmionly_works(cpp):
         caps.add('bmionly')
-        if cpp.supports_bmi_classes():
-            caps.add('bmi_classes')
     if ixx_as_cpp_works(cpp):
         caps.add('ixx_as_cpp')
     result = frozenset(caps)

@@ -1881,17 +1881,6 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
         """
         return tuple(sorted(self.split_bmi_args(args)[0]))
 
-    def supports_bmi_classes(self) -> bool:
-        """Whether divergent BMI equivalence classes are made to work
-        (per-class BMI subdirectories plus BMI-only provider variants, and
-        one header-unit BMI per class) rather than only warned about at
-        generate time. A per-class unit needs a consumer pointed at one BMI
-        among several: by explicit path on the command line
-        (get_header_unit_consumer_args) as cl and clang need, or through a
-        module mapper as GCC does.
-        """
-        return False
-
     def get_std_module_sources(self, extra_args: T.Tuple[str, ...] = ()) -> T.Dict[str, str]:
         """{logical-name: source path} for auto-provisioned stdlib modules.
 

@@ -723,7 +723,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     # not depend on how command-line options and subproject defaults interact.
     _MSVC_TWO_CLASS_ARGS = ['-Dcpp_std=c++latest', '-Dmodlib:cpp_std=c++20']
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_bmi_classes(self):
         # The canonical two-class fixture: subproject provider at c++20,
         # consumers at c++latest (variant) and c++20 (reuse).
@@ -733,7 +733,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                expected_targets=('modlib', 'prog20', 'prog23'),
                                extra_args=self._MSVC_TWO_CLASS_ARGS)
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler='msvc')
     def test_msvc_import_std_bmi_classes(self):
         # import std at two dialects (c++20 base, c++latest divergent; cl
         # supports import std from /std:c++20). One __meson_cxx_std target
@@ -748,7 +748,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                           extra_args=['-Dcpp_std=c++20',
                                                       '-Ddivergent_std=c++latest'])
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_header_unit_bmi_classes(self):
         # Three declarers of util.h in two dialects: the same-class pair must
         # share one unit BMI, the divergent declarer gets its own, each
@@ -773,7 +773,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_header_unit_import_inheritance(self):
         # Neither program declares util.h: each inherits it by importing modlib,
         # whose interface re-exports it. cl resolves a header unit only through a
@@ -819,16 +819,16 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
     def test_msvc_module_moves_between_providers(self):
         self.check_module_moves_between_providers()
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_module_edges_use_response_files(self):
         self.check_module_edges_use_response_files(extra_args=self._MSVC_TWO_CLASS_ARGS)
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler='msvc')
     def test_msvc_import_std_reuse(self):
         # cl has no cpp_std=c++23.
         self.check_import_std_reuse(extra_args=['-Dcpp_std=c++latest'])
 
-    @requires_cpp_module_caps('modules', 'partitions', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'partitions', 'bmionly', compiler='msvc')
     def test_msvc_module_internal_partitions(self):
         # An internal (implementation) partition on MSVC: `module pkg:impl;` has
         # no export yet provides an importable BMI. cl rejects an interface file
@@ -911,7 +911,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                 block.append(line)
         self.assertTrue(yu_main, 'consumer TU should use the PCH (/Yu)')
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_stl_header_units(self):
         # A real standard-library header as a header unit on cl: <vector>
         # resolves to an absolute system path, built into the ifc cache and
@@ -921,7 +921,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('171 stl header units',
                                      ninja_args_not_contains=())
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_module_source_with_spaces(self):
         # A module interface source whose file name contains a space: the BMI
         # is named from the module name, but object-derived paths (.ddi and the
@@ -995,7 +995,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             self.assertFalse(name.endswith(('.ifc', '.ddi')) or name == 'provided-modules.json',
                              f'{name} must not be in a preprocess-only target dir')
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_runtime_bmi_classes(self):
         # The MSVC runtime library (/MD vs /MT) is BMI-affecting and not
         # allowlisted, so a consumer that overrides b_vscrt lands in its own
@@ -1008,7 +1008,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                consumers=('prog_md.exe', 'prog_mt.exe'),
                                expected_targets=('modlib', 'prog_md', 'prog_mt'))
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_module_rtti_divergence_builds(self):
         # cpp_rtti (/GR-) is not on cl's class-key strip list, so prog resolves
         # modlib through a BMI-only variant instead of importing a
@@ -1017,7 +1017,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('177 msvc module rtti divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_module_define_divergence_builds(self):
         # A -D divergence splits the class on cl too: prog resolves modlib
         # through a BMI-only variant built without -DFOO instead of importing
@@ -1025,7 +1025,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('178 msvc module define divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_header_unit_rtti_divergence_builds(self):
         # Each declarer of the same header unit gets its own unit BMI when
         # cpp_rtti diverges: prog_a and prog_b must not share one.
@@ -1033,14 +1033,14 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_header_unit_define_divergence_builds(self):
         # Same as above, driven by a -D divergence instead of cpp_rtti.
         self.build_and_check_modules('180 msvc header unit define divergence',
                                      ninja_args_not_contains=())
         self.assertEqual(len(self.header_unit_digests('util.h')), 2)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_module_eh_divergence_builds(self):
         # cpp_eh (/EHs-c- vs /EHsc) must split the class: prog resolves
         # modlib through a BMI-only variant instead of importing an
@@ -1049,7 +1049,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('181 msvc module eh divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='msvc')
     def test_msvc_header_unit_eh_divergence_builds(self):
         # Each declarer of the same header unit gets its own unit BMI when
         # cpp_eh diverges: prog_a and prog_b must not share one.
@@ -1340,7 +1340,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             "'util' (defined in sub1/meson.build), which it links",
             cm.exception.stdout)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_cpp_private_module_interfaces_variant_exclusion(self):
         # A private module (priv) alongside a public one (pubmod) that
         # crosses a BMI class boundary: the synthesized BMI-only variant must
@@ -1392,7 +1392,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
             'private module can only be imported inside the target that provides it.',
             cm.exception.stdout)
 
-    @requires_cpp_module_caps('modules', 'bmi_classes', compiler='msvc')
+    @requires_cpp_module_caps('modules', 'bmionly', compiler='msvc')
     def test_msvc_export_dynamic_executable_variant_provider(self):
         # The plugin diverges on cpp_std, so the executable's public module is
         # recompiled into a BMI-only variant for the plugin's class -- an
@@ -1468,7 +1468,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                          r"header unit .*other\.hpp is not declared in the "
                          r"cpp_header_units of target 'prog'")
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # Windows counterpart of LinuxlikeTests.test_gcc_stl_header_units:
         # <vector> resolves to a drive-letter absolute path here, unlike the
@@ -1482,7 +1482,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         (real,) = (p for p in self.gcc_table_unit_paths('prog') if os.path.basename(p) == 'vector')
         self.assertRegex(real, r'^[A-Za-z]:', 'the unit is keyed by its drive-letter real path')
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
     def test_header_unit_dialect_divergence(self):
         # Windows mirror of LinuxlikeTests.test_header_unit_dialect_divergence:
         # three declarers of util.h split into two dialect classes (prog20/
@@ -1502,7 +1502,7 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
                             'divergent dialect classes must not share a unit BMI')
         self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmi_classes', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
     def test_system_header_unit_dialect_divergence(self):
         # Windows mirror of
         # LinuxlikeTests.test_system_header_unit_dialect_divergence: two
