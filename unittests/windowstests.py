@@ -1030,6 +1030,26 @@ class WindowsTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
         self.assertEqual(self.bmi_variant_ids(), set())
 
+    @requires_cpp_module_caps('modules', compiler='msvc')
+    def test_msvc_module_export_macro_shares_provider_bmi(self):
+        # A DLL whose interface is dllexport under foo_EXPORTS, which only the
+        # DLL's own compile defines. prog imports the DLL's own IFC: a BMI-only
+        # variant recompiled without the macro would define a dllimport
+        # function, which cl rejects (C2491).
+        self.build_and_check_modules('222 module export macro')
+        self.assertEqual(len(self.bmi_class_dirs('foo')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
+
+    @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
+    def test_msvc_header_unit_transitive_provider(self):
+        # As LinuxlikeTests.test_header_unit_transitive_provider: p, which
+        # imports q, whose interface imports h.h, splits on progfoo's /DFOO
+        # along with q.
+        self.build_and_check_modules('223 header unit transitive provider',
+                                     ninja_args_not_contains=())
+        variants = self.bmi_variant_ids()
+        self.assertEqual(len(variants), 2, variants)
+
     @requires_cpp_module_caps('modules', 'header_units', compiler='msvc')
     def test_msvc_header_unit_rtti_divergence_builds(self):
         # Each declarer of the same header unit gets its own unit BMI when

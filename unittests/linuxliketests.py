@@ -2216,6 +2216,33 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
 
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
+    def test_module_export_macro_shares_provider_bmi(self):
+        # A shared library whose interface picks its export attribute with a
+        # macro only its own compile defines. The consumer must import the
+        # library's own BMI -- one BMI class, no BMI-only variant -- and see the
+        # library's view of the macro, which the fixture checks at run time.
+        self.build_and_check_modules('222 module export macro')
+        self.assertEqual(len(self.bmi_class_dirs('foo')), 1)
+        self.assertEqual(self.bmi_variant_ids(), set())
+
+    @requires_cpp_module_caps('modules', 'header_units',
+                              compiler=('gcc', 'clang'))
+    def test_header_unit_transitive_provider(self):
+        # p declares no header units but imports q, whose interface imports
+        # h.h. progfoo diverges on -DFOO and imports both h.h and p, so p is
+        # keyed by preprocessor flags too: progfoo gets BMI-only variants of
+        # both p and q, built against its own h.h BMI. Without that, progfoo
+        # would read p's own BMI and through it a second h.h BMI.
+        self.build_and_check_modules('223 header unit transitive provider',
+                                     ninja_args_not_contains=())
+        variants = self.bmi_variant_ids()
+        self.assertEqual(len(variants), 2, variants)
+        self.assertTrue(any('p@sta@bmi@' in v for v in variants), variants)
+        self.assertTrue(any('q@sta@bmi@' in v for v in variants), variants)
+        units = self.header_unit_bmis('h.h')
+        self.assertEqual(len(units), 2, f'expected one h.h BMI per header-unit BMI class, got {units}')
+
     @requires_cpp_module_caps('modules', 'header_units',
                               compiler=('gcc', 'clang'))
     def test_header_unit_define_divergence(self):
