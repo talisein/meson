@@ -1142,7 +1142,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         crossfile.flush()
         return crossfile
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_modules_cross_machine(self):
         # Two machines, one build: a module library and its consumer, plus a
         # header unit, on each of the build and host machines -- with the SAME
@@ -1171,7 +1171,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(unit_bmis), 2,
                          f'expected two per-machine header-unit BMIs, got {sorted(unit_bmis)}')
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'import_std', compiler='gcc')
     def test_gcc_modules_cross_machine_import_std(self):
         # `import std` on both machines of a cross build: each machine
         # synthesizes its own std library, at distinct target names, and both
@@ -1286,7 +1286,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             self.build()
             self.run_tests()
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_module_cpp_std_divergence_builds(self):
         # A c++23 consumer of a c++20 module provider resolves through a
         # BMI-only variant in its own dialect class and runs correctly;
@@ -1295,7 +1295,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('145 gcc module cpp_std divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_module_subproject_cpp_std_divergence_builds(self):
         # The same divergence across a subproject boundary: parent c++23
         # consumes a subproject module library built at c++20.
@@ -1312,7 +1312,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_class_dirs('modlib')), 1)
         self.assertEqual(self.bmi_variant_ids(), set())
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly',
+    @requires_cpp_module_caps('modules', 'header_units',
                               compiler=('gcc', 'clang'))
     def test_header_unit_dialect_divergence(self):
         # Three declarers of util.h across a dialect split: prog20/prog20b in
@@ -1337,7 +1337,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly',
+    @requires_cpp_module_caps('modules', 'header_units',
                               compiler=('gcc', 'clang'))
     def test_header_unit_import_inheritance(self):
         # The GCC/Clang side of the fixture cl needed a fix for: neither program
@@ -1361,7 +1361,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_system_header_unit_dialect_divergence(self):
         # The system-unit twin of test_header_unit_dialect_divergence: two
         # classes both import <vector>, a header unit found through GCC's own
@@ -1384,7 +1384,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(cstdint), 1, f'expected one <cstdint> BMI, got {cstdint}')
         self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_pthread_divergence_builds(self):
         # What Stage 1 could only warn about must now work: prog's -pthread
         # class resolves modlib through a BMI-only variant and the program
@@ -1393,7 +1393,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('159 module pthread divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_define_divergence_builds(self):
         # A -D divergence splits the class; with BMI classes it builds and
         # runs through a variant instead of warning. GCC would otherwise
@@ -1403,7 +1403,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.build_and_check_modules('165 module bmi flag divergence')
         self.assertEqual(len(self.bmi_variant_ids()), 1)
 
-    @requires_cpp_module_caps('modules', 'partitions', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', 'partitions', compiler=('gcc', 'clang'))
     def test_module_internal_partitions(self):
         # An internal (implementation) partition: `module pkg:impl;` has no
         # export yet provides an importable BMI, consumed by the primary
@@ -1431,7 +1431,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                 path = os.path.join(root, d, name + suffix)
                 self.assertTrue(os.path.isfile(path), f'missing BMI {path}')
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_class_topology_reconfigure(self):
         # A BMI-affecting option flip transitions the build single-class ->
         # multi-class -> single-class across reconfigures: class subdirs and
@@ -1514,7 +1514,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         with open(os.path.join(self.builddir, 'build.ninja'), encoding='utf-8') as f:
             self.assertEqual(f.read(), public_class)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_eh_rtti_divergence_builds(self):
         # cpp_eh and cpp_rtti each independently survive the class key (neither
         # is in Clang's or GCC's get_bmi_irrelevant_args): prog_eh and prog_rtti
@@ -1525,7 +1525,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(len(self.bmi_class_dirs('modlib')), 3)
         self.assertEqual(len(self.bmi_variant_ids()), 2)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_source_with_spaces(self):
         # A module interface source with a space in its file name: the BMI is
         # named from the module name, but every object-derived path (.ddi,
@@ -1904,7 +1904,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             "'util' (defined in sub1/meson.build), which it links",
             cm.exception.stdout)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_variant_exclusion(self):
         # A private module (priv) alongside a public one (pubmod) that
         # crosses a BMI class boundary: the synthesized BMI-only variant must
@@ -1922,7 +1922,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertFalse(any('priv.' in line for line in variant_lines),
                          'a BMI-only variant must never compile a private interface')
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_variant_own_import(self):
         # api is public but its own interface imports mylib's own private
         # module priv -- legal within mylib itself (same target, same
@@ -1944,7 +1944,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             cm.exception.stdout)
         self.assertNotIn('provided by no target in this build', cm.exception.stdout)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_cpp_private_module_interfaces_variant_dependency_import(self):
         # apia (public, in liba) imports libb's private module privb -- an
         # illegal cross-target private import, exactly like the stage-8
@@ -1994,7 +1994,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
             'private module can only be imported inside the target that provides it.',
             cm.exception.stdout)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_export_dynamic_executable_variant_provider(self):
         # The plugin diverges on cpp_std, so the executable's public module
         # must be recompiled into a BMI-only variant for the plugin's class --
@@ -2015,7 +2015,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertFalse(any('priv.' in line for line in variant_lines),
                          'a BMI-only variant must never compile a private interface')
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler='clang')
+    @requires_cpp_module_caps('modules', compiler='clang')
     def test_clang_bmi_classes(self):
         # The canonical two-class fixture: subproject provider at c++20,
         # consumers at c++23 (variant) and c++20 (reuse).
@@ -2024,7 +2024,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                consumers=('prog23', 'prog20'),
                                expected_targets=('modlib', 'prog20', 'prog23'))
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_bmi_classes(self):
         # The shared two-class fixture under GCC, where each BMI is named by
         # Meson's module mapper; also assert the mapper shape --
@@ -2035,7 +2035,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                expected_targets=('modlib', 'prog20', 'prog23'))
         self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler='clang')
+    @requires_cpp_module_caps('modules', 'import_std', compiler='clang')
     def test_clang_import_std_bmi_classes(self):
         # The fixture's divergent class is c++26. Ask Meson's own
         # version-filtered std table whether this compiler offers it, rather
@@ -2048,7 +2048,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                           progs=('prog23', 'prog26'),
                                           compat_progs=('prog26',))
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'import_std', compiler='gcc')
     def test_gcc_import_std_bmi_classes(self):
         # Two dialects sharing dependency('std') under GCC. std.compat lands
         # in every class dir: GCC interface compiles write their BMI eagerly
@@ -2065,7 +2065,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         one default, one -stdlib=libc++ -- probe genuinely different standard
         libraries. Uses the production probe directly (there is no libc++
         capability token)."""
-        cpp = require_cpp_module_caps(self, 'modules', 'import_std', 'bmionly',
+        cpp = require_cpp_module_caps(self, 'modules', 'import_std',
                                       compiler='clang')
         default_std = cpp.get_std_module_sources()
         libcxx_std = cpp.get_std_module_sources(('-stdlib=libc++',))
@@ -2132,7 +2132,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # BMI variant, tying the failure to the standard-library mix.
         self.assertIn('__meson_cxx_std_', cm.exception.output)
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', compiler='gcc')
     def test_gcc_bmi_class_mapper_incrementality(self):
         # Editing one interface of a multi-class provider must recompile
         # only that TU (and its BMI variant): the collate reruns and
@@ -2181,7 +2181,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(out.count('Compiling C++ object'), 3, out)
         self.assertBuildIsNoop()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='clang')
+    @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_header_unit_bmi_classes(self):
         # Three declarers of util.h in two dialects: the same-class pair must
         # share one unit BMI (reuse, not a redundant edge), the divergent
@@ -2206,7 +2206,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertEqual(self.header_unit_digests('util.h', edges='@bmi@'), per_prog['prog23'],
                          "modlib's variant must import the divergent class's unit BMI")
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly',
+    @requires_cpp_module_caps('modules', 'header_units',
                               compiler=('gcc', 'clang'))
     def test_header_unit_define_divergence(self):
         # Three declarers of util.h, two in one BMI class and progfoo diverging
@@ -2237,7 +2237,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         if self.host_cpp_compiler().cpp_module_family() == 'gcc':
             self.check_gcc_module_mappers()
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly',
+    @requires_cpp_module_caps('modules', 'header_units',
                               compiler=('gcc', 'clang'))
     def test_header_unit_eh_rtti_divergence_builds(self):
         # Three declarers of the same header unit: prog_eh and prog_rtti each
@@ -2358,7 +2358,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                   expect_in_rebuild=('Building C++ header unit',
                                                      'Linking target prog'))
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='gcc')
+    @requires_cpp_module_caps('modules', 'header_units', compiler='gcc')
     def test_gcc_stl_header_units(self):
         # A real standard-library header unit (<vector> resolves to an
         # absolute system path) in a two-class build (progfoo's -DFOO splits
@@ -2480,7 +2480,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
                                      setup_not_contains=['Cannot resolve'],
                                      ninja_args_not_contains=())
 
-    @requires_cpp_module_caps('modules', 'header_units', 'bmionly', compiler='clang')
+    @requires_cpp_module_caps('modules', 'header_units', compiler='clang')
     def test_clang_stl_header_units(self):
         # Same fixture on clang: the unit BMI is built from the absolute
         # resolved system header and named on consumer command lines.
@@ -2605,7 +2605,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_both_libraries_module_compiled_twice(self):
         self.check_both_libraries_module_compiled_twice()
 
-    @requires_cpp_module_caps('modules', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_module_edges_use_response_files(self):
         self.check_module_edges_use_response_files()
 
@@ -2613,7 +2613,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     def test_module_moves_between_providers(self):
         self.check_module_moves_between_providers()
 
-    @requires_cpp_module_caps('modules', 'import_std', 'bmionly', compiler=('gcc', 'clang'))
+    @requires_cpp_module_caps('modules', 'import_std', compiler=('gcc', 'clang'))
     def test_import_std_reuse(self):
         self.check_import_std_reuse()
 

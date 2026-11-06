@@ -34,14 +34,6 @@ Token vocabulary (the API for the C++ module test series):
     (``get_cpp_modules_args()``). Probed by actually compiling, not by
     version: in practice GCC qualifies, Clang does not (an interface unit
     needs ``-x c++-module`` there, which the regex path never passes).
-``bmionly``
-    The compiler can emit a BMI with no object file (GCC ``-fmodule-only``,
-    Clang ``--precompile``, cl ``/ifcOnly``). Probed by compiling a trivial
-    interface unit and checking a BMI appears and no object does. The
-    prerequisite for BMI-only variants, so for any build whose targets
-    diverge in BMI-affecting flags: Meson gives each BMI class its own
-    subdirectory of a provider's BMI directory and recompiles shared module
-    providers into it.
 ``ixx_as_cpp``
     The driver compiles a ``.ixx`` source as C++ from its extension alone, with
     no language flag -- what a target that opts a ``.ixx`` out of module
@@ -78,12 +70,11 @@ if T.TYPE_CHECKING:
 
 CPP_MODULE_CAPS = frozenset({
     'modules', 'partitions', 'header_units', 'module_interfaces',
-    'import_std', 'regex_scanner', 'bmionly', 'ixx_as_cpp',
+    'import_std', 'regex_scanner', 'ixx_as_cpp',
 })
 
 _caps_cache: T.Dict[T.Tuple[str, str], T.FrozenSet[str]] = {}
 _regex_flag_cache: T.Dict[T.Tuple[str, str], T.Optional[str]] = {}
-_bmionly_cache: T.Dict[T.Tuple[str, str], bool] = {}
 _ixx_as_cpp_cache: T.Dict[T.Tuple[str, str], bool] = {}
 
 
@@ -136,53 +127,6 @@ def regex_scanner_flag(cpp: CPPCompiler) -> T.Optional[str]:
     return flag
 
 
-def _bmionly_probe_builds(cpp: CPPCompiler) -> bool:
-    """Compile a trivial interface unit in the compiler's BMI-only mode and
-    check that a BMI appears and no object does (a failing rc, a missing BMI
-    or a stray object all mean the mode is unusable)."""
-    family = cpp.cpp_module_family()
-    if family == 'msvc':
-        src = 'mod.ixx'
-        attempts = [['/nologo', '/std:c++20', '/c', '/interface', '/ifcOnly', src]]
-    elif family == 'clang':
-        src = 'mod.cppm'
-        attempts = [['-std=c++20', '--precompile', src, '-o', 'mod.pcm']]
-    else:
-        src = 'mod.cpp'
-        attempts = [[flag, '-std=c++20', '-fmodule-only', '-c', src]
-                    for flag in cpp.get_cpp_modules_args()]
-    exelist = cpp.get_exelist(ccache=False)
-    for args in attempts:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, src), 'w', encoding='utf-8') as f:
-                f.write('export module bmiprobe;\nexport int probefunc() { return 42; }\n')
-            try:
-                p = subprocess.run(exelist + args, cwd=tmpdir,
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=60)
-            except (OSError, subprocess.TimeoutExpired):
-                return False
-            if p.returncode != 0:
-                continue
-            produced = [name for root, _, files in os.walk(tmpdir) for name in files]
-            if any(name.endswith(cpp.get_module_bmi_suffix()) for name in produced) \
-                    and not any(name.endswith(('.o', '.obj')) for name in produced):
-                return True
-    return False
-
-
-def bmionly_works(cpp: CPPCompiler) -> bool:
-    """Whether this compiler can emit a BMI without an object file."""
-    key = (cpp.get_id(), cpp.version)
-    try:
-        return _bmionly_cache[key]
-    except KeyError:
-        pass
-    result = _bmionly_probe_builds(cpp)
-    _bmionly_cache[key] = result
-    return result
-
-
 def _ixx_as_cpp_probe_builds(cpp: CPPCompiler) -> bool:
     """Compile a trivial non-module .ixx with no language flag and check an
     object appears. The rc alone is not enough: a driver that does not know
@@ -219,8 +163,8 @@ def ixx_as_cpp_works(cpp: CPPCompiler) -> bool:
 
 def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
     """The capability tokens of the given compiler; see the module docstring
-    for the vocabulary. Memoized per (id, version); import_std, regex_scanner,
-    bmionly and ixx_as_cpp probe by invoking the compiler."""
+    for the vocabulary. Memoized per (id, version); import_std, regex_scanner
+    and ixx_as_cpp probe by invoking the compiler."""
     key = (cpp.get_id(), cpp.version)
     try:
         return _caps_cache[key]
@@ -239,8 +183,6 @@ def cpp_module_caps(cpp: CPPCompiler) -> T.FrozenSet[str]:
                 caps.add('import_std')
     if regex_scanner_flag(cpp) is not None:
         caps.add('regex_scanner')
-    if 'modules' in caps and bmionly_works(cpp):
-        caps.add('bmionly')
     if ixx_as_cpp_works(cpp):
         caps.add('ixx_as_cpp')
     result = frozenset(caps)
