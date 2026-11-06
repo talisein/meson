@@ -1822,7 +1822,9 @@ class NinjaBackend(backends.Backend):
         private_map_file = self.get_private_modules_file_for(target)
         # A target's own public provides are named in its public BMI directory
         # (BMIDIR): a private provide is redirected to --private-bmi-dir in
-        # DEPARGS instead (_module_collate_depargs), never here.
+        # DEPARGS instead (_module_collate_depargs), never here. A target that
+        # publishes nothing still gets the path, never created: with nothing
+        # to name, the collate's prune of a missing directory is a no-op.
         self._add_module_collate_edge(
             cpp, [dyndep_file, provmap_file, private_map_file], ddis,
             dyndep_file, provmap_file, self._module_bmi_dir(target, self._bmi_class_key_of(target)),
@@ -2124,7 +2126,7 @@ class NinjaBackend(backends.Backend):
         # provider's own file rather than anything class-routed.
         providers = self._module_providers(provider, class_key)
         dep_provmaps = [p.provmap for p in providers]
-        dep_private_maps = sorted({self.private_map_ref_for(p.target) for p in providers})
+        dep_private_maps = sorted(self.private_map_ref_for(p.target) for p in providers)
         # The provider's own private-modules.json: a recompiled public
         # interface may legally import the provider's own private module
         # (same target, same unkeyed-by-class private dir). Always exists --
@@ -2568,8 +2570,9 @@ class NinjaBackend(backends.Backend):
         dirs = [private_dir] if private_dir is not None else []
         if self._has_public_bmi_dir(target):
             dirs.append(self._module_bmi_dir(target, class_key))
+        # Each directory belongs to a distinct target, so none repeats.
         dirs.extend(p.bmi_dir for p in self._module_providers(target, class_key))
-        return list(dict.fromkeys(dirs))
+        return dirs
 
     def _module_providers(self, target: build.BuildTarget,
                           class_key: T.Tuple[str, ...]) -> T.List[ModuleProvider]:

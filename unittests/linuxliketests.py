@@ -1480,13 +1480,14 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         # it. public -> private -> public: each phase builds, runs and settles
         # to a no-op, and the round trip leaves the generated build
         # byte-identical. mylib's published module set and its @bmi-private dir
-        # track the flip both ways; the stale artifacts the other privacy left
-        # behind (a withheld module's shared-cache BMI, a published module's
-        # private dir) stay inert, like the harvest cache under any graph
-        # mutation.
+        # track the flip both ways. Withholding secret prunes its BMI from
+        # mylib's public directory, so no consumer could find it there; once
+        # it is public again, the private directory it leaves behind is on no
+        # compile's search path.
         def assert_public():
             self.assertIn('secret', self.provided_modules('mylib'))
             self.assertEqual(self.private_bmi_dirs(), set())
+            self.assertTrue(os.path.isfile(self.bmi_path('secret', target='mylib')))
 
         testdir = os.path.join(self.unit_test_dir, '205 private module reconfigure')
         self.init(testdir, extra_args=['-Dprivacy=public'])
@@ -1503,6 +1504,7 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
         self.assertBuildIsNoop()
         self.assertNotIn('secret', self.provided_modules('mylib'))
         self.assertEqual(len(self.private_bmi_dirs()), 1)
+        self.assertEqual(self.public_bmi_matches('secret'), [])
 
         self.setconf('-Dprivacy=public')
         self.build(override_envvars=self.NO_CCACHE)
@@ -1566,8 +1568,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
     @requires_cpp_module_caps('modules', compiler=('gcc', 'clang'))
     def test_private_executable_modules(self):
         # Nothing can ever link an executable, so its modules are private to
-        # it: two executables exporting the same module name must not
-        # collide over one shared-cache address.
+        # it: two executables exporting the same module name each keep
+        # theirs in their own private directory.
         self.build_and_check_modules('185 private executable modules')
         self.assertEqual(len(self.private_bmi_dirs()), 2)
 
@@ -2024,8 +2026,8 @@ class LinuxlikeTests(CppModulesTestMixin, BasePlatformTests):
 
     @requires_cpp_module_caps('modules', 'bmi_classes', compiler='gcc')
     def test_gcc_bmi_classes(self):
-        # The shared two-class fixture under GCC, where the class cache
-        # rides Meson's module mapper; also assert the mapper shape --
+        # The shared two-class fixture under GCC, where each BMI is named by
+        # Meson's module mapper; also assert the mapper shape --
         # compile edges name their own object's table, scans none.
         self.check_bmi_classes('166 bmi classes', module_name='modlib', provider='modlib',
                                provider_lib='libmodlib.a',

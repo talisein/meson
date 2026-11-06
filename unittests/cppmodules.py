@@ -41,10 +41,11 @@ Token vocabulary (the API for the C++ module test series):
     prerequisite for BMI-only variants.
 ``bmi_classes``
     Divergent BMI equivalence classes work rather than warn: Meson gives
-    each class its own cache subdirectory and synthesizes BMI-only variants
-    of shared module providers (``Compiler.supports_bmi_classes()``, plus
-    the ``bmionly`` probe). Clang, MSVC from cl 19.32, and GCC (from 14,
-    the P1689 floor; the class cache rides Meson's module mapper there).
+    each BMI class its own subdirectory of a provider's BMI directory and
+    synthesizes BMI-only variants of shared module providers
+    (``Compiler.supports_bmi_classes()``, plus the ``bmionly`` probe). Clang,
+    MSVC from cl 19.32, and GCC (from 14, the P1689 floor; its BMIs are named
+    by Meson's module mapper there).
 ``ixx_as_cpp``
     The driver compiles a ``.ixx`` source as C++ from its extension alone, with
     no language flag -- what a target that opts a ``.ixx`` out of module

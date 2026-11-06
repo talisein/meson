@@ -1883,7 +1883,7 @@ class Compiler(HoldableObject, metaclass=SimpleABC):
 
     def supports_bmi_classes(self) -> bool:
         """Whether divergent BMI equivalence classes are made to work
-        (per-class cache subdirectories plus BMI-only provider variants, and
+        (per-class BMI subdirectories plus BMI-only provider variants, and
         one header-unit BMI per class) rather than only warned about at
         generate time. A per-class unit needs a consumer pointed at one BMI
         among several: by explicit path on the command line

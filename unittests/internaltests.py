@@ -1731,7 +1731,7 @@ Thread model: posix'''), '21.9.0')
         # With --mapper-suffix the collate writes one mapper table per TU (at
         # the CWD-relative primary-output, like the compiler's own BMI paths),
         # naming exactly its provides and direct imports: provides and
-        # named-module requires at the class-cache path, header-unit requires
+        # named-module requires at their BMI paths, header-unit requires
         # by real path at the BMI the units manifest names. A TU with no
         # module traffic gets an empty table, and no table is written at all
         # without the flag.
@@ -1833,10 +1833,8 @@ Thread model: posix'''), '21.9.0')
 
     def test_depaccumulate_p1689_provmap_names_bmi(self):
         # A published provmap names each public provide's ordering handle and
-        # its BMI. A consumer's GCC table takes a dependency's BMI from there,
-        # so a map in the old handle-only shape still orders a build that
-        # writes no tables, but a table needing its BMI is a clear error
-        # rather than a guess at the path.
+        # its BMI, which a consumer's GCC table takes a dependency's BMI from
+        # (test_depaccumulate_p1689_mapper_stamp_mode pins the consumer side).
         from mesonbuild.scripts.depaccumulate import run_p1689
         olddir = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
@@ -1852,21 +1850,6 @@ Thread model: posix'''), '21.9.0')
                 with open('a-pm.json', encoding='utf-8') as f:
                     self.assertEqual(json.load(f),
                                      {'A': {'dep': 'a-bmis/A.gcm', 'bmi': 'a-bmis/A.gcm'}})
-
-                with open('main.o.ddi', 'w', encoding='utf-8') as f:
-                    json.dump({'rules': [{'primary-output': 'main.o',
-                                          'requires': [{'logical-name': 'A'}]}]}, f)
-                with open('old-pm.json', 'w', encoding='utf-8') as f:
-                    json.dump({'A': 'a-bmis/A.gcm'}, f)
-                consume = ['--dyndep', 'main.dd', '--provmap', 'main-pm.json',
-                           '--bmi-dir', 'main-bmis', '--bmi-suffix', '.gcm',
-                           '--dep-provmap', 'old-pm.json', 'main.o.ddi']
-                self.assertEqual(run_p1689(consume), 0)
-                with open('main.dd', encoding='utf-8') as f:
-                    self.assertIn('a-bmis/A.gcm', f.read())
-                tables = ['--mapper-suffix', '.mapper.json', '--header-unit-manifest', 'units.json']
-                with self.assertRaisesRegex(MesonException, 'written by an older Meson'):
-                    run_p1689(consume[:-1] + tables + ['main.o.ddi'])
             finally:
                 os.chdir(olddir)
 

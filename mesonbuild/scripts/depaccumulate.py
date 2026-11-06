@@ -471,8 +471,8 @@ def run_p1689(argv: T.List[str]) -> int:
                         help='BMIs reach their BMI directory via harvest edges (Clang\'s '
                              'own pipeline, and BMI-only variants on any compiler): '
                              'map a provided module to its harvest stamp '
-                             '(<primary-output> + this suffix) instead of the cache BMI '
-                             'path, and declare no implicit outputs on object edges.')
+                             '(<primary-output> + this suffix) instead of the published '
+                             'BMI path, and declare no implicit outputs on object edges.')
     parser.add_argument('--interface-source', action='append', default=[],
                         dest='interface_sources',
                         help='A source compiled as an interface unit despite lacking a '
@@ -627,7 +627,7 @@ def run_p1689(argv: T.List[str]) -> int:
                         '.ixx, or list it in the target\'s cpp_module_interfaces '
                         '(cpp_modules: true only covers consumers).')
                 # Consumers order against the provider's harvest stamp; the
-                # cache BMI itself stays out of Ninja's graph (its name is
+                # published BMI itself stays out of Ninja's graph (its name is
                 # only known at build time). The harvest destination for a
                 # private interface is already resolved per-source by the
                 # backend, so the stamp alone is enough here regardless.
@@ -687,16 +687,13 @@ def run_p1689(argv: T.List[str]) -> int:
     # name -> the BMI a linked dependency publishes it at, for the GCC
     # tables: the provider's collate is the only one that knows where its
     # BMIs live, so a consumer never derives the path from its own
-    # --bmi-dir. None for a map written in the old, handle-only shape.
-    dep_bmis: T.Dict[str, T.Optional[str]] = {}
+    # --bmi-dir.
+    dep_bmis: T.Dict[str, str] = {}
     for pmfile in args.dep_provmap:
         with open(pmfile, encoding='utf-8') as f:
-            imported: T.Dict[str, T.Union[str, T.Dict[str, str]]] = json.load(f)
+            imported: T.Dict[str, T.Dict[str, str]] = json.load(f)
         for name, entry in imported.items():
-            if isinstance(entry, str):
-                modfile, dep_bmi = entry, None
-            else:
-                modfile, dep_bmi = entry['dep'], entry['bmi']
+            modfile, dep_bmi = entry['dep'], entry['bmi']
             # Two targets providing the same module name into one link is
             # IFNDR in GCC (the name is the linkage discriminator). A private
             # module never reaches here: it never enters a dependency's
@@ -738,8 +735,8 @@ def run_p1689(argv: T.List[str]) -> int:
                 name = prov['logical-name']
                 if args.stamp_suffix is not None:
                     # The object edge's BMI side-output is declared statically
-                    # by the backend; the cache copy belongs to the harvest
-                    # edge. The mapper (a BMI-only variant here: GCC is the
+                    # by the backend; the published copy belongs to the
+                    # harvest edge. The mapper (a BMI-only variant here: GCC is the
                     # only compiler taking both flags) sends the export to
                     # that declared output, the rule's primary-output.
                     table_modules[name] = obj
@@ -825,14 +822,7 @@ def run_p1689(argv: T.List[str]) -> int:
                 elif name in provided:
                     table_modules[name] = module_to_filename(name, args.bmi_dir, args.bmi_suffix)
                 else:
-                    dep_bmi = dep_bmis[name]
-                    if dep_bmi is not None:
-                        table_modules[name] = dep_bmi
-                    elif args.mapper_suffix is not None:
-                        raise MesonException(
-                            f'{provider_of[name]} names no BMI path for module "{name}": '
-                            'it was written by an older Meson. Rebuild the target that '
-                            'provides it and build again.')
+                    table_modules[name] = dep_bmis[name]
                 reqs.append(modfile)
             out = formatter(outs)
             ins = formatter(reqs)
